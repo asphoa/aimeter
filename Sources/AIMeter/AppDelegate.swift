@@ -248,7 +248,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func doRefresh() {
         lastRefresh = nil
         lastFetched.removeAll()
-        refresh(manual: true)
+        // "Only when I ask" means this button too: a source set to manual has
+        // its own, and refreshing everything should not quietly launch a CLI
+        // and sit there for half a minute.
+        let scheduled = providers.filter { cfg.interval($0.id) > 0 }
+        refresh(scheduled, manual: true)
     }
 
     @objc private func toggleLogin() {

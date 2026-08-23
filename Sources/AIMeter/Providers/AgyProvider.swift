@@ -69,6 +69,9 @@ final class AgyProvider: Provider, @unchecked Sendable {
             }
         }
         guard !r.gauges.isEmpty else { return .failed(id, title, account, L.t("a.tui.fail")) }
+        // Nothing refreshes this on its own, so it must carry its age: an hour
+        // later it is still the last thing anyone measured, not the current one.
+        r.snapshotAt = Date()
         r.state = worstState(r.gauges)
         return r
     }
