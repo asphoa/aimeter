@@ -10,7 +10,7 @@ final class OpenRouterProvider: Provider, @unchecked Sendable {
 
     init(cfg: Config) { self.cfg = cfg }
 
-    func fetchAll() async -> [Reading] {
+    func fetchAll(manual: Bool) async -> [Reading] {
         let accounts = cfg.accounts(id, fallback: Discovery.openrouter())
         guard !accounts.isEmpty else { return [.off(id, title, nil, L.t("o.nokeys"))] }
 

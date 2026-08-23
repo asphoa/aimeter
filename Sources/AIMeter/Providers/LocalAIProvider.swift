@@ -8,7 +8,7 @@ final class LocalAIProvider: Provider, @unchecked Sendable {
     let id = "local"
     var title: String { L.t("p.local") }
 
-    func fetchAll() async -> [Reading] { [await fetch()] }
+    func fetchAll(manual: Bool) async -> [Reading] { [await fetch()] }
 
     private func fetch() async -> Reading {
         var r = Reading(id: id, title: title)

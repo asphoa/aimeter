@@ -154,7 +154,8 @@ final class AccountsStore: ObservableObject {
     nonisolated static func probe(provider: String, spec: AccountSpec) async -> Reading? {
         var one = Config()
         one.accounts = [provider: [spec]]
-        return await buildProviders(one).first { $0.id == provider }?.fetchAll().first
+        // A person pressed Test, so this counts as a manual check.
+        return await buildProviders(one).first { $0.id == provider }?.fetchAll(manual: true).first
     }
 
     nonisolated static func summarise(_ r: Reading?) -> String {
@@ -242,16 +243,36 @@ struct AccountsView: View {
         let all = ProviderKind.all.map { ($0.id, $0.title) } + [("local", L.t("p.local"))]
         return VStack(alignment: .leading, spacing: 6) {
             Text(L.t("w.sources")).font(.headline)
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading),
-                                     count: 4), alignment: .leading, spacing: 4) {
-                ForEach(all, id: \.0) { id, title in
+            Text(L.t("w.intervalhint"))
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(all, id: \.0) { id, title in
+                HStack(spacing: 8) {
                     Toggle(title, isOn: Binding(
                         get: { store.cfg.isEnabled(id) },
                         set: { store.cfg.enabled[id] = $0; store.persist() }))
                         .toggleStyle(.checkbox)
+                        .frame(width: 170, alignment: .leading)
+                    Text(L.t("w.checkevery")).font(.callout).foregroundStyle(.secondary)
+                    Picker("", selection: Binding(
+                        get: { store.cfg.interval(id) },
+                        set: { store.cfg.intervals[id] = $0; store.persist() })) {
+                            ForEach([30, 60, 300, 900, 3600, 0], id: \.self) { secs in
+                                Text(Self.intervalLabel(secs)).tag(secs)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 150)
+                        .disabled(!store.cfg.isEnabled(id))
                 }
             }
         }
+    }
+
+    static func intervalLabel(_ secs: Int) -> String {
+        if secs == 0 { return L.t("m.manualonly") }
+        if secs < 60 { return L.t("m.seconds", secs) }
+        return L.t("m.minutes", secs / 60)
     }
 
     @ViewBuilder

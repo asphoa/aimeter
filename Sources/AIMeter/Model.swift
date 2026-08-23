@@ -32,7 +32,16 @@ protocol Provider: AnyObject, Sendable {
     var id: String { get }
     var title: String { get }
     /// One reading per account. Providers with a single account return one.
-    func fetchAll() async -> [Reading]
+    ///
+    /// `manual` is true only when a person asked for this refresh. A provider
+    /// whose only accurate source is a request it should not make on a timer
+    /// may make it here and nowhere else - binding the call to a human action
+    /// by construction, rather than to a setting someone can forget.
+    func fetchAll(manual: Bool) async -> [Reading]
+}
+
+extension Provider {
+    func fetchAll() async -> [Reading] { await fetchAll(manual: false) }
 }
 
 /// Races an async read against a deadline so one stuck endpoint (or a keychain

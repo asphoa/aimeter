@@ -11,7 +11,7 @@ final class DeepSeekProvider: Provider, @unchecked Sendable {
 
     init(cfg: Config) { self.cfg = cfg }
 
-    func fetchAll() async -> [Reading] {
+    func fetchAll(manual: Bool) async -> [Reading] {
         let accounts = cfg.accounts(id, fallback: Discovery.deepseek())
         guard !accounts.isEmpty else { return [.off(id, title, nil, L.t("d.nokey"))] }
         var out: [Reading] = []

@@ -125,11 +125,20 @@ struct Config: Codable {
     var refreshSeconds: Int = 60
     /// Provider id -> shown or not. Missing key means shown.
     var enabled: [String: Bool] = [:]
-    /// Off by default on purpose: Antigravity's quota endpoint is an internal
-    /// Google API. Polling it - especially across several accounts - is exactly
-    /// the automated-traffic shape that gets accounts flagged. When false we
-    /// only read what each account's own CLI already logged.
-    var agyAllowDirectQuotaCall: Bool = false
+    /// Off, and measured to be pointless as well as risky: the credential the
+    /// CLI keeps is not an OAuth access token this endpoint accepts (tested
+    /// 2026-08-23, HTTP 401 UNAUTHENTICATED), so getting a number would mean
+    /// replicating the vendor client's own handshake. The code path is kept in
+    /// case that ever changes; it fires only during a manual check, never on a
+    /// timer.
+    var agyDirectQuotaOnManualCheck: Bool = false
+    /// Per-provider check interval in seconds. 0 means "only when I ask".
+    /// A missing entry falls back to `refreshSeconds`.
+    ///
+    /// Antigravity starts on manual: scheduled checks can only ever read its
+    /// log, which never contains a number, so polling it buys nothing - and the
+    /// request that does return a number is one to make by hand.
+    var intervals: [String: Int] = ["agy": 0]
     var claudeProbeModel: String = "claude-haiku-4-5-20251001"
     /// providerId -> accounts. Empty means "autodiscover on next launch".
     var accounts: [String: [AccountSpec]] = [:]
@@ -145,8 +154,9 @@ struct Config: Codable {
         menuBar = (try? c.decode(MenuBarConfig.self, forKey: .menuBar)) ?? def.menuBar
         refreshSeconds = (try? c.decode(Int.self, forKey: .refreshSeconds)) ?? def.refreshSeconds
         enabled = (try? c.decode([String: Bool].self, forKey: .enabled)) ?? def.enabled
-        agyAllowDirectQuotaCall = (try? c.decode(Bool.self, forKey: .agyAllowDirectQuotaCall))
-            ?? def.agyAllowDirectQuotaCall
+        agyDirectQuotaOnManualCheck = (try? c.decode(Bool.self, forKey: .agyDirectQuotaOnManualCheck))
+            ?? def.agyDirectQuotaOnManualCheck
+        intervals = (try? c.decode([String: Int].self, forKey: .intervals)) ?? def.intervals
         claudeProbeModel = (try? c.decode(String.self, forKey: .claudeProbeModel)) ?? def.claudeProbeModel
         accounts = (try? c.decode([String: [AccountSpec]].self, forKey: .accounts)) ?? def.accounts
     }
@@ -178,6 +188,9 @@ struct Config: Codable {
     }
 
     func isEnabled(_ id: String) -> Bool { enabled[id] ?? true }
+
+    /// How often this provider is checked, in seconds. 0 = only on request.
+    func interval(_ providerID: String) -> Int { intervals[providerID] ?? refreshSeconds }
 
     func accounts(_ providerID: String, fallback: [AccountSpec]) -> [AccountSpec] {
         let list = accounts[providerID] ?? fallback

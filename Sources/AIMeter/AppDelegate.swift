@@ -80,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var providers: [Provider] = []
     private var readings: [String: [Reading]] = [:]
     private var lastRefresh: Date?
+    private var lastFetched: [String: Date] = [:]
     private var timer: Timer?
     private var refreshing = false
 
@@ -114,27 +115,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
     }
 
+    /// One short tick drives every provider; each is fetched only when its own
+    /// interval has elapsed, so a service set to a slow cadence - or to manual -
+    /// is not dragged along by a fast one.
     private func restartTimer() {
         timer?.invalidate()
-        guard cfg.refreshSeconds > 0 else { timer = nil; return }
-        timer = Timer.scheduledTimer(withTimeInterval: Double(max(15, cfg.refreshSeconds)),
-                                     repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        let anyScheduled = providers.contains { cfg.interval($0.id) > 0 }
+        guard anyScheduled else { timer = nil; return }
+        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshDue() }
         }
+    }
+
+    /// Fetches only the providers whose interval has come round.
+    private func refreshDue() {
+        let now = Date()
+        let due = providers.filter { p in
+            let secs = cfg.interval(p.id)
+            guard secs > 0 else { return false }
+            guard let last = lastFetched[p.id] else { return true }
+            return now.timeIntervalSince(last) >= Double(secs)
+        }
+        guard !due.isEmpty else { return }
+        refresh(due, manual: false)
     }
 
     // MARK: - fetching
 
-    func refresh() {
+    func refresh(_ list: [Provider]? = nil, manual: Bool = false) {
         guard !refreshing else { return }
         refreshing = true
-        let list = providers
+        let list = list ?? providers
         Task { @MainActor in
             await withTaskGroup(of: (String, [Reading]).self) { group in
                 for p in list {
-                    group.addTask { (p.id, await p.fetchAll()) }
+                    group.addTask { (p.id, await p.fetchAll(manual: manual)) }
                 }
-                for await (pid, rs) in group { self.readings[pid] = rs }
+                for await (pid, rs) in group {
+                    self.readings[pid] = rs
+                    self.lastFetched[pid] = Date()
+                }
             }
             ReadingsBox.shared.current = self.readings
             self.lastRefresh = Date()
@@ -147,8 +167,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Refresh on open, but never more than once every 15s - the Claude row
     /// costs one API request per refresh, per account.
     func menuWillOpen(_ menu: NSMenu) {
-        if let last = lastRefresh, Date().timeIntervalSince(last) < 15 { return }
-        refresh()
+        // Opening the menu is not a request to check anything - it only lets
+        // through whatever was already due.
+        refreshDue()
     }
 
     // MARK: - rendering
@@ -190,7 +211,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let stamp = lastRefresh.map { d -> String in
             let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f.string(from: d)
         } ?? "—"
-        menu.addItem(item(Panel.info(cfg.refreshSeconds > 0
+        let anyScheduled = providers.contains { cfg.interval($0.id) > 0 }
+        menu.addItem(item(Panel.info(anyScheduled
                                         ? L.t("m.updated", stamp, cfg.refreshSeconds)
                                         : L.t("m.onopen"), error: false)))
 
@@ -216,7 +238,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - actions
 
-    @objc private func doRefresh() { lastRefresh = nil; refresh() }
+    /// The one path a person can trigger, and therefore the only one allowed to
+    /// make a request a timer must not.
+    @objc private func doRefresh() {
+        lastRefresh = nil
+        lastFetched.removeAll()
+        refresh(manual: true)
+    }
 
     @objc private func toggleLogin() {
         do {
@@ -305,6 +333,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func pickInterval(_ sender: NSMenuItem) {
         guard let secs = sender.representedObject as? Int else { return }
+        // The menu sets the default; per-provider overrides live in the
+        // Accounts window and are left alone here.
         cfg.refreshSeconds = secs
         cfg.save()
         restartTimer()

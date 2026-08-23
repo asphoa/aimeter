@@ -14,7 +14,7 @@ final class GenericProvider: Provider, @unchecked Sendable {
 
     init(cfg: Config) { self.cfg = cfg }
 
-    func fetchAll() async -> [Reading] {
+    func fetchAll(manual: Bool) async -> [Reading] {
         let accounts = cfg.accounts(id, fallback: [])
         guard !accounts.isEmpty else { return [] }
         var out: [Reading] = []

@@ -55,7 +55,7 @@ ROWS = [
     ('a.403b', 'agy cannot read its own quota either — not a fault of this app', 'agy 自己也讀不到額度，不是本程式的問題', 'agy ne peut pas lire son propre quota non plus — ce n’est pas un défaut de cette app', 'agy kann sein eigenes Kontingent ebenfalls nicht lesen — kein Fehler dieser App'),
     ('a.failed', 'Quota request failed (see cli.log)', '配額查詢失敗（見 cli.log）', 'Échec de la requête de quota (voir cli.log)', 'Kontingentabfrage fehlgeschlagen (siehe cli.log)'),
     ('a.silent', 'Last check raised no error, but the CLI logged no number', '上次查詢無錯誤，但 CLI 沒把數字寫進日誌', 'La dernière vérification n’a pas échoué, mais la CLI n’a consigné aucun chiffre', 'Letzte Prüfung ohne Fehler, aber die CLI hat keine Zahl protokolliert'),
-    ('a.silent2', 'Enable direct quota lookup to see the figure (ban risk — see README)', '要看實際數字得開直連配額查詢（有封號風險，見 README）', 'Activez la requête directe pour voir le chiffre (risque de bannissement — voir README)', 'Direktabfrage aktivieren, um die Zahl zu sehen (Sperr-Risiko — siehe README)'),
+    ('a.silent2', 'The quota is visible only inside the agy TUI — no interface exposes it', '配額只在 agy 的 TUI 面板裏看得到，沒有任何介面提供它', 'Le quota n’est visible que dans l’interface agy — aucune API ne l’expose', 'Das Kontingent ist nur in der agy-Oberfläche sichtbar — keine Schnittstelle liefert es'),
     ('a.direct.fail', 'Direct quota endpoint failed: %@', '直連配額端點失敗：%@', 'Échec du point de terminaison de quota : %@', 'Direkter Kontingent-Endpunkt fehlgeschlagen: %@'),
     ('a.unknown', 'Endpoint responded but the fields were not recognised', '端點有回應但欄位不認得', 'Le point de terminaison a répondu, champs non reconnus', 'Endpunkt antwortete, Felder nicht erkannt'),
     ('a.remaining', 'Remaining: %@', '剩餘：%@', 'Restant : %@', 'Verbleibend: %@'),
@@ -146,6 +146,9 @@ ROWS = [
     ('w.worstkey', 'worst key', '最吃緊的金鑰', 'clé la plus sollicitée', 'kritischster Schlüssel'),
     ('w.sources', 'Sources shown in the panel', '面板顯示哪些來源', 'Sources affichées dans le panneau', 'Im Panel angezeigte Quellen'),
     ('w.getkey', 'Get a key at %@', '到 %@ 取得金鑰', 'Obtenir une clé sur %@', 'Schlüssel unter %@ holen'),
+    ('w.checkevery', 'Check every', '檢測間隔', 'Vérifier toutes les', 'Prüfintervall'),
+    ('m.manualonly', 'Manual only', '只手動檢查', 'Manuel seulement', 'Nur manuell'),
+    ('w.intervalhint', 'Services you rarely need can be set to manual, so nothing is polled on your behalf.', '不常看的服務可以設成只手動檢查，這樣不會有任何背景輪詢。', 'Les services rarement consultés peuvent passer en manuel : aucune interrogation en arrière-plan.', 'Selten benötigte Dienste können auf manuell gestellt werden — dann wird nichts im Hintergrund abgefragt.'),
 ]
 
 HEADER = '''import Foundation

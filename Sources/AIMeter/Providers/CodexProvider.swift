@@ -14,7 +14,7 @@ final class CodexProvider: Provider, @unchecked Sendable {
 
     init(cfg: Config) { self.cfg = cfg }
 
-    func fetchAll() async -> [Reading] {
+    func fetchAll(manual: Bool) async -> [Reading] {
         cfg.accounts(id, fallback: Discovery.codex()).map { read($0) }
     }
 

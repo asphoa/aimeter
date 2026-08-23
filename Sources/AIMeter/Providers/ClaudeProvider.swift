@@ -14,7 +14,7 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
 
     init(cfg: Config) { self.cfg = cfg }
 
-    func fetchAll() async -> [Reading] {
+    func fetchAll(manual: Bool) async -> [Reading] {
         let accounts = cfg.accounts(id, fallback: Discovery.claude())
         var out: [Reading] = []
         for a in accounts {

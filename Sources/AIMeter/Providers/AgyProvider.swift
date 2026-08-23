@@ -16,13 +16,18 @@ final class AgyProvider: Provider, @unchecked Sendable {
 
     init(cfg: Config) { self.cfg = cfg }
 
-    func fetchAll() async -> [Reading] {
+    func fetchAll(manual: Bool) async -> [Reading] {
         let accounts = cfg.accounts(id, fallback: Discovery.agy())
         if accounts.isEmpty { return [.off(id, title, nil, L.t("a.nostate"))] }
         var out: [Reading] = []
         for a in accounts {
             let dir = expand(a.home ?? "~") + "/.gemini/antigravity-cli"
-            if cfg.agyAllowDirectQuotaCall, let live = await directQuota(dir: dir, account: a.name) {
+            // The direct request happens only when a person asked for it. On a
+            // timer it would be exactly the automated pattern that gets accounts
+            // flagged; triggered by hand it is the same single call the CLI
+            // itself makes every time it starts.
+            if manual, cfg.agyDirectQuotaOnManualCheck,
+               let live = await directQuota(dir: dir, account: a.name) {
                 out.append(live)
             } else {
                 out.append(fromLog(dir: dir, account: a.name))
