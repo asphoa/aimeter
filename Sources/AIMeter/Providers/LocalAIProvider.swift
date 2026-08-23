@@ -16,8 +16,8 @@ final class LocalAIProvider: Provider, @unchecked Sendable {
         var anyRuntime = false
 
         // --- Ollama ---
-        if let (obj, http) = try? await Net.json(
-                Net.get("http://127.0.0.1:11434/api/ps", timeout: 3)), http.statusCode == 200 {
+        if let req = Net.get("http://127.0.0.1:11434/api/ps", timeout: 3),
+           let (obj, http) = try? await Net.json(req), http.statusCode == 200 {
             anyRuntime = true
             let running = ((obj as? [String: Any])?["models"] as? [[String: Any]]) ?? []
             if running.isEmpty {
@@ -36,16 +36,16 @@ final class LocalAIProvider: Provider, @unchecked Sendable {
                     r.lines.append(line)
                 }
             }
-            if let (tags, th) = try? await Net.json(
-                    Net.get("http://127.0.0.1:11434/api/tags", timeout: 3)), th.statusCode == 200 {
+            if let treq = Net.get("http://127.0.0.1:11434/api/tags", timeout: 3),
+               let (tags, th) = try? await Net.json(treq), th.statusCode == 200 {
                 let n = (((tags as? [String: Any])?["models"] as? [[String: Any]]) ?? []).count
                 if n > 0 { r.lines.append(L.t("l.ollama.count", n)) }
             }
         }
 
         // --- LM Studio ---
-        if let (obj, http) = try? await Net.json(
-                Net.get("http://127.0.0.1:1234/v1/models", timeout: 3)), http.statusCode == 200 {
+        if let req = Net.get("http://127.0.0.1:1234/v1/models", timeout: 3),
+           let (obj, http) = try? await Net.json(req), http.statusCode == 200 {
             anyRuntime = true
             let models = ((obj as? [String: Any])?["data"] as? [[String: Any]]) ?? []
             if models.isEmpty {

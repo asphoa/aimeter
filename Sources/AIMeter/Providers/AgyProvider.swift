@@ -27,7 +27,8 @@ final class AgyProvider: Provider, @unchecked Sendable {
             // flagged; triggered by hand it is the same single call the CLI
             // itself makes every time it starts.
             if manual, cfg.agyQuotaViaTUI,
-               let panel = await tuiQuota(home: expand(a.home ?? "~"), account: a.name) {
+               let home = trustedHome(a.home ?? "~", marker: ".gemini/antigravity-cli"),
+               let panel = await tuiQuota(home: home, account: a.name) {
                 out.append(panel)
             } else if manual, cfg.agyDirectQuotaOnManualCheck,
                       let live = await directQuota(dir: dir, account: a.name) {

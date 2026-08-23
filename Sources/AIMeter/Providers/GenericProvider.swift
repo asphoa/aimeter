@@ -30,22 +30,47 @@ final class GenericProvider: Provider, @unchecked Sendable {
     }
 
     private func fetch(_ a: AccountSpec) async -> Reading {
-        guard let base = a.baseURL, let path = a.balancePath else {
+        guard let path = a.balancePath else {
             return .off(id, a.name, nil, L.t("e.needurl"))
         }
-        guard base.lowercased().hasPrefix("https://") else {
-            return .failed(id, a.name, nil, L.t("e.httpsonly"))
-        }
-        // Only our own keychain items: see the note above.
+        // Only our own keychain items, so the credential cannot be a pointer at
+        // an arbitrary file.
         guard let svc = a.keychainService, svc.hasPrefix("AIMeter · ") else {
             return .failed(id, a.name, nil, L.t("e.pasteonly"))
         }
+        // The destination comes from the keychain, not from the settings file.
+        // Taking the host from the file was the hole in the previous attempt:
+        // constraining where the credential came from while leaving where it
+        // went to the attacker is not a constraint at all.
+        guard let base = Credential.approvedBase(a),
+              var comps = URLComponents(string: base),
+              comps.scheme?.lowercased() == "https",
+              let host = comps.host, !host.isEmpty else {
+            return .failed(id, a.name, nil, L.t("e.reapprove"))
+        }
+        // A path is a path. "@" would turn the approved host into mere userinfo
+        // and hand the request to whatever followed it; a scheme or "//" would
+        // start a new authority.
+        guard path.hasPrefix("/"), !path.contains("@"), !path.contains("//"),
+              !path.lowercased().contains("://") else {
+            return .failed(id, a.name, nil, L.t("e.badpath"))
+        }
+        // Assembled from components rather than concatenated, so the authority
+        // is the parsed one and nothing in the path can displace it.
+        let parts = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        comps.path = String(parts[0])
+        comps.query = parts.count > 1 ? String(parts[1]) : nil
+        guard let url = comps.url, url.host == host else {
+            return .failed(id, a.name, nil, L.t("e.badpath"))
+        }
+
         let key = try? Credential.read(a).get()
-        guard let (obj, http) = try? await Net.json(
-                Net.get(base + path, bearer: key, timeout: 15)) else {
+        guard let (obj, http) = try? await Net.json(Net.get(url, bearer: key, timeout: 15)) else {
             return .failed(id, a.name, nil, L.t("e.connplain"))
         }
-        guard http.statusCode == 200 else { return .failed(id, a.name, nil, L.t("e.http", "\(http.statusCode)")) }
+        guard http.statusCode == 200 else {
+            return .failed(id, a.name, nil, L.t("e.http", "\(http.statusCode)"))
+        }
 
         var r = Reading(id: id, title: a.name)
         if let bal = findNumber(in: obj, names: ["balance", "total_balance", "credits",

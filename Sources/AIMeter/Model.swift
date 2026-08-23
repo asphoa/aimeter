@@ -147,8 +147,16 @@ enum Net {
         return (obj, http)
     }
 
-    static func get(_ url: String, bearer: String? = nil, timeout: TimeInterval = 20) -> URLRequest {
-        var r = URLRequest(url: URL(string: url)!)
+    /// Returns nil rather than trapping: some of these strings come from the
+    /// settings file, and a value that cannot be parsed must fail one reading,
+    /// not crash the app on every refresh.
+    static func get(_ url: String, bearer: String? = nil, timeout: TimeInterval = 20) -> URLRequest? {
+        guard let u = URL(string: url) else { return nil }
+        return get(u, bearer: bearer, timeout: timeout)
+    }
+
+    static func get(_ url: URL, bearer: String? = nil, timeout: TimeInterval = 20) -> URLRequest {
+        var r = URLRequest(url: url)
         r.timeoutInterval = timeout
         if let b = bearer { r.setValue("Bearer \(b)", forHTTPHeaderField: "Authorization") }
         return r
@@ -168,6 +176,23 @@ func tailBytes(_ path: String, limit: Int = 512 * 1024) -> String? {
 }
 
 func expand(_ p: String) -> String { (p as NSString).expandingTildeInPath }
+
+/// Accepts a HOME from the settings file only if it is a directory this user
+/// owns which already contains what it claims to.
+///
+/// Whitelisting the binary is undercut while the settings file can still steer
+/// that binary with an attacker-populated HOME; requiring the directory and its
+/// marker to exist already means a file handed over on its own cannot conjure
+/// one.
+func trustedHome(_ path: String, marker: String) -> String? {
+    let home = expand(path)
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: home, isDirectory: &isDir), isDir.boolValue,
+          FileManager.default.fileExists(atPath: home + "/" + marker),
+          let attrs = try? FileManager.default.attributesOfItem(atPath: home),
+          (attrs[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() else { return nil }
+    return home
+}
 
 /// Writes a file only this user can read, creating its directory the same way.
 ///

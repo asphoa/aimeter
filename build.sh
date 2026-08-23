@@ -43,6 +43,10 @@ PLIST
 # A stable signing identity is what makes the keychain's "Always Allow" grant
 # survive a rebuild; an ad-hoc signature changes with every byte of the binary,
 # so macOS treats each build as a different application and asks again.
+# Note: signing with this deliberately untrusted certificate needs to reach the
+# system trust daemon, which some sandboxes block — the symptom is codesign
+# failing with CSSMERR_TP_NOT_TRUSTED while the compile itself succeeded. Run
+# this script outside such a sandbox.
 IDENTITY="AIMeter Local Signing"
 # The certificate is untrusted by design, so it does not appear in
 # `find-identity -p codesigning`; look for the certificate itself.

@@ -80,8 +80,33 @@ enum Credential {
         return .success(value)
     }
 
+    /// The destination a pasted credential was approved for.
+    ///
+    /// Kept in the keychain beside the key, deliberately not in the settings
+    /// file: the file is the untrusted input here, so a destination read from it
+    /// could be rewritten to an attacker's host. Whoever can edit the file
+    /// cannot edit this.
+    static func approvedBase(_ a: AccountSpec) -> String? {
+        guard let svc = a.keychainService, svc.hasPrefix("AIMeter · "),
+              case .success(let blob)? = Optional(Keychain.genericPassword(service: svc)),
+              let obj = try? JSONSerialization.jsonObject(with: Data(blob.utf8)),
+              let base = findString(in: obj, names: ["base", "baseURL"]) else { return nil }
+        return base
+    }
+
     @discardableResult
-    static func store(_ key: String, service: String) -> Bool {
+    static func store(_ key: String, service: String, base: String? = nil) -> Bool {
+        guard let base else { return store(raw: key, service: service) }
+        // Key and destination travel together, so neither can be swapped for
+        // the other's without the keychain.
+        let blob = ["key": key, "base": base]
+        guard let data = try? JSONSerialization.data(withJSONObject: blob),
+              let text = String(data: data, encoding: .utf8) else { return false }
+        return store(raw: text, service: service)
+    }
+
+    @discardableResult
+    private static func store(raw key: String, service: String) -> Bool {
         delete(service: service)
         let attrs: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

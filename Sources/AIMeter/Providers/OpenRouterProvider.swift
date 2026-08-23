@@ -21,8 +21,8 @@ final class OpenRouterProvider: Provider, @unchecked Sendable {
             guard case .success(let key) = Credential.read(a) else {
                 failures.append(a.name); continue
             }
-            guard let (obj, http) = try? await Net.json(
-                    Net.get("https://openrouter.ai/api/v1/key", bearer: key, timeout: 15)),
+            guard let req = Net.get("https://openrouter.ai/api/v1/key", bearer: key, timeout: 15),
+                  let (obj, http) = try? await Net.json(req),
                   http.statusCode == 200,
                   let data = (obj as? [String: Any])?["data"] as? [String: Any] else {
                 failures.append(a.name); continue

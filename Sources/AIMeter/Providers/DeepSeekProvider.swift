@@ -23,8 +23,8 @@ final class DeepSeekProvider: Provider, @unchecked Sendable {
         guard case .success(let key) = Credential.read(account) else {
             return .off(id, title, account.name, L.t("d.unread", Credential.describe(account)))
         }
-        guard let (obj, http) = try? await Net.json(
-                Net.get("https://api.deepseek.com/user/balance", bearer: key, timeout: 15)) else {
+        guard let req = Net.get("https://api.deepseek.com/user/balance", bearer: key, timeout: 15),
+              let (obj, http) = try? await Net.json(req) else {
             return .failed(id, title, account.name, L.t("e.connplain"))
         }
         guard http.statusCode == 200, let d = obj as? [String: Any] else {

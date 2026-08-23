@@ -168,6 +168,8 @@ ROWS = [
     ('w.c.reset', 'Reset all colours', '全部恢復預設', 'Réinitialiser les couleurs', 'Alle Farben zurücksetzen'),
     ('e.httpsonly', 'The address must start with https://', '網址必須以 https:// 開頭', 'L’adresse doit commencer par https://', 'Die Adresse muss mit https:// beginnen'),
     ('e.pasteonly', 'This service needs a key pasted into the Accounts window, not a file path', '這個服務要在帳號視窗裏貼上金鑰，不能用檔案路徑', 'Ce service nécessite une clé collée dans la fenêtre Comptes, pas un chemin de fichier', 'Dieser Dienst benötigt einen in das Konten-Fenster eingefügten Schlüssel, keinen Dateipfad'),
+    ('e.reapprove', 'Add this service again in the Accounts window — its address is not on record', '請在帳號視窗重新加入這個服務——它的網址沒有登記', 'Rajoutez ce service dans la fenêtre Comptes — son adresse n’est pas enregistrée', 'Diesen Dienst im Konten-Fenster erneut hinzufügen — seine Adresse ist nicht hinterlegt'),
+    ('e.badpath', 'The balance path is not a plain path', '餘額路徑不是一個單純的路徑', 'Le chemin du solde n’est pas un chemin simple', 'Der Guthaben-Pfad ist kein einfacher Pfad'),
 ]
 
 HEADER = '''import Foundation

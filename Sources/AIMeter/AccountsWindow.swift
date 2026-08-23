@@ -545,7 +545,11 @@ struct AddAccountView: View {
         case .paste:
             guard !pasted.isEmpty else { problem = L.t("w.needcred"); return }
             let svc = Credential.service(provider: providerID, account: trimmed)
-            guard Credential.store(pasted, service: svc) else {
+            // For a service whose destination the user types, the destination is
+            // stored with the key rather than in the settings file - the file is
+            // the thing that might later be edited by someone else.
+            let approved = kind.needsURL ? baseURL.trimmingCharacters(in: .whitespaces) : nil
+            guard Credential.store(pasted, service: svc, base: approved) else {
                 problem = L.t("k.denied"); return
             }
             spec.keychainService = svc
