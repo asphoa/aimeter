@@ -16,10 +16,23 @@ TMPDIR="$PWD/.build/tmp" swiftc -O -swift-version 5 \
   -o .build/AIMeter \
   Sources/AIMeter/*.swift Sources/AIMeter/Providers/*.swift
 
+echo "→ 圖示"
+# Drawn by code like everything else here — no bundled art. Note: iconutil
+# talks to an XPC service and fails inside a sandbox, which is one more reason
+# this script must run outside one.
+if [ ! -f .build/AppIcon.icns ] || [ tools/make_app_icon.swift -nt .build/AppIcon.icns ]; then
+    TMPDIR="$PWD/.build/tmp" swiftc -O -swift-version 5 \
+      -target arm64-apple-macosx14.0 \
+      -module-cache-path "$PWD/.build/modcache" \
+      -o .build/make_app_icon tools/make_app_icon.swift
+    .build/make_app_icon .build/AppIcon.icns
+fi
+
 echo "→ 組 .app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/AIMeter "$APP/Contents/MacOS/AIMeter"
+cp .build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -33,6 +46,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>NSHighResolutionCapable</key><true/>
     <!-- menu bar only: no Dock icon, no Cmd-Tab entry -->
     <key>LSUIElement</key><true/>
