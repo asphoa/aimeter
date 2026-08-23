@@ -204,8 +204,8 @@ struct Config: Codable {
     func save() {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? FileManager.default.createDirectory(atPath: Config.dir, withIntermediateDirectories: true)
-        try? enc.encode(self).write(to: URL(fileURLWithPath: Config.path))
+        guard let data = try? enc.encode(self) else { return }
+        writePrivate(data, to: Config.path)
     }
 
     func isEnabled(_ id: String) -> Bool { enabled[id] ?? true }

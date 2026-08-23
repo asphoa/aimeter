@@ -44,7 +44,9 @@ struct ProviderKind: Identifiable {
             .init(id: "deepseek", title: L.t("p.deepseek"), modes: [.paste, .file],
                   folderMarker: nil, needsURL: false, defaultKeychainService: nil,
                   keyPage: "platform.deepseek.com/api_keys"),
-            .init(id: "generic", title: L.t("p.generic"), modes: [.paste, .file],
+            // Paste only: this kind posts the credential to a host the user
+            // types, so it must not be able to point at an arbitrary file.
+            .init(id: "generic", title: L.t("p.generic"), modes: [.paste],
                   folderMarker: nil, needsURL: true, defaultKeychainService: nil)
         ]
     }
@@ -563,6 +565,9 @@ struct AddAccountView: View {
         }
         if kind.needsURL {
             guard !baseURL.isEmpty, !balancePath.isEmpty else { problem = L.t("w.needcred"); return }
+            guard baseURL.lowercased().hasPrefix("https://") else {
+                problem = L.t("e.httpsonly"); return
+            }
             spec.baseURL = baseURL
             spec.balancePath = balancePath
         }

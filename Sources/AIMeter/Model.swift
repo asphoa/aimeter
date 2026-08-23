@@ -168,3 +168,24 @@ func tailBytes(_ path: String, limit: Int = 512 * 1024) -> String? {
 }
 
 func expand(_ p: String) -> String { (p as NSString).expandingTildeInPath }
+
+/// Writes a file only this user can read, creating its directory the same way.
+///
+/// Everything this app writes describes which services an account has and where
+/// its credentials live - the sort of thing that gets pasted into a chat window
+/// while debugging. None of it should be readable by other local accounts.
+func writePrivate(_ data: Data, to path: String) {
+    let dir = (path as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(
+        atPath: dir, withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700])
+    try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir)
+    // Written to a temporary neighbour first: a crash mid-write must not leave
+    // a half-parsed settings file behind.
+    let tmp = path + ".tmp"
+    guard (try? data.write(to: URL(fileURLWithPath: tmp), options: .atomic)) != nil else { return }
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp)
+    _ = try? FileManager.default.replaceItemAt(URL(fileURLWithPath: path),
+                                               withItemAt: URL(fileURLWithPath: tmp))
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+}

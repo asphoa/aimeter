@@ -166,6 +166,8 @@ ROWS = [
     ('w.c.warn', 'Panel bar, getting low', '面板長條・偏少', 'Barre du panneau, faible', 'Panel-Balken, wird knapp'),
     ('w.c.lines', 'Line colour per service', '各服務的線條顏色', 'Couleur de ligne par service', 'Linienfarbe je Dienst'),
     ('w.c.reset', 'Reset all colours', '全部恢復預設', 'Réinitialiser les couleurs', 'Alle Farben zurücksetzen'),
+    ('e.httpsonly', 'The address must start with https://', '網址必須以 https:// 開頭', 'L’adresse doit commencer par https://', 'Die Adresse muss mit https:// beginnen'),
+    ('e.pasteonly', 'This service needs a key pasted into the Accounts window, not a file path', '這個服務要在帳號視窗裏貼上金鑰，不能用檔案路徑', 'Ce service nécessite une clé collée dans la fenêtre Comptes, pas un chemin de fichier', 'Dieser Dienst benötigt einen in das Konten-Fenster eingefügten Schlüssel, keinen Dateipfad'),
 ]
 
 HEADER = '''import Foundation

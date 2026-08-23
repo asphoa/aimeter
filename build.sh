@@ -44,7 +44,9 @@ PLIST
 # survive a rebuild; an ad-hoc signature changes with every byte of the binary,
 # so macOS treats each build as a different application and asks again.
 IDENTITY="AIMeter Local Signing"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+# The certificate is untrusted by design, so it does not appear in
+# `find-identity -p codesigning`; look for the certificate itself.
+if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
     echo "→ signing with $IDENTITY"
     codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 else

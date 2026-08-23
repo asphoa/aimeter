@@ -27,15 +27,23 @@ enum AgyTUI {
     }
 
     /// Where the CLI is, since a GUI app inherits none of a login shell's PATH.
+    ///
+    /// Only these locations are accepted, and a configured path must be one of
+    /// them. The settings file is plain text: honouring an arbitrary path from
+    /// it would mean anything able to edit that file could have this app run a
+    /// binary of its choosing, as the user. A non-standard install should be
+    /// symlinked into one of these instead.
+    static let allowedBinaries = ["~/.local/bin/agy", "/usr/local/bin/agy", "/opt/homebrew/bin/agy"]
+
     static func binary(_ configured: String?) -> String? {
-        if let configured, FileManager.default.isExecutableFile(atPath: expand(configured)) {
-            return expand(configured)
+        let allowed = allowedBinaries.map(expand)
+        if let configured {
+            let wanted = expand(configured)
+            guard allowed.contains(wanted),
+                  FileManager.default.isExecutableFile(atPath: wanted) else { return nil }
+            return wanted
         }
-        for candidate in ["~/.local/bin/agy", "/usr/local/bin/agy", "/opt/homebrew/bin/agy"]
-        where FileManager.default.isExecutableFile(atPath: expand(candidate)) {
-            return expand(candidate)
-        }
-        return nil
+        return allowed.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
     static func read(binary path: String, home: String, timeout: TimeInterval = 90) -> Result? {
@@ -47,12 +55,17 @@ enum AgyTUI {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.currentDirectoryURL = URL(fileURLWithPath: home)
-        var env = ProcessInfo.processInfo.environment
-        env["HOME"] = home
-        env["TERM"] = "xterm-256color"
-        env["COLUMNS"] = "160"
-        env["LINES"] = "50"
-        process.environment = env
+        // Built from nothing rather than inherited: the parent environment can
+        // carry API keys exported in whatever shell launched the app, and a
+        // subprocess that only needs to draw a quota panel has no use for them.
+        process.environment = [
+            "HOME": home,
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
+            "TERM": "xterm-256color",
+            "COLUMNS": "160",
+            "LINES": "50",
+            "LANG": ProcessInfo.processInfo.environment["LANG"] ?? "en_US.UTF-8"
+        ]
         let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
         process.standardInput = slaveHandle
         process.standardOutput = slaveHandle
@@ -110,9 +123,13 @@ enum AgyTUI {
         close(master)
 
         let text = strip(String(decoding: raw, as: UTF8.self))
-        // Kept so a failure can be looked at rather than guessed at.
-        try? FileManager.default.createDirectory(atPath: Config.dir, withIntermediateDirectories: true)
-        try? text.write(toFile: Config.dir + "/agy-tui-last.txt", atomically: true, encoding: .utf8)
+        // Kept so a parsing failure can be looked at rather than guessed at -
+        // but this is a capture of the client's own screen, so the account
+        // address comes out before it touches the disk. It is the file most
+        // likely to be pasted somewhere while debugging.
+        let redacted = text.replacingOccurrences(
+            of: #"(Account:\s*)\S+"#, with: "$1<redacted>", options: .regularExpression)
+        writePrivate(Data(redacted.utf8), to: Config.dir + "/agy-tui-last.txt")
         return parse(text)
     }
 

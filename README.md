@@ -40,8 +40,15 @@ is signed ad hoc, which means macOS identifies it by the hash of its own bytes:
 every rebuild looks like a different application, and the keychain permission
 you granted no longer applies, so you are asked again after every build. The
 script creates a self-signed code-signing certificate in your login keychain so
-the identity stays put. Remove it any time from Keychain Access — it is named
-"AIMeter Local Signing" and signs nothing else.
+the identity stays put. The certificate is deliberately left **untrusted** and its key is granted to
+`codesign` alone. A trust anchor is not needed here — a signature from an
+untrusted self-signed certificate still binds the app's designated requirement
+to that certificate, which is what keeps the keychain grant valid across
+rebuilds. Making it a trusted code-signing anchor would instead mean anything
+signed with it passed "anchor trusted" checks on your Mac for a decade.
+
+To remove it, delete **both** the certificate and the private key of the same
+name in Keychain Access — they are separate rows under "login".
 
 `build.sh` calls `swiftc` directly rather than `swift build`, because SwiftPM
 spawns its own `sandbox-exec` for manifest evaluation, which cannot nest inside
@@ -69,6 +76,16 @@ This is the part worth reading before you trust it with your credentials.
   come from that response's headers. The token goes nowhere else.
 - **Keys you paste** into the Accounts window are stored in your login keychain
   under `AIMeter · <service> · <account>`, never in the settings file.
+- **The settings file and debug dumps are written 0600 in a 0700 directory**,
+  and the Antigravity screen capture has the account address removed before it
+  reaches the disk. These are the files most likely to be pasted somewhere while
+  troubleshooting.
+- **The settings file is treated as untrusted input.** A custom "Other" service
+  can only use a key you pasted (kept in the keychain) over https — not an
+  arbitrary file path, which would otherwise make it a "read this file, post it
+  to my host" gadget for anyone who could edit that file. The Antigravity CLI is
+  only ever run from a known install location, with a minimal environment rather
+  than the inherited one.
 - **Keys in files** are read from the paths you point at, and are not copied.
 - **Network**: only the vendor endpoints listed below, plus `127.0.0.1` for
   local model runtimes. There is no telemetry, no analytics, and no server

@@ -7,12 +7,13 @@
 # application and the keychain's "Always Allow" grant no longer matches. With a
 # stable certificate, one grant holds across rebuilds.
 #
-# Reversible: delete "AIMeter Local Signing" in Keychain Access.
+# To remove: in Keychain Access delete BOTH the certificate and the private key
+# of the same name (they are separate rows under "login").
 set -euo pipefail
 NAME="${1:-AIMeter Local Signing}"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$NAME"; then
+if security find-certificate -c "$NAME" >/dev/null 2>&1; then
     echo "✅ already present: $NAME"
     exit 0
 fi
@@ -41,11 +42,17 @@ openssl pkcs12 -export -inkey "$TMP/key.pem" -in "$TMP/cert.pem" \
     -out "$TMP/id.p12" -passout pass:aimeter -name "$NAME" \
     -macalg sha1 -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES 2>/dev/null
 
-# -A lets codesign use the private key without a per-use prompt.
-security import "$TMP/id.p12" -k "$KEYCHAIN" -P aimeter -A -T /usr/bin/codesign
-# Trust it for code signing in the user's own trust settings (no admin needed).
-security add-trusted-cert -p codeSign -k "$KEYCHAIN" "$TMP/cert.pem" 2>/dev/null || \
-    echo "note: could not set trust settings automatically"
+# -T grants exactly one program (codesign) use of the private key. Do NOT add
+# -A: that would let any process on this machine sign code with this key.
+#
+# The certificate is deliberately NOT added to the trust store either. A trust
+# anchor is not needed for what this is for - verified: codesign signs happily
+# with an untrusted self-signed identity, and the designated requirement still
+# binds to this certificate's leaf hash, which is the thing that keeps the
+# keychain's "Always Allow" valid across rebuilds. Making it a trusted
+# code-signing anchor would instead mean anything signed with it passes
+# "anchor trusted" checks on this Mac for the next ten years.
+security import "$TMP/id.p12" -k "$KEYCHAIN" -P aimeter -T /usr/bin/codesign
 
-echo "--- identities now available ---"
-security find-identity -v -p codesigning
+echo "--- certificate installed (untrusted by design; codesign can still use it) ---"
+security find-certificate -c "$NAME" | grep -E '"labl"|"subj"' || true

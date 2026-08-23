@@ -122,8 +122,7 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         let safe = account.replacingOccurrences(of: "/", with: "_")
         guard let data = try? JSONSerialization.data(withJSONObject: payload,
                                                      options: [.prettyPrinted, .sortedKeys]) else { return }
-        try? FileManager.default.createDirectory(atPath: Config.dir, withIntermediateDirectories: true)
-        try? data.write(to: URL(fileURLWithPath: Config.dir + "/last-headers-\(safe).json"))
+        writePrivate(data, to: Config.dir + "/last-headers-\(safe).json")
     }
 }
 
