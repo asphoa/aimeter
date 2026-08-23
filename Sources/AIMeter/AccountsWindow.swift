@@ -57,6 +57,10 @@ struct ProviderKind: Identifiable {
 @MainActor
 final class AccountsStore: ObservableObject {
     static let changed = Notification.Name("AIMeterConfigChanged")
+    /// Appearance-only changes. A colour picker fires continuously while it is
+    /// dragged, and treating each event as a settings change would refetch every
+    /// provider - several API requests per drag.
+    static let restyled = Notification.Name("AIMeterRestyled")
 
     @Published var cfg: Config
     @Published var results: [String: String] = [:]
@@ -68,9 +72,10 @@ final class AccountsStore: ObservableObject {
 
     func accounts(_ provider: String) -> [AccountSpec] { cfg.accounts[provider] ?? [] }
 
-    func persist() {
+    func persist(cosmetic: Bool = false) {
         cfg.save()
-        NotificationCenter.default.post(name: Self.changed, object: nil)
+        if cosmetic { Palette.overrides = cfg.colours }
+        NotificationCenter.default.post(name: cosmetic ? Self.restyled : Self.changed, object: nil)
     }
 
     func setEnabled(_ provider: String, _ index: Int, _ on: Bool) {
@@ -222,6 +227,9 @@ struct AccountsView: View {
             Divider()
             MenuBarSection(store: store)
 
+            Divider()
+            coloursSection
+
             HStack(spacing: 10) {
                 Button(L.t("w.add")) { adding = true }
                 Button(L.t("w.detect")) { detect() }
@@ -232,7 +240,7 @@ struct AccountsView: View {
             }
         }
         .padding(20)
-        .frame(minWidth: 700, minHeight: 700)
+        .frame(minWidth: 720, minHeight: 760)
         .sheet(isPresented: $adding) { AddAccountView(store: store) }
     }
 
@@ -273,6 +281,48 @@ struct AccountsView: View {
         if secs == 0 { return L.t("m.manualonly") }
         if secs < 60 { return L.t("m.seconds", secs) }
         return L.t("m.minutes", secs / 60)
+    }
+
+    private func serviceTitle(_ id: String) -> String {
+        ProviderKind.find(id)?.title ?? (id == "local" ? L.t("p.local") : id)
+    }
+
+    private func colourWell(_ label: String, _ role: String) -> some View {
+        ColorPicker(label, selection: Binding(
+            get: { Color(nsColor: Palette.colour(role)) },
+            set: { picked in
+                store.cfg.colours[role] = NSColor(picked).hexString
+                store.persist(cosmetic: true)
+            }))
+    }
+
+    private var coloursSection: some View {
+        let two = Array(repeating: GridItem(.flexible(), alignment: .leading), count: 2)
+        let three = Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3)
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(L.t("w.colours")).font(.headline)
+            Text(L.t("w.colours.intro"))
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            LazyVGrid(columns: two, alignment: .leading, spacing: 4) {
+                colourWell(L.t("w.c.text"), Palette.text)
+                colourWell(L.t("w.c.track"), Palette.track)
+                colourWell(L.t("w.c.alarm"), Palette.alarm)
+                colourWell(L.t("w.c.ok"), Palette.ok)
+                colourWell(L.t("w.c.warn"), Palette.warn)
+            }
+            Text(L.t("w.c.lines")).font(.subheadline).padding(.top, 4)
+            LazyVGrid(columns: three, alignment: .leading, spacing: 4) {
+                ForEach(Palette.serviceRoles, id: \.self) { id in
+                    colourWell(serviceTitle(id), Palette.service(id))
+                }
+            }
+            Button(L.t("w.c.reset")) {
+                store.cfg.colours = [:]
+                store.persist(cosmetic: true)
+            }
+            .padding(.top, 4)
+        }
     }
 
     @ViewBuilder

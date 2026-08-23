@@ -137,6 +137,9 @@ struct Config: Codable {
     var agyQuotaViaTUI: Bool = true
     /// Path to the agy binary; empty means look in the usual places.
     var agyBinary: String = ""
+    /// Colour-role overrides as "#RRGGBBAA". An absent role keeps the adaptive
+    /// default. See Palette.
+    var colours: [String: String] = [:]
     /// Per-provider check interval in seconds. 0 means "only when I ask".
     /// A missing entry falls back to `refreshSeconds`.
     ///
@@ -164,6 +167,7 @@ struct Config: Codable {
         intervals = (try? c.decode([String: Int].self, forKey: .intervals)) ?? def.intervals
         agyQuotaViaTUI = (try? c.decode(Bool.self, forKey: .agyQuotaViaTUI)) ?? def.agyQuotaViaTUI
         agyBinary = (try? c.decode(String.self, forKey: .agyBinary)) ?? def.agyBinary
+        colours = (try? c.decode([String: String].self, forKey: .colours)) ?? def.colours
         claudeProbeModel = (try? c.decode(String.self, forKey: .claudeProbeModel)) ?? def.claudeProbeModel
         accounts = (try? c.decode([String: [AccountSpec]].self, forKey: .accounts)) ?? def.accounts
     }
@@ -184,6 +188,9 @@ struct Config: Codable {
             cfg.accounts = Discovery.all()
             cfg.save()
         }
+        // Applied here rather than at each call site: one of those call sites
+        // was missed, and the only symptom was colours silently not applying.
+        Palette.overrides = cfg.colours
         return cfg
     }
 

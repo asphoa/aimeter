@@ -81,6 +81,7 @@ func renderIcon(to path: String) async {
 func renderPanel(to path: String) async {
     let cfg = Config.load()
     L.current = cfg.language
+    Palette.overrides = cfg.colours
     let providers = buildProviders(cfg)
     var readings: [String: [Reading]] = [:]
     for p in providers { readings[p.id] = await p.fetchAll() }

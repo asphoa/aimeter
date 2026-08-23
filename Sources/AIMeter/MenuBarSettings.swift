@@ -78,7 +78,7 @@ struct MenuBarSection: View {
 
             Picker("", selection: Binding(
                 get: { store.cfg.menuBar.colourScheme },
-                set: { store.cfg.menuBar.colourScheme = $0; store.persist() })) {
+                set: { store.cfg.menuBar.colourScheme = $0; store.persist(cosmetic: true) })) {
                     Text(L.t("m.barcolour.provider")).tag(BarColourScheme.provider)
                     Text(L.t("m.barcolour.window")).tag(BarColourScheme.window)
                 }
@@ -140,7 +140,7 @@ struct MenuBarSection: View {
             lines.remove(at: index)
         }
         store.cfg.menuBar.lines = Array(lines.prefix(StatusStrip.maxLines))
-        store.persist()
+        store.persist(cosmetic: true)
     }
 
     private func move(_ index: Int, by delta: Int) {
@@ -149,6 +149,6 @@ struct MenuBarSection: View {
         guard lines.indices.contains(index), lines.indices.contains(to) else { return }
         lines.swapAt(index, to)
         store.cfg.menuBar.lines = lines
-        store.persist()
+        store.persist(cosmetic: true)
     }
 }

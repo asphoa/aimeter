@@ -157,6 +157,15 @@ ROWS = [
     ('g.claudegpt', 'Claude/GPT %@', 'Claude／GPT %@', 'Claude/GPT %@', 'Claude/GPT %@'),
     ('g.5h.short', '5-hour', '5 小時', '5 h', '5 Std.'),
     ('g.week.short', 'weekly', '週', 'hebdo', 'Woche'),
+    ('w.colours', 'Colours', '顏色', 'Couleurs', 'Farben'),
+    ('w.colours.intro', 'A colour you set here is fixed: unlike the defaults, it will not follow light and dark mode. Leave one alone to keep the adaptive default.', '你在這裏設定的顏色是固定的：跟預設不同，它不會跟著淺色／深色模式變。不動的項目就維持會自動調整的預設值。', 'Une couleur définie ici est fixe : contrairement aux valeurs par défaut, elle ne suit pas le mode clair/sombre. Laissez-la telle quelle pour conserver le défaut adaptatif.', 'Eine hier gesetzte Farbe ist fest: anders als die Standardwerte folgt sie nicht dem Hell-/Dunkelmodus. Unverändert lassen, um den adaptiven Standard zu behalten.'),
+    ('w.c.text', 'Text', '文字', 'Texte', 'Text'),
+    ('w.c.track', 'Bar background', '長條背景', 'Fond des barres', 'Balkenhintergrund'),
+    ('w.c.alarm', 'Nearly spent', '快用完', 'Presque épuisé', 'Fast aufgebraucht'),
+    ('w.c.ok', 'Panel bar, plenty left', '面板長條・還很多', 'Barre du panneau, reste beaucoup', 'Panel-Balken, viel übrig'),
+    ('w.c.warn', 'Panel bar, getting low', '面板長條・偏少', 'Barre du panneau, faible', 'Panel-Balken, wird knapp'),
+    ('w.c.lines', 'Line colour per service', '各服務的線條顏色', 'Couleur de ligne par service', 'Linienfarbe je Dienst'),
+    ('w.c.reset', 'Reset all colours', '全部恢復預設', 'Réinitialiser les couleurs', 'Alle Farben zurücksetzen'),
 ]
 
 HEADER = '''import Foundation

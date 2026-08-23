@@ -86,10 +86,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         L.current = cfg.language
+        Palette.overrides = cfg.colours
         providers = buildProviders(cfg)
         NotificationCenter.default.addObserver(
             forName: AccountsStore.changed, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.reload() }
+            }
+        // Appearance changes redraw what is already known; they must not send
+        // the app back out to every provider.
+        NotificationCenter.default.addObserver(
+            forName: AccountsStore.restyled, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.cfg = Config.load()
+                    Palette.overrides = self.cfg.colours
+                    self.rebuildMenu()
+                    self.updateTitle()
+                }
             }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -108,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func reload() {
         cfg = Config.load()
         L.current = cfg.language
+        Palette.overrides = cfg.colours
         providers = buildProviders(cfg)
         readings = readings.filter { key, _ in providers.contains { $0.id == key } }
         restartTimer()

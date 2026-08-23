@@ -103,7 +103,7 @@ enum StatusStrip {
     }
 
     private static func bar(_ pct: Double, x y: CGFloat, height: CGFloat, colour: NSColor) {
-        NSColor.labelColor.withAlphaComponent(0.30).setFill()
+        Palette.colour(Palette.track).setFill()
         NSBezierPath(roundedRect: NSRect(x: 0, y: y, width: width, height: height),
                      xRadius: radius, yRadius: radius).fill()
         guard pct > 0 else { return }
@@ -118,7 +118,7 @@ enum StatusStrip {
     /// Half of a pair whose window this service does not have. Drawn as a bare
     /// track so the line keeps its shape without claiming a measurement.
     private static func dim(_ y: CGFloat, _ height: CGFloat) {
-        NSColor.labelColor.withAlphaComponent(0.15).setFill()
+        Palette.colour(Palette.track).withAlphaComponent(0.15).setFill()
         NSBezierPath(roundedRect: NSRect(x: 0, y: y, width: width, height: height),
                      xRadius: radius, yRadius: radius).fill()
     }
@@ -127,7 +127,7 @@ enum StatusStrip {
         let d: CGFloat = 1.5, spacing: CGFloat = 2
         let span = d * 3 + spacing * 2
         var x = (width - span) / 2
-        NSColor.labelColor.withAlphaComponent(0.55).setFill()
+        Palette.text(0.55).setFill()
         for _ in 0..<3 {
             NSBezierPath(ovalIn: NSRect(x: x, y: y + (height - d) / 2, width: d, height: d)).fill()
             x += d + spacing
@@ -136,23 +136,11 @@ enum StatusStrip {
 
     // MARK: - colour
 
-    /// The menu bar takes its appearance from the wallpaper tint, not from the
-    /// system light/dark setting — measured, not assumed — so these have to hold
-    /// up against a mid-luminance coloured bar as well as white and black. The
-    /// blue band is deliberately vacant: a blue wallpaper swallows it.
-    private static let hues: [String: NSColor] = [
-        "claude":     NSColor(srgbRed: 0.898, green: 0.600, blue: 0.239, alpha: 1),  // amber
-        "codex":      NSColor(srgbRed: 0.184, green: 0.651, blue: 0.353, alpha: 1),  // green
-        "agy":        NSColor(srgbRed: 0.243, green: 0.769, blue: 0.918, alpha: 1),  // cyan
-        "openrouter": NSColor(srgbRed: 0.643, green: 0.420, blue: 0.925, alpha: 1),  // violet
-        "deepseek":   NSColor(srgbRed: 0.878, green: 0.380, blue: 0.620, alpha: 1),  // magenta
-        "local":      NSColor(srgbRed: 0.639, green: 0.639, blue: 0.337, alpha: 1),  // olive
-        "generic":    NSColor(srgbRed: 0.659, green: 0.608, blue: 0.545, alpha: 1)   // taupe
-    ]
-
-    /// Fixed rather than `systemRed`, so the alarm looks the same whatever
-    /// appearance the menu bar happens to be in.
-    private static let alarm = NSColor(srgbRed: 1.0, green: 0.271, blue: 0.227, alpha: 1)
+    /// Hues live in Palette so the user can change them; the defaults are on the
+    /// cool side of the wheel, leaving red and orange free to mean one thing.
+    /// The menu bar takes its appearance from the wallpaper tint rather than the
+    /// system light/dark setting — measured, not assumed — so they have to hold
+    /// up against a mid-luminance coloured bar as well as white and black.
 
     private static func colour(_ line: StripLine, _ kind: GaugeKind,
                                _ pct: Double, _ scheme: BarColourScheme) -> NSColor {
@@ -169,8 +157,8 @@ enum StatusStrip {
         case .provider:
             // Red is reserved: it overrides identity so that "nearly spent" is
             // never something the eye has to decode.
-            if pct >= 90 { return alarm }
-            let base = hues[line.provider] ?? hues["generic"]!
+            if pct >= 90 { return Palette.colour(Palette.alarm) }
+            let base = Palette.colour(Palette.service(line.provider))
             switch kind {
             case .shortWindow: c = base
             case .longWindow:  c = blend(base, with: .white, 0.35)

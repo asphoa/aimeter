@@ -63,10 +63,7 @@ func buildPanelRows(_ providers: [Provider],
                 let pct = g.percent ?? 0
                 // Brighter than the system greens/oranges so the fill still
                 // separates from a track that is now considerably darker.
-                let fill: NSColor = pct >= 90
-                    ? NSColor(srgbRed: 1.0, green: 0.271, blue: 0.227, alpha: 1)
-                    : (pct >= 70 ? NSColor(srgbRed: 1.0, green: 0.702, blue: 0.251, alpha: 1)
-                                 : NSColor(srgbRed: 0.196, green: 0.843, blue: 0.294, alpha: 1))
+                let fill = Palette.colour(pct >= 90 ? Palette.alarm : (pct >= 70 ? Palette.warn : Palette.ok))
                 var trailing = g.resetsAt.map { L.t("m.resets", Fmt.relative($0)) }
                 if trailing == nil, g.percent != nil, g.text != String(format: "%.0f%%", pct) {
                     trailing = g.text
@@ -120,11 +117,11 @@ private final class HeaderRowView: NSView {
         dotColour.setFill()
         NSBezierPath(ovalIn: NSRect(x: 14, y: (bounds.height - d) / 2, width: d, height: d)).fill()
         drawText(title, at: Panel.leftInset, in: bounds,
-             font: .systemFont(ofSize: 13, weight: .semibold), colour: .labelColor,
+             font: .systemFont(ofSize: 13, weight: .semibold), colour: Palette.text(1),
              maxWidth: 210)
         if let trailing {
             drawText(trailing, at: 0, in: bounds, font: .systemFont(ofSize: 11),
-                 colour: .tertiaryLabelColor, rightAlignedTo: bounds.width - Panel.rightInset)
+                 colour: Palette.text(0.5), rightAlignedTo: bounds.width - Panel.rightInset)
         }
     }
 }
@@ -144,13 +141,13 @@ private final class GaugeRowView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         drawText(label, at: Panel.leftInset, in: bounds, font: .systemFont(ofSize: 12),
-             colour: .secondaryLabelColor, maxWidth: barX - Panel.leftInset - 8)
+             colour: Palette.text(0.7), maxWidth: barX - Panel.leftInset - 8)
 
         if let pct = percent {
             let y = (bounds.height - barH) / 2
             // Light enough to read as "not filled", dark enough to be a shape:
             // at 0.15 the track vanished into the panel's own background.
-            NSColor.labelColor.withAlphaComponent(0.30).setFill()
+            Palette.colour(Palette.track).setFill()
             NSBezierPath(roundedRect: NSRect(x: barX, y: y, width: barW, height: barH),
                          xRadius: barH / 2, yRadius: barH / 2).fill()
             let w = max(pct > 0 ? 2 : 0, min(barW, barW * CGFloat(pct) / 100))
@@ -161,17 +158,17 @@ private final class GaugeRowView: NSView {
             }
             drawText(String(format: "%.0f%%", pct), at: 0, in: bounds,
                  font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
-                 colour: .labelColor, rightAlignedTo: 284)
+                 colour: Palette.text(1), rightAlignedTo: 284)
             if let trailing {
                 drawText(trailing, at: 292, in: bounds, font: .systemFont(ofSize: 11),
-                     colour: .tertiaryLabelColor, maxWidth: bounds.width - 292 - Panel.rightInset)
+                     colour: Palette.text(0.5), maxWidth: bounds.width - 292 - Panel.rightInset)
             }
         } else {
             // A balance, not a percentage: no bar to draw, so the figure takes
             // the whole right-hand column.
             drawText(value, at: 0, in: bounds,
                  font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
-                 colour: .labelColor, rightAlignedTo: bounds.width - Panel.rightInset)
+                 colour: Palette.text(1), rightAlignedTo: bounds.width - Panel.rightInset)
         }
     }
 }
@@ -184,7 +181,7 @@ private final class InfoRowView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         drawText(text, at: Panel.leftInset, in: bounds, font: .systemFont(ofSize: 11),
-             colour: isError ? .systemRed : .secondaryLabelColor,
+             colour: isError ? Palette.colour(Palette.alarm) : Palette.text(0.7),
              maxWidth: bounds.width - Panel.leftInset - Panel.rightInset)
     }
 }
