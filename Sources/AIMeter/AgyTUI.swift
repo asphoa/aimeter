@@ -127,7 +127,13 @@ enum AgyTUI {
         // but this is a capture of the client's own screen, so the account
         // address comes out before it touches the disk. It is the file most
         // likely to be pasted somewhere while debugging.
-        let redacted = text.replacingOccurrences(
+        // Anything shaped like an address, not just the line labelled Account:
+        // the client prints the signed-in account twice, and keying the
+        // redaction to one label missed the copy beside the banner.
+        var redacted = text.replacingOccurrences(
+            of: #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#,
+            with: "<redacted>", options: .regularExpression)
+        redacted = redacted.replacingOccurrences(
             of: #"(Account:\s*)\S+"#, with: "$1<redacted>", options: .regularExpression)
         writePrivate(Data(redacted.utf8), to: Config.dir + "/agy-tui-last.txt")
         return parse(text)
