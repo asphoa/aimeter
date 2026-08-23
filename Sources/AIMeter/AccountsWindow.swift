@@ -186,67 +186,73 @@ struct AccountsView: View {
     private var isEmpty: Bool { ProviderKind.all.allSatisfy { store.accounts($0.id).isEmpty } }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(L.t("w.title")).font(.title2.weight(.semibold))
-            Text(L.t("w.intro"))
-                .font(.callout).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 0) {
+            // Everything scrolls: the window cannot be tall enough for every
+            // section at once, and a section that is merely off-screen looks
+            // exactly like a section that was never built.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(L.t("w.title")).font(.title2.weight(.semibold))
+                    Text(L.t("w.intro"))
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
 
-            if isEmpty {
-                VStack {
-                    Spacer()
-                    Text(L.t("w.none"))
-                        .foregroundStyle(.secondary).multilineTextAlignment(.center)
-                        .frame(maxWidth: 380)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        ForEach(ProviderKind.all) { kind in
-                            let list = store.accounts(kind.id)
-                            if !list.isEmpty {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(kind.title).font(.headline)
-                                    ForEach(Array(list.enumerated()), id: \.offset) { idx, spec in
-                                        row(kind, idx, spec)
+                    if isEmpty {
+                        Text(L.t("w.none"))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: 380, alignment: .leading)
+                            .padding(.vertical, 20)
+                    } else {
+                        VStack(alignment: .leading, spacing: 18) {
+                            ForEach(ProviderKind.all) { kind in
+                                let list = store.accounts(kind.id)
+                                if !list.isEmpty {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text(kind.title).font(.headline)
+                                        ForEach(Array(list.enumerated()), id: \.offset) { idx, spec in
+                                            row(kind, idx, spec)
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                    .padding(.vertical, 4)
+
+                    HStack(spacing: 10) {
+                        Button(L.t("w.add")) { adding = true }
+                        Button(L.t("w.detect")) { detect() }
+                        Text(toast).font(.callout).foregroundStyle(.secondary)
+                    }
+
+                    Divider()
+                    sourcesShown
+
+                    Divider()
+                    MenuBarSection(store: store)
+
+                    Divider()
+                    coloursSection
                 }
-                .frame(maxHeight: 220)
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Divider()
-            sourcesShown
-
-            Divider()
-            MenuBarSection(store: store)
-
-            Divider()
-            coloursSection
-
-            HStack(spacing: 10) {
-                Button(L.t("w.add")) { adding = true }
-                Button(L.t("w.detect")) { detect() }
-                Text(toast).font(.callout).foregroundStyle(.secondary)
+            HStack {
                 Spacer()
                 Button(L.t("w.close")) { AccountsWindowController.shared.close() }
                     .keyboardShortcut(.defaultAction)
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
         }
-        .padding(20)
-        .frame(minWidth: 720, minHeight: 760)
+        .frame(minWidth: 720, idealWidth: 760, minHeight: 480, idealHeight: 720)
         .sheet(isPresented: $adding) { AddAccountView(store: store) }
     }
 
-    /// Which services the dropdown panel lists at all. Local AI has no account
-    /// of its own, so without this it was the one source that could only be
-    /// switched off by hand-editing the settings file.
+    /// Which services the dropdown panel lists at all, and how often each is
+    /// checked. Local AI has no account of its own, so without this it was the
+    /// one source that could only be switched off by editing the settings file.
     private var sourcesShown: some View {
         let all = ProviderKind.all.map { ($0.id, $0.title) } + [("local", L.t("p.local"))]
         return VStack(alignment: .leading, spacing: 6) {

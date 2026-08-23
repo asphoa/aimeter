@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// `AIMeter --once` prints every provider's reading as plain text and exits.
 /// Same code path as the menu, so it is the honest way to see what the app is
@@ -108,6 +109,37 @@ func renderPanel(to path: String) async {
     try? rep.representation(using: .png, properties: [:])?
         .write(to: URL(fileURLWithPath: path))
     print("wrote \(path)  (\(rows.count) rows, \(Int(w))x\(Int(h)) pt)")
+}
+
+/// `AIMeter --settings out.png` renders the Accounts window offscreen, so its
+/// layout can be checked here rather than by asking someone to go and look.
+@MainActor
+func renderSettings(to path: String, height: CGFloat) {
+    let store = AccountsStore()
+    let host = NSHostingController(rootView: AccountsView(store: store))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: height),
+                          styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+    window.contentViewController = host
+    window.setContentSize(NSSize(width: 760, height: height))
+    let view = host.view
+    view.layoutSubtreeIfNeeded()
+    // One turn of the runloop so SwiftUI completes its first layout pass.
+    RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+    view.layoutSubtreeIfNeeded()
+    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    let png = rep.representation(using: NSBitmapImageRep.FileType.png, properties: [:])
+    try? png?.write(to: URL(fileURLWithPath: path))
+    print("wrote \(path)  (\(Int(view.bounds.width))x\(Int(view.bounds.height)) pt)")
+}
+
+if let idx = CommandLine.arguments.firstIndex(of: "--settings"),
+   CommandLine.arguments.count > idx + 1 {
+    let path = CommandLine.arguments[idx + 1]
+    let h = CommandLine.arguments.count > idx + 2 ? (Double(CommandLine.arguments[idx + 2]) ?? 720) : 720
+    NSApplication.shared.setActivationPolicy(.accessory)
+    MainActor.assumeIsolated { renderSettings(to: path, height: CGFloat(h)) }
+    exit(0)
 }
 
 if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
