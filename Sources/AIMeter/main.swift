@@ -3,12 +3,12 @@ import AppKit
 /// `AIMeter --once` prints every provider's reading as plain text and exits.
 /// Same code path as the menu, so it is the honest way to see what the app is
 /// actually reading without staring at the menu bar.
-func runOnce() async {
+func runOnce(manual: Bool = false) async {
     setbuf(stdout, nil)
     let cfg = Config.load()
     L.current = cfg.language
     for p in buildProviders(cfg) {
-        for r in await p.fetchAll() {
+        for r in await p.fetchAll(manual: manual) {
             let mark: String
             switch r.state {
             case .ok: mark = "OK  "
@@ -130,8 +130,10 @@ if let idx = CommandLine.arguments.firstIndex(of: "--icon"),
 }
 
 if CommandLine.arguments.contains("--once") {
+    // --manual also runs the checks that are deliberately never automatic.
+    let manual = CommandLine.arguments.contains("--manual")
     let sem = DispatchSemaphore(value: 0)
-    Task { await runOnce(); sem.signal() }
+    Task { await runOnce(manual: manual); sem.signal() }
     sem.wait()
     exit(0)
 }

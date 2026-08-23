@@ -132,6 +132,11 @@ struct Config: Codable {
     /// case that ever changes; it fires only during a manual check, never on a
     /// timer.
     var agyDirectQuotaOnManualCheck: Bool = false
+    /// A manual check reads Antigravity's own `/usage` panel by driving the CLI
+    /// in a pseudo-terminal. Slow and never automatic - see AgyTUI.
+    var agyQuotaViaTUI: Bool = true
+    /// Path to the agy binary; empty means look in the usual places.
+    var agyBinary: String = ""
     /// Per-provider check interval in seconds. 0 means "only when I ask".
     /// A missing entry falls back to `refreshSeconds`.
     ///
@@ -157,6 +162,8 @@ struct Config: Codable {
         agyDirectQuotaOnManualCheck = (try? c.decode(Bool.self, forKey: .agyDirectQuotaOnManualCheck))
             ?? def.agyDirectQuotaOnManualCheck
         intervals = (try? c.decode([String: Int].self, forKey: .intervals)) ?? def.intervals
+        agyQuotaViaTUI = (try? c.decode(Bool.self, forKey: .agyQuotaViaTUI)) ?? def.agyQuotaViaTUI
+        agyBinary = (try? c.decode(String.self, forKey: .agyBinary)) ?? def.agyBinary
         claudeProbeModel = (try? c.decode(String.self, forKey: .claudeProbeModel)) ?? def.claudeProbeModel
         accounts = (try? c.decode([String: [AccountSpec]].self, forKey: .accounts)) ?? def.accounts
     }

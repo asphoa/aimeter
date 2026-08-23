@@ -26,14 +26,51 @@ final class AgyProvider: Provider, @unchecked Sendable {
             // timer it would be exactly the automated pattern that gets accounts
             // flagged; triggered by hand it is the same single call the CLI
             // itself makes every time it starts.
-            if manual, cfg.agyDirectQuotaOnManualCheck,
-               let live = await directQuota(dir: dir, account: a.name) {
+            if manual, cfg.agyQuotaViaTUI,
+               let panel = await tuiQuota(home: expand(a.home ?? "~"), account: a.name) {
+                out.append(panel)
+            } else if manual, cfg.agyDirectQuotaOnManualCheck,
+                      let live = await directQuota(dir: dir, account: a.name) {
                 out.append(live)
             } else {
                 out.append(fromLog(dir: dir, account: a.name))
             }
         }
         return out
+    }
+
+    /// Drives the vendor's own client to read the one place these numbers
+    /// exist. See AgyTUI for why this rather than an HTTP request.
+    private func tuiQuota(home: String, account: String) async -> Reading? {
+        guard let bin = AgyTUI.binary(cfg.agyBinary.isEmpty ? nil : cfg.agyBinary) else {
+            return .failed(id, title, account, L.t("a.tui.nobin"))
+        }
+        let result: AgyTUI.Result? = await Task.detached(priority: .utility) {
+            AgyTUI.read(binary: bin, home: home)
+        }.value
+        guard let result else {
+            return .failed(id, title, account, L.t("a.tui.fail"))
+        }
+
+        var r = Reading(id: id, title: title, account: result.account ?? account)
+        for group in result.groups {
+            let isGemini = group.name.contains("GEMINI")
+            let key = isGemini ? "g.gemini" : "g.claudegpt"
+            if let used = group.fiveHourUsed {
+                r.gauges.append(Gauge(label: L.t(key, L.t("g.5h.short")), percent: used,
+                                      text: String(format: "%.0f%%", used), resetsAt: nil,
+                                      kind: isGemini ? .shortWindow : .other))
+            }
+            if let used = group.weeklyUsed {
+                r.gauges.append(Gauge(label: L.t(key, L.t("g.week.short")), percent: used,
+                                      text: String(format: "%.0f%%", used),
+                                      resetsAt: group.weeklyResets,
+                                      kind: isGemini ? .longWindow : .other))
+            }
+        }
+        guard !r.gauges.isEmpty else { return .failed(id, title, account, L.t("a.tui.fail")) }
+        r.state = worstState(r.gauges)
+        return r
     }
 
     private func fromLog(dir: String, account: String) -> Reading {

@@ -109,7 +109,7 @@ enum L {
         "a.403b": ("agy cannot read its own quota either — not a fault of this app", "agy 自己也讀不到額度，不是本程式的問題", "agy ne peut pas lire son propre quota non plus — ce n’est pas un défaut de cette app", "agy kann sein eigenes Kontingent ebenfalls nicht lesen — kein Fehler dieser App"),
         "a.failed": ("Quota request failed (see cli.log)", "配額查詢失敗（見 cli.log）", "Échec de la requête de quota (voir cli.log)", "Kontingentabfrage fehlgeschlagen (siehe cli.log)"),
         "a.silent": ("Last check raised no error, but the CLI logged no number", "上次查詢無錯誤，但 CLI 沒把數字寫進日誌", "La dernière vérification n’a pas échoué, mais la CLI n’a consigné aucun chiffre", "Letzte Prüfung ohne Fehler, aber die CLI hat keine Zahl protokolliert"),
-        "a.silent2": ("The quota is visible only inside the agy TUI — no interface exposes it", "配額只在 agy 的 TUI 面板裏看得到，沒有任何介面提供它", "Le quota n’est visible que dans l’interface agy — aucune API ne l’expose", "Das Kontingent ist nur in der agy-Oberfläche sichtbar — keine Schnittstelle liefert es"),
+        "a.silent2": ("Press “Check now” to read the quota panel from the agy client itself (takes about half a minute)", "按「立即檢查」讓 agy 自己的面板把配額讀出來（約需半分鐘）", "Appuyez sur « Vérifier maintenant » pour lire le panneau de quota du client agy (environ 30 s)", "„Jetzt prüfen“ liest das Kontingent aus dem agy-Client selbst (dauert etwa eine halbe Minute)"),
         "a.direct.fail": ("Direct quota endpoint failed: %@", "直連配額端點失敗：%@", "Échec du point de terminaison de quota : %@", "Direkter Kontingent-Endpunkt fehlgeschlagen: %@"),
         "a.unknown": ("Endpoint responded but the fields were not recognised", "端點有回應但欄位不認得", "Le point de terminaison a répondu, champs non reconnus", "Endpunkt antwortete, Felder nicht erkannt"),
         "a.remaining": ("Remaining: %@", "剩餘：%@", "Restant : %@", "Verbleibend: %@"),
@@ -203,5 +203,13 @@ enum L {
         "w.checkevery": ("Check every", "檢測間隔", "Vérifier toutes les", "Prüfintervall"),
         "m.manualonly": ("Manual only", "只手動檢查", "Manuel seulement", "Nur manuell"),
         "w.intervalhint": ("Services you rarely need can be set to manual, so nothing is polled on your behalf.", "不常看的服務可以設成只手動檢查，這樣不會有任何背景輪詢。", "Les services rarement consultés peuvent passer en manuel : aucune interrogation en arrière-plan.", "Selten benötigte Dienste können auf manuell gestellt werden — dann wird nichts im Hintergrund abgefragt."),
+        "w.checknow": ("Check now", "立即檢查", "Vérifier maintenant", "Jetzt prüfen"),
+        "a.tui.hint": ("Press “Check now” to read the quota panel from the agy client itself (takes about half a minute)", "按「立即檢查」讓 agy 自己的面板把配額讀出來（約需半分鐘）", "Appuyez sur « Vérifier maintenant » pour lire le panneau de quota du client agy (environ 30 s)", "„Jetzt prüfen“ liest das Kontingent aus dem agy-Client selbst (dauert etwa eine halbe Minute)"),
+        "a.tui.fail": ("Could not read the quota panel — is an agy session already running?", "讀不到配額面板——是不是已經有一個 agy 在跑？", "Impossible de lire le panneau de quota — une session agy est-elle déjà ouverte ?", "Kontingent-Panel nicht lesbar — läuft bereits eine agy-Sitzung?"),
+        "a.tui.nobin": ("agy command not found", "找不到 agy 指令", "Commande agy introuvable", "Befehl agy nicht gefunden"),
+        "g.gemini": ("Gemini %@", "Gemini %@", "Gemini %@", "Gemini %@"),
+        "g.claudegpt": ("Claude/GPT %@", "Claude／GPT %@", "Claude/GPT %@", "Claude/GPT %@"),
+        "g.5h.short": ("5-hour", "5 小時", "5 h", "5 Std."),
+        "g.week.short": ("weekly", "週", "hebdo", "Woche"),
     ]
 }

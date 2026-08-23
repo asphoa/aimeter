@@ -162,3 +162,21 @@ python3 tools/gen_l10n.py
 MIT — see [LICENSE](LICENSE). No third-party assets are bundled: no vendor
 fonts, no mascot art, no icon sets. Everything drawn on screen is drawn by the
 code in this repository.
+
+## Antigravity: how the quota is read
+
+Antigravity publishes these numbers in exactly one place — the `/usage` panel of
+its own CLI. There is no endpoint a third party can ask: the credential the CLI
+stores is not an OAuth access token the internal quota endpoint accepts (tested,
+HTTP 401), so producing one would mean impersonating the client.
+
+So this app does the opposite. **Check now** on the Antigravity row launches the
+real `agy` client in a pseudo-terminal, types `/usage`, and reads the panel it
+draws. Every request to Google is made by the genuine client with its own
+credentials and headers.
+
+It runs **only when you press it** — never on a timer, and the source defaults to
+"manual only". It takes roughly half a minute, and it will not work while you
+have an `agy` session of your own open, since the CLI binds a local port.
+
+Set `agyQuotaViaTUI: false` in the settings file to switch it off entirely.

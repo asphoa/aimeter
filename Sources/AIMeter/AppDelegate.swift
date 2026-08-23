@@ -205,6 +205,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let rows = buildPanelRows([p], readings, cfg)
             guard !rows.isEmpty else { continue }
             rows.forEach { menu.addItem(item($0)) }
+            let check = NSMenuItem(title: "    " + L.t("w.checknow"),
+                                   action: #selector(checkProvider(_:)), keyEquivalent: "")
+            check.target = self
+            check.representedObject = p.id
+            menu.addItem(check)
             menu.addItem(.separator())
         }
 
@@ -339,6 +344,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cfg.save()
         restartTimer()
         rebuildMenu()
+    }
+
+    /// Checking one source, on purpose. This is the only path allowed to make a
+    /// request that must not happen on a timer.
+    @objc private func checkProvider(_ sender: NSMenuItem) {
+        guard let pid = sender.representedObject as? String,
+              let provider = providers.first(where: { $0.id == pid }) else { return }
+        lastFetched[pid] = nil
+        refresh([provider], manual: true)
     }
 
     @objc private func openAccounts() {
