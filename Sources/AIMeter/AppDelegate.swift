@@ -176,6 +176,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var allReadings: [Reading] { providers.flatMap { readings[$0.id] ?? [] } }
 
+    /// Panel order follows the menu bar strip, so a source that was moved to the
+    /// second line is also second in the list. Sources not on the strip keep
+    /// their built-in order and follow behind.
+    private var orderedProviders: [Provider] {
+        var out: [Provider] = []
+        for line in cfg.menuBar.lines {
+            guard let p = providers.first(where: { $0.id == line.provider }),
+                  !out.contains(where: { $0.id == p.id }) else { continue }
+            out.append(p)
+        }
+        out.append(contentsOf: providers.filter { p in !out.contains { $0.id == p.id } })
+        return out
+    }
+
     private func updateTitle() {
         guard let button = statusItem.button else { return }
         let lines = cfg.menuBar.lines.map { resolveStripLine($0, readings, cfg) }
@@ -201,7 +215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let menu = statusItem?.menu else { return }
         menu.removeAllItems()
 
-        for p in providers {
+        for p in orderedProviders {
             let rows = buildPanelRows([p], readings, cfg)
             guard !rows.isEmpty else { continue }
             rows.forEach { menu.addItem(item($0)) }
