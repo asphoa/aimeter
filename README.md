@@ -102,14 +102,23 @@ Not every vendor exposes a balance, and this app will not invent one:
 - **Anthropic pay-as-you-go API** — likewise; separate from the subscription
   token used above.
 
-### A note on Antigravity
+### Antigravity: how its quota is read
 
-Antigravity's quota lives behind an internal Google endpoint. This app does
-**not** call it; it reads what the CLI already logged. Repeated automated calls
-against a vendor's internal endpoints — multiplied by several accounts — are the
-traffic pattern that gets accounts flagged. `agyAllowDirectQuotaCall: true` in
-the settings file turns the direct call on. Consider carefully before using it
-across more than one account.
+Antigravity publishes these numbers in exactly one place — the `/usage` panel of
+its own CLI. There is no endpoint a third party can ask: the credential the CLI
+stores is not an OAuth access token the internal quota endpoint accepts (tested,
+HTTP 401), so producing one would mean impersonating the client.
+
+So this app does the opposite. **Check now** on the Antigravity row launches the
+real `agy` client in a pseudo-terminal, types `/usage`, and reads the panel it
+draws. Every request to Google is made by the genuine client with its own
+credentials and headers.
+
+It runs **only when you press it** — never on a timer, and the source defaults to
+"manual only". It takes roughly half a minute, and it will not work while you
+have an `agy` session of your own open, since the CLI binds a local port.
+
+Set `agyQuotaViaTUI: false` in the settings file to switch it off entirely.
 
 ## Adding accounts
 
@@ -120,10 +129,21 @@ Everything is done in **Accounts…** in the menu. Nothing requires editing a fi
   shows up as a failure right away instead of as a silently wrong number.
 - **Add account** takes a pasted key (stored in the keychain), a key file, or —
   for Codex and Antigravity — the folder that acts as that account's home.
-- **Test** runs one account through its real provider and shows the result.
+- **Test** runs one account through its real provider and shows the result,
+  marked ✓ or ✗ so a working account and a broken one do not look alike.
 - Every service accepts more than one account. For Codex and Antigravity an
   account is a separate home directory; folders placed in
   `~/.config/aimeter/pools/<service>/` are picked up by auto-detect.
+
+### How often each source is checked
+
+The same window sets a check interval per source, including **only when I ask**.
+A source set to manual is skipped by the timer and by **Refresh now**; it updates
+when you press **Check now** under its own heading in the panel.
+
+Reasonable settings differ by source: Codex reads local files and costs nothing,
+DeepSeek is a balance that moves slowly, and Claude is the one that spends a
+request per refresh.
 
 ### Choosing what appears in the menu bar
 
@@ -147,6 +167,14 @@ Two schemes, switchable in the same place:
   single-window service. Identity then comes from position alone, and there is
   no colour alarm; length is the only signal of how full a bar is.
 
+Every colour is yours to change, in the **Colours** section of the same window:
+the text, the bar background, the nearly-spent alarm, the two panel bar states,
+and — per service — one colour for the 5-hour half and one for the weekly half.
+
+A colour you set is a fixed value and will not follow light and dark mode; the
+defaults are semantic colours that do. Leave a role alone to keep the adaptive
+default, or press **Reset all colours** to go back.
+
 ## Adding a language
 
 Four are built in — English, 繁體中文, Français, Deutsch — plus "Follow system".
@@ -162,21 +190,3 @@ python3 tools/gen_l10n.py
 MIT — see [LICENSE](LICENSE). No third-party assets are bundled: no vendor
 fonts, no mascot art, no icon sets. Everything drawn on screen is drawn by the
 code in this repository.
-
-## Antigravity: how the quota is read
-
-Antigravity publishes these numbers in exactly one place — the `/usage` panel of
-its own CLI. There is no endpoint a third party can ask: the credential the CLI
-stores is not an OAuth access token the internal quota endpoint accepts (tested,
-HTTP 401), so producing one would mean impersonating the client.
-
-So this app does the opposite. **Check now** on the Antigravity row launches the
-real `agy` client in a pseudo-terminal, types `/usage`, and reads the panel it
-draws. Every request to Google is made by the genuine client with its own
-credentials and headers.
-
-It runs **only when you press it** — never on a timer, and the source defaults to
-"manual only". It takes roughly half a minute, and it will not work while you
-have an `agy` session of your own open, since the CLI binds a local port.
-
-Set `agyQuotaViaTUI: false` in the settings file to switch it off entirely.
