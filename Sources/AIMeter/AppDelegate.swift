@@ -58,6 +58,7 @@ func resolveStripLine(_ line: MenuLine,
     // should look different from one with two, not like one with a half missing.
     if gauges.count == 1 {
         out.merged = gauges[0].percent
+        out.mergedKind = gauges[0].kind == .shortWindow ? .shortWindow : .longWindow
         return out
     }
     out.top = gauges.filter { $0.kind == .shortWindow }.compactMap(\.percent).max()
@@ -66,6 +67,7 @@ func resolveStripLine(_ line: MenuLine,
     // all weekly caps. That is one measurement conceptually, so it draws as one
     // full-height bar rather than a half-empty pair.
     if out.top == nil || out.bottom == nil {
+        out.mergedKind = out.top != nil ? .shortWindow : .longWindow
         out.merged = out.top ?? out.bottom ?? gauges.compactMap(\.percent).max()
         out.top = nil
         out.bottom = nil

@@ -168,6 +168,13 @@ struct Config: Codable {
         agyQuotaViaTUI = (try? c.decode(Bool.self, forKey: .agyQuotaViaTUI)) ?? def.agyQuotaViaTUI
         agyBinary = (try? c.decode(String.self, forKey: .agyBinary)) ?? def.agyBinary
         colours = (try? c.decode([String: String].self, forKey: .colours)) ?? def.colours
+        // Each service used to have one colour; it now has one per window.
+        // An old key becomes the 5-hour colour rather than silently vanishing.
+        for (key, value) in colours where key.hasPrefix("service.")
+            && !key.hasSuffix(".5h") && !key.hasSuffix(".week") {
+            colours[key + ".5h"] = value
+            colours.removeValue(forKey: key)
+        }
         claudeProbeModel = (try? c.decode(String.self, forKey: .claudeProbeModel)) ?? def.claudeProbeModel
         accounts = (try? c.decode([String: [AccountSpec]].self, forKey: .accounts)) ?? def.accounts
     }

@@ -15,23 +15,47 @@ enum Palette {
     static let alarm = "alarm"
     static let ok = "ok"
     static let warn = "warn"
-    static func service(_ id: String) -> String { "service." + id }
+    /// Each service has two colours, one per window. They are separate roles
+    /// rather than one colour plus a derivation, because a derived shade is not
+    /// something the user can choose.
+    static func service(_ id: String, _ kind: GaugeKind) -> String {
+        "service." + id + (kind == .shortWindow ? ".5h" : ".week")
+    }
 
     static let serviceRoles = ["claude", "codex", "agy", "openrouter", "deepseek", "local", "generic"]
 
-    private static let defaults: [String: NSColor] = [
-        alarm: NSColor(srgbRed: 1.0, green: 0.271, blue: 0.227, alpha: 1),
-        ok:    NSColor(srgbRed: 0.196, green: 0.843, blue: 0.294, alpha: 1),
-        warn:  NSColor(srgbRed: 1.0, green: 0.702, blue: 0.251, alpha: 1),
-        // Cool-side hues, leaving red and orange free to mean one thing only.
-        "service.claude":     NSColor(srgbRed: 0.898, green: 0.600, blue: 0.239, alpha: 1),
-        "service.codex":      NSColor(srgbRed: 0.184, green: 0.651, blue: 0.353, alpha: 1),
-        "service.agy":        NSColor(srgbRed: 0.243, green: 0.769, blue: 0.918, alpha: 1),
-        "service.openrouter": NSColor(srgbRed: 0.643, green: 0.420, blue: 0.925, alpha: 1),
-        "service.deepseek":   NSColor(srgbRed: 0.878, green: 0.380, blue: 0.620, alpha: 1),
-        "service.local":      NSColor(srgbRed: 0.639, green: 0.639, blue: 0.337, alpha: 1),
-        "service.generic":    NSColor(srgbRed: 0.659, green: 0.608, blue: 0.545, alpha: 1)
+    /// Base hues, cool side of the wheel so red and orange mean one thing only.
+    /// The weekly default is the base lightened; both are overridable.
+    private static let bases: [String: NSColor] = [
+        "claude":     NSColor(srgbRed: 0.898, green: 0.600, blue: 0.239, alpha: 1),
+        "codex":      NSColor(srgbRed: 0.184, green: 0.651, blue: 0.353, alpha: 1),
+        "agy":        NSColor(srgbRed: 0.243, green: 0.769, blue: 0.918, alpha: 1),
+        "openrouter": NSColor(srgbRed: 0.643, green: 0.420, blue: 0.925, alpha: 1),
+        "deepseek":   NSColor(srgbRed: 0.878, green: 0.380, blue: 0.620, alpha: 1),
+        "local":      NSColor(srgbRed: 0.639, green: 0.639, blue: 0.337, alpha: 1),
+        "generic":    NSColor(srgbRed: 0.659, green: 0.608, blue: 0.545, alpha: 1)
     ]
+
+    private static var defaults: [String: NSColor] {
+        var out: [String: NSColor] = [
+            alarm: NSColor(srgbRed: 1.0, green: 0.271, blue: 0.227, alpha: 1),
+            ok:    NSColor(srgbRed: 0.196, green: 0.843, blue: 0.294, alpha: 1),
+            warn:  NSColor(srgbRed: 1.0, green: 0.702, blue: 0.251, alpha: 1)
+        ]
+        for (id, base) in bases {
+            out["service." + id + ".5h"] = base
+            out["service." + id + ".week"] = blend(base, toward: .white, 0.35)
+        }
+        return out
+    }
+
+    private static func blend(_ a: NSColor, toward b: NSColor, _ t: CGFloat) -> NSColor {
+        guard let x = a.usingColorSpace(.sRGB), let y = b.usingColorSpace(.sRGB) else { return a }
+        return NSColor(srgbRed: x.redComponent * (1 - t) + y.redComponent * t,
+                       green: x.greenComponent * (1 - t) + y.greenComponent * t,
+                       blue: x.blueComponent * (1 - t) + y.blueComponent * t,
+                       alpha: 1)
+    }
 
     /// The colour for a role, honouring an override.
     static func colour(_ role: String) -> NSColor {

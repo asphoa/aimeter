@@ -304,7 +304,6 @@ struct AccountsView: View {
 
     private var coloursSection: some View {
         let two = Array(repeating: GridItem(.flexible(), alignment: .leading), count: 2)
-        let three = Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3)
         return VStack(alignment: .leading, spacing: 6) {
             Text(L.t("w.colours")).font(.headline)
             Text(L.t("w.colours.intro"))
@@ -318,9 +317,16 @@ struct AccountsView: View {
                 colourWell(L.t("w.c.warn"), Palette.warn)
             }
             Text(L.t("w.c.lines")).font(.subheadline).padding(.top, 4)
-            LazyVGrid(columns: three, alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 4) {
                 ForEach(Palette.serviceRoles, id: \.self) { id in
-                    colourWell(serviceTitle(id), Palette.service(id))
+                    HStack(spacing: 12) {
+                        Text(serviceTitle(id))
+                            .frame(width: 150, alignment: .leading)
+                        colourWell(L.t("g.5h.short"), Palette.service(id, .shortWindow))
+                            .frame(width: 130, alignment: .leading)
+                        colourWell(L.t("g.week.short"), Palette.service(id, .longWindow))
+                            .frame(width: 130, alignment: .leading)
+                    }
                 }
             }
             Button(L.t("w.c.reset")) {

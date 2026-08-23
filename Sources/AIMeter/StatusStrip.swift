@@ -20,6 +20,8 @@ struct StripLine {
     var top: Double?
     var bottom: Double?
     var merged: Double?
+    /// Which window a merged bar came from, so it takes that window's colour.
+    var mergedKind: GaugeKind = .other
     var state: ReadingState = .off
     var stale: Bool = false
 
@@ -83,7 +85,7 @@ enum StatusStrip {
             return
         }
         if let merged = line.merged {
-            bar(merged, x: y, height: pair, colour: colour(line, .other, merged, scheme))
+            bar(merged, x: y, height: pair, colour: colour(line, line.mergedKind, merged, scheme))
             return
         }
         if let top = line.top {
@@ -158,12 +160,7 @@ enum StatusStrip {
             // Red is reserved: it overrides identity so that "nearly spent" is
             // never something the eye has to decode.
             if pct >= 90 { return Palette.colour(Palette.alarm) }
-            let base = Palette.colour(Palette.service(line.provider))
-            switch kind {
-            case .shortWindow: c = base
-            case .longWindow:  c = blend(base, with: .white, 0.35)
-            case .other:       c = base
-            }
+            c = Palette.colour(Palette.service(line.provider, kind))
         }
         if line.stale { c = c.withAlphaComponent(0.55) }
         return c
