@@ -54,6 +54,42 @@ name in Keychain Access — they are separate rows under "login".
 spawns its own `sandbox-exec` for manifest evaluation, which cannot nest inside
 some sandboxed environments.
 
+### Testing
+
+```bash
+./tools/test.sh
+```
+
+A lightweight, dependency-free assertion suite — not XCTest, for the same
+reason `build.sh` calls `swiftc` directly rather than `swift build`: `swift
+test` goes through SwiftPM, which spawns its own `sandbox-exec` and cannot
+nest inside some sandboxed environments. `tools/test.sh` compiles the app's
+source files (everything except `main.swift`, which has its own top-level
+code) together with `tools/tests/*.swift` and runs the result.
+
+It covers pure logic only — no network, no keychain, no subprocess launch —
+so it runs in well under a second. The heaviest coverage is the URL-safety
+guarantee in `GenericProvider` (`approvedHost`/`safeURL`): that a credential's
+destination cannot be redirected by anything in the settings file, including
+the exact attacker payloads found during the security review below. The rest
+covers parsing that has broken silently before — Antigravity's screen capture
+(mixed line endings, ANSI stripping), the settings file's tolerant decoding of
+older configs — plus the menu bar strip's gauge-to-bar mapping and a few
+formatting helpers.
+
+One test (`trustedHome`'s ownership check) needs to run outside a sandbox that
+restricts `FileManager.attributesOfItem`'s owner field — the same class of
+restriction that already applies to network and keychain access elsewhere in
+this project. It is not expected to affect a normal `swift`/Xcode environment
+or CI.
+
+What it does not cover: anything that talks to a vendor API, drives the
+keychain, or launches `agy` in a pty. Those paths have been verified by hand,
+repeatedly, against the running app — see Diagnostics below — rather than
+mocked, since a mock of the exact bug class this project has hit (bytes lost
+to a full pty buffer, a capture with mixed CR/LF/CRLF) would likely have
+missed the bug too.
+
 ### Diagnostics
 
 ```bash

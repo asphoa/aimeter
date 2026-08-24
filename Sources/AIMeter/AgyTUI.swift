@@ -238,7 +238,7 @@ enum AgyTUI {
 
 // fd_set has no usable API from Swift; these are the two operations needed.
 private func fdZero(_ set: inout fd_set) {
-    withUnsafeMutableBytes(of: &set) { $0.initializeMemory(as: UInt8.self, repeating: 0) }
+    _ = withUnsafeMutableBytes(of: &set) { $0.initializeMemory(as: UInt8.self, repeating: 0) }
 }
 
 private func fdSet(_ fd: Int32, _ set: inout fd_set) {
