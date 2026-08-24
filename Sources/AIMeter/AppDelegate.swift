@@ -261,6 +261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(languageMenu())
         menu.addItem(intervalMenu())
         add(menu, L.t("m.debug"), #selector(openDebug))
+        add(menu, L.t("m.about"), #selector(openAbout))
         menu.addItem(.separator())
         add(menu, L.t("m.quit"), #selector(quit), key: "q")
     }
@@ -395,6 +396,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openDebug() {
         NSWorkspace.shared.open(URL(fileURLWithPath: Config.dir))
+    }
+
+    @objc private func openAbout() {
+        AboutWindowController.shared.show()
     }
 
     @objc private func quit() { NSApp.terminate(nil) }

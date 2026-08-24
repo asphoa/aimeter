@@ -7,6 +7,7 @@ cd "$(dirname "$0")"
 
 APP="dist/AIMeter.app"
 BUNDLE_ID="${AIMETER_BUNDLE_ID:-com.example.aimeter}"
+VERSION="$(cat VERSION)"
 mkdir -p .build/{tmp,modcache}
 
 echo "→ 編譯"
@@ -43,8 +44,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
     <key>CFBundleExecutable</key><string>AIMeter</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+    <key>CFBundleVersion</key><string>${VERSION}</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>NSHighResolutionCapable</key><true/>

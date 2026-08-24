@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="${1:?usage: make_dmg.sh <version>}"
+VERSION="${1:-$(cat VERSION)}"
 APP="dist/AIMeter.app"
 [ -d "$APP" ] || { echo "build it first: ./build.sh"; exit 1; }
 

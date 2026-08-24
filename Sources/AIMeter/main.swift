@@ -142,6 +142,44 @@ if let idx = CommandLine.arguments.firstIndex(of: "--settings"),
     exit(0)
 }
 
+/// `AIMeter --about out.png` renders the About window offscreen.
+@MainActor
+func renderAbout(to path: String) {
+    let host = NSHostingController(rootView: aboutViewForRendering())
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 10),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+    window.contentViewController = host
+    window.setContentSize(NSSize(width: 320, height: 10))
+    let view = host.view
+    view.layoutSubtreeIfNeeded()
+    // Two passes: the first lets Text discover the 320pt width and wrap: the
+    // window's height is still whatever it started at until this runs again.
+    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+    view.layoutSubtreeIfNeeded()
+    let fitted = host.sizeThatFits(in: NSSize(width: 320, height: CGFloat.greatestFiniteMagnitude))
+    window.setContentSize(fitted)
+    view.layoutSubtreeIfNeeded()
+    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    let png = rep.representation(using: NSBitmapImageRep.FileType.png, properties: [:])
+    try? png?.write(to: URL(fileURLWithPath: path))
+    print("wrote \(path)  (\(Int(view.bounds.width))x\(Int(view.bounds.height)) pt)")
+    _ = window
+}
+
+if let idx = CommandLine.arguments.firstIndex(of: "--about"),
+   CommandLine.arguments.count > idx + 1 {
+    let path = CommandLine.arguments[idx + 1]
+    if let langIdx = CommandLine.arguments.firstIndex(of: "--lang"),
+       CommandLine.arguments.count > langIdx + 1,
+       let lang = Lang(rawValue: CommandLine.arguments[langIdx + 1]) {
+        L.current = lang
+    }
+    NSApplication.shared.setActivationPolicy(.accessory)
+    MainActor.assumeIsolated { renderAbout(to: path) }
+    exit(0)
+}
+
 if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
    CommandLine.arguments.count > idx + 1 {
     let path = CommandLine.arguments[idx + 1]
