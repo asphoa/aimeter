@@ -40,15 +40,21 @@ enum Keychain {
 /// Depth-first search for the first value whose key matches any of `names`
 /// (case/underscore insensitive). Credential blobs change shape between
 /// versions; matching on the key name survives that better than a fixed path.
+///
+/// Keys are visited in sorted order, not in the order a Swift dictionary
+/// happens to hash them. That matters where a blob holds more than one
+/// matching key: an unordered search returns a different one on different
+/// launches of the same binary, so a bug in what it picks would surface as an
+/// intermittent fault rather than a reproducible one. Callers should still
+/// narrow the blob before searching it - see `Credential.container`.
 func findString(in obj: Any, names: [String]) -> String? {
-    let wanted = Set(names.map { $0.lowercased().replacingOccurrences(of: "_", with: "") })
+    let wanted = normalised(names)
     func walk(_ o: Any) -> String? {
         if let d = o as? [String: Any] {
-            for (k, v) in d {
-                let norm = k.lowercased().replacingOccurrences(of: "_", with: "")
-                if wanted.contains(norm), let s = v as? String, !s.isEmpty { return s }
+            for (k, v) in d.sorted(by: { $0.key < $1.key }) {
+                if wanted.contains(norm(k)), let s = v as? String, !s.isEmpty { return s }
             }
-            for (_, v) in d { if let r = walk(v) { return r } }
+            for (_, v) in d.sorted(by: { $0.key < $1.key }) { if let r = walk(v) { return r } }
         } else if let a = o as? [Any] {
             for v in a { if let r = walk(v) { return r } }
         }
@@ -58,18 +64,15 @@ func findString(in obj: Any, names: [String]) -> String? {
 }
 
 func findNumber(in obj: Any, names: [String]) -> Double? {
-    let wanted = Set(names.map { $0.lowercased().replacingOccurrences(of: "_", with: "") })
+    let wanted = normalised(names)
     func walk(_ o: Any) -> Double? {
         if let d = o as? [String: Any] {
-            for (k, v) in d {
-                let norm = k.lowercased().replacingOccurrences(of: "_", with: "")
-                if wanted.contains(norm) {
-                    if let n = v as? Double { return n }
-                    if let n = v as? Int { return Double(n) }
-                    if let s = v as? String, let n = Double(s) { return n }
-                }
+            for (k, v) in d.sorted(by: { $0.key < $1.key }) where wanted.contains(norm(k)) {
+                if let n = v as? Double { return n }
+                if let n = v as? Int { return Double(n) }
+                if let s = v as? String, let n = Double(s) { return n }
             }
-            for (_, v) in d { if let r = walk(v) { return r } }
+            for (_, v) in d.sorted(by: { $0.key < $1.key }) { if let r = walk(v) { return r } }
         } else if let a = o as? [Any] {
             for v in a { if let r = walk(v) { return r } }
         }
@@ -77,3 +80,9 @@ func findNumber(in obj: Any, names: [String]) -> Double? {
     }
     return walk(obj)
 }
+
+private func norm(_ k: String) -> String {
+    k.lowercased().replacingOccurrences(of: "_", with: "")
+}
+
+private func normalised(_ names: [String]) -> Set<String> { Set(names.map(norm)) }

@@ -94,6 +94,8 @@ enum L {
         "k.denied": ("Keychain access denied — relaunch and choose “Always Allow”", "鑰匙圈授權被拒——重新啟動本程式並選「總是允許」", "Accès au trousseau refusé — relancez et choisissez « Toujours autoriser »", "Schlüsselbund-Zugriff verweigert — neu starten und „Immer erlauben“ wählen"),
         "k.error": ("Keychain error %@: %@", "鑰匙圈錯誤 %@：%@", "Erreur de trousseau %@ : %@", "Schlüsselbund-Fehler %@: %@"),
         "c.expired": ("Sign-in expired — run claude in a terminal to log in again", "登入已過期——在終端跑一次 claude 重新登入", "Session expirée — relancez claude dans un terminal pour vous reconnecter", "Anmeldung abgelaufen — claude im Terminal erneut ausführen"),
+        "c.stale": ("Access token expired — run claude once in a terminal and it refreshes itself", "存取權杖過期——在終端跑一次 claude 就會自動刷新", "Jeton d’accès expiré — lancez claude une fois dans un terminal, il se renouvelle", "Zugriffstoken abgelaufen — claude einmal im Terminal starten, es erneuert sich selbst"),
+        "c.stale.session": ("The sign-in itself is still valid (expires %@)", "登入本身仍然有效（%@到期）", "La session elle-même reste valide (expire %@)", "Die Anmeldung selbst gilt weiter (läuft %@ ab)"),
         "c.noheaders": ("Response carried no anthropic-ratelimit headers", "回應裏沒有 anthropic-ratelimit 標頭", "La réponse ne contient aucun en-tête anthropic-ratelimit", "Antwort enthielt keine anthropic-ratelimit-Header"),
         "c.status": ("Status: %@", "狀態：%@", "État : %@", "Status: %@"),
         "x.nosnapshot": ("No quota snapshot in recent sessions", "近期 session 裏沒有額度快照", "Aucun instantané de quota dans les sessions récentes", "Kein Kontingent-Schnappschuss in aktuellen Sitzungen"),

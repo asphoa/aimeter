@@ -341,6 +341,157 @@ func testResolveStripLineReturnsNoDataWhenGaugesHaveNoPercent() {
     T.check("a percent-less gauge yields no bar data", !line.hasData)
 }
 
+// MARK: - Credential: which token comes out of a blob holding several
+//
+// `Claude Code-credentials` carries the subscription's own OAuth under
+// `claudeAiOauth` *and* an `mcpOAuth` directory with one entry per configured
+// MCP server, each with an `accessToken` of its own — forty of them on the
+// machine this was diagnosed on. Picking the wrong one sends a third party's
+// token to api.anthropic.com and reports the resulting 401 as an expired
+// Claude sign-in. Every entry happens to be empty today, so the bug is latent;
+// these fixtures make it non-latent so a regression cannot hide behind that.
+
+/// The real item's shape, with the MCP tokens filled in as they will be the
+/// day the user authorises one of those servers.
+private func claudeBlob(access: String = "sk-ant-oat-REAL",
+                        expiresAt: Any? = 1_787_648_408_691,
+                        refreshExpiresAt: Any? = 1_788_733_210_691) -> [String: Any] {
+    var own: [String: Any] = ["accessToken": access, "refreshToken": "sk-ant-ort-REAL",
+                              "scopes": ["user:inference"], "subscriptionType": "max"]
+    if let expiresAt { own["expiresAt"] = expiresAt }
+    if let refreshExpiresAt { own["refreshTokenExpiresAt"] = refreshExpiresAt }
+    var mcp: [String: Any] = [:]
+    for name in ["aaa-sorts-first", "linear", "notion", "zzz-sorts-last"] {
+        mcp[name] = ["serverName": name, "accessToken": "mcp-token-\(name)",
+                     "refreshToken": "mcp-refresh-\(name)",
+                     "expiresAt": 1_000_000_000_000] as [String: Any]
+    }
+    return ["mcpOAuth": mcp, "claudeAiOauth": own]
+}
+
+func testCredentialPrefersTheSubscriptionTokenOverMCPTokens() {
+    T.eq("subscription token wins over MCP tokens",
+         Credential.unwrap(json: claudeBlob(), field: nil), "sk-ant-oat-REAL")
+
+    // The assertion above can pass by luck: with two keys at the top level the
+    // walk reaches one subtree first, and which one depends on a hash seed
+    // fixed per process. The narrowing is what makes it not luck, so pin the
+    // narrowing itself — `container` must hand back the subscription's own
+    // object, never the blob that also holds `mcpOAuth`.
+    let narrowed = Credential.container(claudeBlob(), field: nil) as? [String: Any]
+    T.eq("container narrows to claudeAiOauth", narrowed?["refreshToken"] as? String, "sk-ant-ort-REAL")
+    T.isNil("the narrowed object cannot see mcpOAuth at all", narrowed?["mcpOAuth"])
+
+    // Not once — every time. Swift fixes its hash seed per process, so
+    // repeating the *same* keys would only re-run one ordering; the server
+    // names are varied instead, which is what actually moves `mcpOAuth` and
+    // `claudeAiOauth` around relative to each other.
+    var picks = Set<String>()
+    for i in 0..<200 {
+        var blob = claudeBlob()
+        var mcp: [String: Any] = [:]
+        for j in 0...(i % 7) {
+            let name = "srv-\(i)-\(j)-\(UUID().uuidString)"
+            mcp[name] = ["serverName": name, "accessToken": "mcp-token-\(name)"] as [String: Any]
+        }
+        blob["mcpOAuth"] = mcp
+        picks.insert(Credential.unwrap(json: blob, field: nil) ?? "nil-\(i)")
+    }
+    T.eq("no MCP token is ever chosen, over 200 differently-shaped blobs",
+         picks, ["sk-ant-oat-REAL"])
+
+    // No MCP token may come out under any circumstance, including when the
+    // subscription's own entry is the one that is empty.
+    let hollow = Credential.unwrap(json: claudeBlob(access: ""), field: nil)
+    T.check("an empty subscription token does not fall through to an MCP token",
+            hollow == nil, "got \(String(describing: hollow))")
+
+    // An explicit field still wins — this is how the DeepSeek account reads a
+    // multi-key file, and narrowing must not have quietly taken that over.
+    let multi: [String: Any] = ["deepseek": "ds-key", "openai": "oa-key"]
+    T.eq("keyJSONField still selects its field", Credential.unwrap(json: multi, field: "deepseek"), "ds-key")
+    T.eq("a flat blob without either container still resolves",
+         Credential.unwrap(json: ["api_key": "flat-key"], field: nil), "flat-key")
+}
+
+func testCredentialExpiryReadsBothHalvesOfTheOAuthPair() {
+    // Milliseconds, as Claude Code writes them: 2026-08-25T09:00:08.691Z and
+    // 2026-09-06T22:20:10.691Z — the pair actually observed while diagnosing
+    // this, an access token hours from expiry against a refresh token days from it.
+    let e = Credential.expiry(json: claudeBlob(), field: nil)
+    T.eq("access expiry read as milliseconds", e.access?.timeIntervalSince1970, 1_787_648_408.691)
+    T.eq("refresh expiry read as milliseconds", e.refresh?.timeIntervalSince1970, 1_788_733_210.691)
+
+    // refreshTokenExpiresAt must not be mistaken for expiresAt: they differ by
+    // a prefix only, and reading the long one as the short one would hide
+    // exactly the staleness this feature exists to report.
+    T.check("the two are not the same value", e.access != e.refresh)
+
+    // Seconds are told from milliseconds by magnitude, not by which app wrote it.
+    let secs = Credential.expiry(json: claudeBlob(expiresAt: 1_787_648_408,
+                                                  refreshExpiresAt: 1_788_733_210), field: nil)
+    T.eq("a seconds stamp is not divided by a thousand", secs.access?.timeIntervalSince1970, 1_787_648_408)
+
+    // A credential with no expiry recorded — a pasted API key — must never be
+    // called expired, or the pre-flight check would refuse to probe forever.
+    let none = Credential.expiry(json: ["api_key": "flat-key"], field: nil)
+    T.isNil("a keyless blob has no access expiry", none.access)
+    T.check("no recorded expiry is not an expired token", !none.accessExpired)
+    T.check("no recorded expiry is not a live refresh token", !none.refreshAlive)
+
+    // The two states the menu has to tell apart.
+    let past = Date().timeIntervalSince1970 - 3600
+    let future = Date().timeIntervalSince1970 + 86_400
+    let stale = Credential.expiry(json: claudeBlob(expiresAt: past * 1000,
+                                                   refreshExpiresAt: future * 1000), field: nil)
+    T.check("stale access token is expired", stale.accessExpired)
+    T.check("stale access token still has a live session", stale.refreshAlive)
+
+    let dead = Credential.expiry(json: claudeBlob(expiresAt: past * 1000,
+                                                  refreshExpiresAt: past * 1000), field: nil)
+    T.check("a dead refresh token is a real sign-out", dead.accessExpired && !dead.refreshAlive)
+}
+
+func testClaudeProviderSeparatesAStaleTokenFromARealSignOut() {
+    let p = ClaudeProvider(cfg: Config())
+    let acct = AccountSpec(name: "Claude Code", keychainService: "Claude Code-credentials")
+    let past = Date(timeIntervalSinceNow: -3600)
+    let future = Date(timeIntervalSinceNow: 86_400 * 12)
+
+    // Access token stale, refresh token alive: the common case, and the one the
+    // app used to mis-report. It must not tell the user to log in again.
+    let stale = p.refused(acct, Credential.Expiry(access: past, refresh: future))
+    T.eq("stale token: first line names the token, not the sign-in",
+         stale.lines.first, L.t("c.stale"))
+    T.eq("stale token: a second line says the session survives", stale.lines.count, 2)
+    T.check("stale token: does not tell the user to log in again",
+            !stale.lines.contains(L.t("c.expired")))
+
+    // Refresh token dead too: this really is a sign-out.
+    let dead = p.refused(acct, Credential.Expiry(access: past, refresh: past))
+    T.eq("dead refresh token: the sign-in message", dead.lines, [L.t("c.expired")])
+
+    // No expiry recorded at all — a pasted API key refused by the server. With
+    // nothing to say about a session, fall back to the sign-in message rather
+    // than inventing a reassurance.
+    let unknown = p.refused(acct, Credential.Expiry())
+    T.eq("unknown expiry falls back to the sign-in message", unknown.lines, [L.t("c.expired")])
+
+    T.eq("all three are still error rows", [stale.state, dead.state, unknown.state],
+         [.error, .error, .error])
+}
+
+func testFindStringVisitsKeysInAStableOrder() {
+    // Two matching keys at the same level: whichever is chosen, it must be the
+    // same one every time, so that a wrong choice is a reproducible bug.
+    let blob: [String: Any] = ["zebra": ["token": "z"], "alpha": ["token": "a"]]
+    var seen = Set<String>()
+    for _ in 0..<200 {
+        seen.insert(findString(in: blob, names: ["token"]) ?? "nil")
+    }
+    T.eq("a tie between two subtrees resolves the same way every time", seen.count, 1)
+}
+
 // MARK: - entry point
 //
 // @main rather than a plain main.swift: top-level executable statements are
@@ -371,6 +522,10 @@ struct Runner {
         testResolveStripLineHandlesSeveralSameWindowGauges()
         testResolveStripLineReturnsNoDataWhenProviderAbsent()
         testResolveStripLineReturnsNoDataWhenGaugesHaveNoPercent()
+        testCredentialPrefersTheSubscriptionTokenOverMCPTokens()
+        testCredentialExpiryReadsBothHalvesOfTheOAuthPair()
+        testClaudeProviderSeparatesAStaleTokenFromARealSignOut()
+        testFindStringVisitsKeysInAStableOrder()
 
         let elapsed = Date().timeIntervalSince(start)
         print(String(format: "(%.2fs)", elapsed))

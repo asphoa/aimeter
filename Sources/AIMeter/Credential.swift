@@ -46,38 +46,116 @@ enum Credential {
     /// item, another app's keychain item, a file, or an environment variable.
     /// A JSON blob is unwrapped to the field that looks like the key.
     static func read(_ a: AccountSpec) -> Result<String, Fail> {
-        var blob: String?
-        if let svc = a.keychainService {
-            if let cached = TokenCache.shared.value(svc) {
-                blob = cached
-            } else {
-                switch Keychain.genericPassword(service: svc) {
-                case .success(let s):
-                    blob = s
-                    TokenCache.shared.set(svc, s)
-                case .failure(let e):
-                    return .failure(e)
-                }
-            }
-        } else if let file = a.keyFile {
-            blob = readKey(file: file, jsonField: nil)
+        let raw: String
+        switch blob(a) {
+        case .success(let s): raw = s
+        case .failure(let e): return .failure(e)
         }
-        guard var value = blob?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return .failure(Fail(message: L.t("e.notoken"))) }
+        guard value.hasPrefix("{") || value.hasPrefix("["),
+              let obj = try? JSONSerialization.jsonObject(with: Data(value.utf8)) else {
+            return .success(value)
+        }
+        guard let found = unwrap(json: obj, field: a.keyJSONField) else {
             return .failure(Fail(message: L.t("e.notoken")))
         }
-        if value.hasPrefix("{") || value.hasPrefix("["),
-           let obj = try? JSONSerialization.jsonObject(with: Data(value.utf8)) {
-            let node: Any = a.keyJSONField.flatMap { (obj as? [String: Any])?[$0] } ?? obj
-            if let s = node as? String {
-                value = s
-            } else if let found = findString(in: node, names: ["accessToken", "access_token",
-                                                               "api_key", "key", "token", "secret"]) {
-                value = found
-            } else {
-                return .failure(Fail(message: L.t("e.notoken")))
+        return .success(found)
+    }
+
+    /// The stored blob for an account, cached, before anything is pulled out of
+    /// it. Shared by `read` and `expiry` so a blob is fetched - and its keychain
+    /// dialog risked - once, not once per question asked about it.
+    private static func blob(_ a: AccountSpec) -> Result<String, Fail> {
+        if let svc = a.keychainService {
+            if let cached = TokenCache.shared.value(svc) { return .success(cached) }
+            switch Keychain.genericPassword(service: svc) {
+            case .success(let s):
+                TokenCache.shared.set(svc, s)
+                return .success(s)
+            case .failure(let e):
+                return .failure(e)
             }
         }
-        return .success(value)
+        if let file = a.keyFile, let s = readKey(file: file, jsonField: nil) {
+            return .success(s)
+        }
+        return .failure(Fail(message: L.t("e.notoken")))
+    }
+
+    /// Field names a credential might be filed under, across the blob shapes
+    /// this app meets. Pure, and internal rather than private, so the test
+    /// suite can hold it against a real blob's structure.
+    static let tokenFields = ["accessToken", "access_token", "api_key", "key", "token", "secret"]
+
+    /// Pulls the credential out of a parsed JSON blob.
+    static func unwrap(json obj: Any, field: String?) -> String? {
+        let node = container(obj, field: field)
+        if let s = node as? String { return s.isEmpty ? nil : s }
+        return findString(in: node, names: tokenFields)
+    }
+
+    /// Narrows a blob to the object holding *this* account's own credential,
+    /// before any search by field name runs over it.
+    ///
+    /// `Claude Code-credentials` is not one credential. Beside the
+    /// subscription's own OAuth under `claudeAiOauth` it carries an `mcpOAuth`
+    /// directory with one entry per configured MCP server - forty of them on
+    /// the machine this was written on - and every one of those entries has an
+    /// `accessToken` field of its own. Searching the whole blob by field name
+    /// can therefore return some MCP server's token instead of the
+    /// subscription's, which would not merely give a wrong reading: it would
+    /// send a third party's OAuth token to api.anthropic.com, a host it was
+    /// never issued for, and the 401 that came back would be reported to the
+    /// user as their Claude sign-in having expired.
+    ///
+    /// Today every one of those entries holds an empty string, and the
+    /// non-empty check in `findString` is the only thing standing between this
+    /// app and that bug - it fires the day the user authorises one MCP server.
+    /// Narrowing first is the fix; the sorted traversal in `findString` only
+    /// makes the failure reproducible, it does not prevent it.
+    static func container(_ obj: Any, field: String?) -> Any {
+        guard let d = obj as? [String: Any] else { return obj }
+        if let field { return d[field] ?? obj }
+        if let own = d["claudeAiOauth"] { return own }
+        return obj
+    }
+
+    /// When an account's stored OAuth tokens stop being accepted.
+    ///
+    /// Claude Code records both halves: `expiresAt` for the access token it
+    /// hands out, and `refreshTokenExpiresAt` for the credential that mints the
+    /// next access token. The gap between the two is the whole story behind a
+    /// menu reading "expired" while the account behind it is perfectly fine.
+    struct Expiry: Sendable {
+        var access: Date?
+        var refresh: Date?
+        /// False when there is no expiry recorded at all: a pasted API key does
+        /// not expire on a clock, and must not be treated as though it had.
+        var accessExpired: Bool { access.map { $0 <= Date() } ?? false }
+        var refreshAlive: Bool { refresh.map { $0 > Date() } ?? false }
+    }
+
+    static func expiry(_ a: AccountSpec) -> Expiry {
+        guard case .success(let raw) = blob(a),
+              let obj = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) else { return Expiry() }
+        return expiry(json: obj, field: a.keyJSONField)
+    }
+
+    static func expiry(json obj: Any, field: String?) -> Expiry {
+        let node = container(obj, field: field)
+        return Expiry(access: stamp(findNumber(in: node, names: ["expiresAt", "expires_at"])),
+                      refresh: stamp(findNumber(in: node, names: ["refreshTokenExpiresAt",
+                                                                  "refresh_token_expires_at"])))
+    }
+
+    /// Claude Code writes these in milliseconds; plenty of other things write
+    /// seconds. Told apart by magnitude rather than by which app wrote the blob:
+    /// a seconds stamp this side of the year 5000 is under 1e11, a milliseconds
+    /// stamp for any date since 1973 is over it.
+    private static func stamp(_ n: Double?) -> Date? {
+        guard let n, n > 0 else { return nil }
+        return Date(timeIntervalSince1970: n > 1e11 ? n / 1000 : n)
     }
 
     /// The destination a pasted credential was approved for.

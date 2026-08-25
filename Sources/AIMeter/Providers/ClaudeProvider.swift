@@ -26,11 +26,32 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
     }
 
     private func fetch(_ account: AccountSpec, retryingAfter401: Bool = false) async -> Reading {
+        // Claude Code's stored access token is short-lived - the item on the
+        // machine this was written against carried an expiry a few hours out,
+        // against a refresh token good for another twelve days. The CLI trades
+        // one for the other when it next runs, and nothing else does. A menu bar
+        // polling every sixty seconds is not a Claude Code session, so on a
+        // machine where someone signed in once and then only watched this app,
+        // the access token goes stale by itself while the account behind it is
+        // untouched. That is the whole of the "expired after a few hours" report.
+        //
+        // A token already past its expiry cannot be made to work by sending it.
+        // Drop the cached copy first: the CLI may have refreshed the keychain
+        // item since this app launched, and re-reading is the only way to notice
+        // - waiting for a 401 to invalidate the cache means one wasted round
+        // trip every time, and a stale reading in between.
+        if !retryingAfter401, Credential.expiry(account).accessExpired {
+            Credential.invalidate(account)
+        }
+
         let token: String
         switch Credential.read(account) {
         case .success(let t): token = t
         case .failure(let e): return .failed(id, title, account.name, e.message)
         }
+
+        let expiry = Credential.expiry(account)
+        if expiry.accessExpired { return refused(account, expiry) }
 
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         req.httpMethod = "POST"
@@ -65,7 +86,7 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
                 Credential.invalidate(account)
                 return await fetch(account, retryingAfter401: true)
             }
-            return .failed(id, title, account.name, L.t("c.expired"))
+            return refused(account, Credential.expiry(account))
         }
         if headers.isEmpty {
             let msg = findString(in: obj, names: ["message"]) ?? L.t("c.noheaders")
@@ -96,6 +117,38 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
             r.state = .warn
         }
         r.state = max(r.state, worstState(r.gauges))
+        return r
+    }
+
+    /// A refused token, reported in the terms that decide what the user has to
+    /// do about it. Two different situations arrive wearing the same 401: an
+    /// access token that has merely gone stale needs the CLI to run once, which
+    /// takes a second and keeps the session; a refresh token past its own expiry
+    /// needs a real sign-in. Telling the user to log in again when they only
+    /// needed the first is how this app spent its first version being wrong.
+    ///
+    /// What this deliberately does *not* do is perform the refresh itself. The
+    /// refresh token is right there in the same blob, and the exchange is a
+    /// single POST - but the endpoint is Anthropic's private one, reachable only
+    /// by presenting the Claude Code CLI's own client_id, which is that
+    /// application's identity and not this one's. This project already drew that
+    /// line for Antigravity: calling an API with a token the real client issued
+    /// is fair use of a credential the user owns; reimplementing another
+    /// application's authentication handshake to mint fresh sessions in its name
+    /// is impersonating it. The technical case says the same thing - the
+    /// exchange rotates the refresh token, so this app would have to write the
+    /// replacement back into the CLI's own keychain item, unlocked, racing any
+    /// running claude process. Losing that race logs the user out for real,
+    /// which is the very complaint this code exists to answer.
+    /// Internal rather than private so the test suite can hold the two branches
+    /// apart: which of these a user reads decides whether they spend a second
+    /// or re-authenticate, and that is worth pinning by string, not by inspection.
+    func refused(_ account: AccountSpec, _ expiry: Credential.Expiry) -> Reading {
+        guard let refresh = expiry.refresh, refresh > Date() else {
+            return .failed(id, title, account.name, L.t("c.expired"))
+        }
+        var r = Reading.failed(id, title, account.name, L.t("c.stale"))
+        r.lines.append(L.t("c.stale.session", Fmt.relative(refresh)))
         return r
     }
 
