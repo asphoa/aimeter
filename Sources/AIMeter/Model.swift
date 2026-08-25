@@ -61,8 +61,13 @@ func withTimeout(_ seconds: Double,
     }
 }
 
-/// Reads a credential from a file that is either a raw key or a JSON blob.
-func readKey(file: String?, jsonField: String? = nil) -> String? {
+/// Reads a credential file's raw contents - a bare key, or a JSON blob still
+/// unparsed, exactly as `Keychain.genericPassword` returns a keychain item's
+/// raw contents. Left to the caller (`Credential.blob`/`read`/`expiry`) to
+/// unwrap, so a keyFile-backed account is narrowed and field-matched the same
+/// way a keychain-backed one is, rather than by a second, divergent copy of
+/// that logic living here.
+func readKey(file: String?) -> String? {
     guard let file else { return nil }
     // "env:NAME" reads an environment variable instead of a file, which is how
     // most vendors' own CLIs expect their key to be supplied.
@@ -71,15 +76,7 @@ func readKey(file: String?, jsonField: String? = nil) -> String? {
     }
     guard let raw = try? String(contentsOfFile: expand(file), encoding: .utf8) else { return nil }
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard trimmed.hasPrefix("{") || trimmed.hasPrefix("[") else {
-        return trimmed.isEmpty ? nil : trimmed
-    }
-    guard let obj = try? JSONSerialization.jsonObject(with: Data(trimmed.utf8)) else { return nil }
-    if let field = jsonField, let root = obj as? [String: Any], let node = root[field] {
-        if let s = node as? String { return s }
-        return findString(in: node, names: ["api_key", "key", "token", "secret"])
-    }
-    return findString(in: obj, names: ["api_key", "key", "token", "access_token", "accessToken"])
+    return trimmed.isEmpty ? nil : trimmed
 }
 
 extension Reading {

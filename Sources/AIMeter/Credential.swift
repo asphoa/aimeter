@@ -53,9 +53,15 @@ enum Credential {
         }
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return .failure(Fail(message: L.t("e.notoken"))) }
-        guard value.hasPrefix("{") || value.hasPrefix("["),
-              let obj = try? JSONSerialization.jsonObject(with: Data(value.utf8)) else {
+        guard value.hasPrefix("{") || value.hasPrefix("[") else {
             return .success(value)
+        }
+        // A value that looks like JSON but fails to parse - a truncated or
+        // half-written key file - must not fall through to being read as a
+        // literal key: the whole blob, secrets and all, would go out as the
+        // credential in an Authorization header.
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(value.utf8)) else {
+            return .failure(Fail(message: L.t("e.notoken")))
         }
         guard let found = unwrap(json: obj, field: a.keyJSONField) else {
             return .failure(Fail(message: L.t("e.notoken")))
@@ -77,7 +83,7 @@ enum Credential {
                 return .failure(e)
             }
         }
-        if let file = a.keyFile, let s = readKey(file: file, jsonField: nil) {
+        if let file = a.keyFile, let s = readKey(file: file) {
             return .success(s)
         }
         return .failure(Fail(message: L.t("e.notoken")))

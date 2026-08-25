@@ -60,12 +60,9 @@ enum ClaudeCLI {
     /// benefit, and a surprise to whoever pressed the button.
     ///
     /// Deliberately not extended to `~/.claude/.credentials.json`, the file the
-    /// CLI uses where there is no keychain. This app is macOS-only, where the
-    /// keychain is what the CLI writes; and measured while building this, a
-    /// key-file account carries no expiry at all, because `Credential.blob`
-    /// hands that path to `readKey`, which returns the extracted token rather
-    /// than the blob it came from. Accepting the file here would have added a
-    /// branch that reads as supported and can never run.
+    /// CLI uses where there is no keychain: this app is macOS-only, where the
+    /// keychain is what the CLI writes. Accepting the file here would have
+    /// added a branch that reads as supported and can never run.
     static let credentialService = "Claude Code-credentials"
 
     static func ownsCLICredential(_ a: AccountSpec) -> Bool {

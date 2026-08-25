@@ -452,6 +452,87 @@ func testCredentialExpiryReadsBothHalvesOfTheOAuthPair() {
     T.check("a dead refresh token is a real sign-out", dead.accessExpired && !dead.refreshAlive)
 }
 
+// MARK: - Credential: the keyFile path narrows and field-matches like the
+// keychain path, instead of running its own separate extraction
+//
+// Before this fix, `Credential.blob` handed a keyFile account's raw contents
+// to `readKey`, which unwrapped the JSON itself and always discarded
+// `a.keyJSONField` (called with `jsonField: nil`). That meant a keyFile blob
+// holding more than one plausible token-shaped field could resolve to the
+// wrong one — the exact class of bug `container`/`unwrap` exist to prevent on
+// the keychain path — and `Credential.expiry` received an already-unwrapped
+// string rather than the JSON object it expects, so it silently returned an
+// empty `Expiry` for every keyFile-backed account.
+
+/// Writes a JSON fixture under `.build/tests/tmp`, not `/tmp` - the latter is
+/// unreachable from a compiled binary running inside this project's usual
+/// sandbox, and a `try!` write there would abort the whole suite (no summary,
+/// no later tests run) rather than fail just this one assertion the way
+/// every other filesystem-touching test in this file does.
+private func writeJSONFixture(_ obj: [String: Any]) -> String? {
+    let dir = ".build/tests/tmp"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let path = dir + "/aimeter-tests-keyfile-\(UUID().uuidString).json"
+    guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
+    return (try? data.write(to: URL(fileURLWithPath: path))) != nil ? path : nil
+}
+
+func testCredentialKeyFileHonoursJSONFieldThroughTheSameNarrowing() {
+    // Two providers' keys sharing one file, each with its own plausible
+    // token-shaped field. Picking the wrong one would silently charge one
+    // provider's usage against the other's account.
+    guard let path = writeJSONFixture([
+        "deepseek": ["api_key": "ds-real-key", "scope": "chat"],
+        "openrouter": ["api_key": "or-real-key", "scope": "chat"]
+    ]) else {
+        T.check("could write the keyFile JSON fixture", false)
+        return
+    }
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let deepseek = AccountSpec(name: "t", keyFile: path, keyJSONField: "deepseek")
+    switch Credential.read(deepseek) {
+    case .success(let v): T.eq("keyFile account honours its keyJSONField", v, "ds-real-key")
+    case .failure(let e): T.check("keyFile read with a field should not fail", false, e.message)
+    }
+
+    let openrouter = AccountSpec(name: "t", keyFile: path, keyJSONField: "openrouter")
+    switch Credential.read(openrouter) {
+    case .success(let v):
+        T.eq("a different keyJSONField on the same file resolves independently", v, "or-real-key")
+    case .failure(let e): T.check("keyFile read with a field should not fail", false, e.message)
+    }
+
+    // `expiry()` must see the raw JSON object too, not an already-unwrapped
+    // token string — this was the concrete symptom: `Credential.expiry`
+    // silently returned an empty `Expiry` for every keyFile-backed account
+    // because it could never parse a bare token string as JSON.
+    guard let path2 = writeJSONFixture(["deepseek": ["api_key": "ds-real-key",
+                                                     "expiresAt": 1_787_648_408_691]]) else {
+        T.check("could write the second keyFile JSON fixture", false)
+        return
+    }
+    defer { try? FileManager.default.removeItem(atPath: path2) }
+    let e = Credential.expiry(AccountSpec(name: "t", keyFile: path2, keyJSONField: "deepseek"))
+    T.eq("expiry() reads a keyFile account's JSON instead of always returning empty",
+         e.access?.timeIntervalSince1970, 1_787_648_408.691)
+
+    // A malformed JSON key file (truncated / half-written) must fail cleanly,
+    // not fall through to sending the raw file body - secrets and all - as
+    // the credential itself.
+    let dir = ".build/tests/tmp"
+    let badPath = dir + "/aimeter-tests-keyfile-\(UUID().uuidString).json"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: badPath,
+                                   contents: Data("{\"deepseek\": {\"api_key\": \"ds-real-key\"".utf8))
+    defer { try? FileManager.default.removeItem(atPath: badPath) }
+    switch Credential.read(AccountSpec(name: "t", keyFile: badPath)) {
+    case .success(let v):
+        T.check("truncated JSON must not be read as a literal key", false, "got \(v)")
+    case .failure: T.check("truncated JSON is reported as no token, not leaked as one", true)
+    }
+}
+
 func testClaudeProviderSeparatesAStaleTokenFromARealSignOut() {
     // The CLI-refresh offer adds a line whose presence depends on whether a
     // claude binary happens to be installed on the machine running the tests.
@@ -686,6 +767,7 @@ struct Runner {
         testResolveStripLineReturnsNoDataWhenGaugesHaveNoPercent()
         testCredentialPrefersTheSubscriptionTokenOverMCPTokens()
         testCredentialExpiryReadsBothHalvesOfTheOAuthPair()
+        testCredentialKeyFileHonoursJSONFieldThroughTheSameNarrowing()
         testClaudeProviderSeparatesAStaleTokenFromARealSignOut()
         testClaudeCLIBinaryWhitelist()
         testClaudeCLIOnlyClaimsTheCLIsOwnCredential()
