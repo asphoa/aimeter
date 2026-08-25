@@ -477,8 +477,11 @@ func testClaudeProviderSeparatesAStaleTokenFromARealSignOut() {
     let unknown = p.refused(acct, Credential.Expiry())
     T.eq("unknown expiry falls back to the sign-in message", unknown.lines, [L.t("c.expired")])
 
-    T.eq("all three are still error rows", [stale.state, dead.state, unknown.state],
-         [.error, .error, .error])
+    // Severity has to earn the same distinction the text already makes: a
+    // one-second fix should not carry the same red-dot urgency as an actual
+    // logout, or the message right next to it is undermined.
+    T.eq("stale token reads as a warning, not an error", stale.state, .warn)
+    T.eq("a real sign-out is still an error", [dead.state, unknown.state], [.error, .error])
 }
 
 func testFindStringVisitsKeysInAStableOrder() {

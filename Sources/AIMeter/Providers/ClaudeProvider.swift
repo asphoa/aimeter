@@ -147,7 +147,12 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         guard let refresh = expiry.refresh, refresh > Date() else {
             return .failed(id, title, account.name, L.t("c.expired"))
         }
-        var r = Reading.failed(id, title, account.name, L.t("c.stale"))
+        // Deliberately .warn, not .error: the whole point of telling these two
+        // cases apart is that this one is a one-second fix and the sign-in is
+        // fine, so it should not read as urgent as an actual logout - the red
+        // dot was undermining the message right next to it.
+        var r = Reading(id: id, title: title, account: account.name,
+                        lines: [L.t("c.stale")], state: .warn)
         r.lines.append(L.t("c.stale.session", Fmt.relative(refresh)))
         return r
     }
