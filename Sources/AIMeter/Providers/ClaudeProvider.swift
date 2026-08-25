@@ -18,14 +18,20 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         let accounts = cfg.accounts(id, fallback: Discovery.claude())
         var out: [Reading] = []
         for a in accounts {
-            out.append(await withTimeout(25, { await self.fetch(a) },
+            // A manual check may launch the CLI to unstick a stale token, and
+            // then still has the probe request to make. Budgeting the automatic
+            // 25s for both is how that path would report a timeout instead of
+            // the reading it had just gone and fetched.
+            let budget: Double = manual ? 50 : 25
+            out.append(await withTimeout(budget, { await self.fetch(a, manual: manual) },
                                          onTimeout: { .failed(self.id, self.title, a.name,
                                                               L.t("e.timeout.keychain")) }))
         }
         return out
     }
 
-    private func fetch(_ account: AccountSpec, retryingAfter401: Bool = false) async -> Reading {
+    private func fetch(_ account: AccountSpec, manual: Bool = false,
+                       retryingAfter401: Bool = false, afterCLI: Bool = false) async -> Reading {
         // Claude Code's stored access token is short-lived - the item on the
         // machine this was written against carried an expiry a few hours out,
         // against a refresh token good for another twelve days. The CLI trades
@@ -51,7 +57,16 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         }
 
         let expiry = Credential.expiry(account)
-        if expiry.accessExpired { return refused(account, expiry) }
+        if expiry.accessExpired {
+            // The one thing that refreshes this token is the CLI running, and
+            // this app is not the CLI. So run it - once, because a person asked,
+            // and only when a refresh could actually work.
+            if manual, !afterCLI, cfg.claudeRefreshViaCLI, expiry.refreshAlive,
+               ClaudeCLI.ownsCLICredential(account) {
+                return await refreshViaCLI(account, expiry)
+            }
+            return refused(account, expiry)
+        }
 
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         req.httpMethod = "POST"
@@ -84,7 +99,8 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
             // telling the user their session expired.
             guard retryingAfter401 else {
                 Credential.invalidate(account)
-                return await fetch(account, retryingAfter401: true)
+                return await fetch(account, manual: manual,
+                                   retryingAfter401: true, afterCLI: afterCLI)
             }
             return refused(account, Credential.expiry(account))
         }
@@ -120,6 +136,48 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         return r
     }
 
+    /// Runs the vendor's own CLI once, then reads the keychain again.
+    ///
+    /// Nothing here writes a credential or speaks any part of Anthropic's
+    /// authentication protocol: it starts the genuine binary on its read-only
+    /// status subcommand and lets that program do what it already does on every
+    /// start. See ClaudeCLI for why that line matters and where it is drawn.
+    ///
+    /// Each way this can fail says something different, and each is reported as
+    /// itself. An earlier draft returned the unchanged stale message whatever
+    /// happened, which would have reproduced the original complaint exactly -
+    /// a button pressed, nothing visibly different, no way to tell whether it
+    /// had even tried.
+    private func refreshViaCLI(_ account: AccountSpec,
+                               _ expiry: Credential.Expiry) async -> Reading {
+        guard let bin = ClaudeCLI.binary(cfg.claudeBinary) else {
+            return refused(account, expiry, note: L.t("c.refresh.nobin"))
+        }
+        guard let home = trustedHome(account.home ?? "~", marker: ".claude") else {
+            return refused(account, expiry, note: L.t("c.refresh.nobin"))
+        }
+        let outcome = await Task.detached(priority: .utility) {
+            ClaudeCLI.run(binary: bin, home: home)
+        }.value
+
+        switch outcome {
+        case .failed(let why):
+            return refused(account, expiry, note: L.t("c.refresh.failed", why))
+        case .signedOut:
+            // The CLI has the last word on this: it can see a credential this
+            // app cannot, and if it says there is none, the stored blob's own
+            // dates are not the thing to report.
+            return .failed(id, title, account.name, L.t("c.refresh.signedout"))
+        case .signedIn:
+            Credential.invalidate(account)
+            let fresh = Credential.expiry(account)
+            guard !fresh.accessExpired else {
+                return refused(account, fresh, note: L.t("c.refresh.stale"))
+            }
+            return await fetch(account, manual: true, afterCLI: true)
+        }
+    }
+
     /// A refused token, reported in the terms that decide what the user has to
     /// do about it. Two different situations arrive wearing the same 401: an
     /// access token that has merely gone stale needs the CLI to run once, which
@@ -143,7 +201,13 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
     /// Internal rather than private so the test suite can hold the two branches
     /// apart: which of these a user reads decides whether they spend a second
     /// or re-authenticate, and that is worth pinning by string, not by inspection.
-    func refused(_ account: AccountSpec, _ expiry: Credential.Expiry) -> Reading {
+    ///
+    /// `note` carries what a CLI run just established, when there was one. With
+    /// no note, the row also gains the line telling the user that pressing
+    /// Check now will do the run for them - the affordance is the point, and it
+    /// belongs where the problem is described, not in a manual nobody reads.
+    func refused(_ account: AccountSpec, _ expiry: Credential.Expiry,
+                 note: String? = nil) -> Reading {
         guard let refresh = expiry.refresh, refresh > Date() else {
             return .failed(id, title, account.name, L.t("c.expired"))
         }
@@ -154,6 +218,12 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         var r = Reading(id: id, title: title, account: account.name,
                         lines: [L.t("c.stale")], state: .warn)
         r.lines.append(L.t("c.stale.session", Fmt.relative(refresh)))
+        if let note {
+            r.lines.append(note)
+        } else if cfg.claudeRefreshViaCLI, ClaudeCLI.ownsCLICredential(account),
+                  ClaudeCLI.binary(cfg.claudeBinary) != nil {
+            r.lines.append(L.t("c.refresh.offer"))
+        }
         return r
     }
 

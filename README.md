@@ -155,6 +155,43 @@ Not every vendor exposes a balance, and this app will not invent one:
 - **Anthropic pay-as-you-go API** — likewise; separate from the subscription
   token used above.
 
+### Claude Code: what “Check now” does when the token has gone stale
+
+Claude Code's access token lasts hours; the refresh token behind it lasts days,
+and **only the CLI trades one for the other**, when it runs. A menu bar app that
+never launches the CLI therefore watches the access token expire while the
+sign-in behind it is perfectly healthy. Earlier versions said so correctly — and
+then the row's own **Check now** button could do nothing about it, because all
+it did was read the same unchanged keychain item again.
+
+So it now presses the button it was telling you to press. On a manual check of a
+Claude row whose access token is stale (and whose sign-in is still good), this
+app runs the real, vendor-installed `claude auth status` once, waits for it to
+finish, and re-reads the keychain. It does **not** refresh the token itself:
+that would mean replaying Anthropic's private token endpoint under the CLI's
+own client id, and writing a rotated refresh token back into the CLI's keychain
+item while a real `claude` might be doing the same. This app only starts the
+genuine program and reads the result.
+
+- **Manual only.** Never on the timer, never at launch, never on opening the
+  menu — the same rule as Antigravity.
+- **Read-only subcommand.** `auth status` reports; it makes no model request, so
+  nothing here is charged against the window it is reporting on. With no
+  credential present it prints its report and exits, without offering to log in.
+- **Only the CLI's own account.** An account holding a pasted API key never
+  causes the CLI to be launched: running `claude` would not refresh it.
+- **Only from the installers' own locations** — `~/.local/bin`, `/usr/local/bin`,
+  `/opt/homebrew/bin`, `~/.claude/local`. A path in the settings file is
+  honoured only if it is one of these.
+- **The auto-updater is switched off for the run**, so a menu click cannot
+  quietly pull down a new CLI build.
+- Every outcome is reported as itself — CLI not found, CLI says signed out, CLI
+  ran and the token is still stale — rather than repeating the same message and
+  leaving you to guess whether anything happened.
+
+Set `claudeRefreshViaCLI: false` in the settings file to switch it off; set
+`claudeBinary` to pick one of the allowed paths explicitly.
+
 ### Antigravity: how its quota is read
 
 Antigravity publishes these numbers in exactly one place — the `/usage` panel of

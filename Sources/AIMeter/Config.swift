@@ -148,6 +148,14 @@ struct Config: Codable {
     /// request that does return a number is one to make by hand.
     var intervals: [String: Int] = ["agy": 0]
     var claudeProbeModel: String = "claude-haiku-4-5-20251001"
+    /// A manual check on a Claude row whose access token has gone stale runs
+    /// the real `claude auth status` once and re-reads the keychain, which is
+    /// the only thing that refreshes that token. On by default: the alternative
+    /// is a "Check now" button that cannot succeed, which is what this replaces.
+    /// Never on a timer - see ClaudeCLI and ClaudeProvider.
+    var claudeRefreshViaCLI: Bool = true
+    /// Path to the claude binary; empty means look in the usual places.
+    var claudeBinary: String = ""
     /// providerId -> accounts. Empty means "autodiscover on next launch".
     var accounts: [String: [AccountSpec]] = [:]
 
@@ -176,6 +184,9 @@ struct Config: Codable {
             colours.removeValue(forKey: key)
         }
         claudeProbeModel = (try? c.decode(String.self, forKey: .claudeProbeModel)) ?? def.claudeProbeModel
+        claudeRefreshViaCLI = (try? c.decode(Bool.self, forKey: .claudeRefreshViaCLI))
+            ?? def.claudeRefreshViaCLI
+        claudeBinary = (try? c.decode(String.self, forKey: .claudeBinary)) ?? def.claudeBinary
         accounts = (try? c.decode([String: [AccountSpec]].self, forKey: .accounts)) ?? def.accounts
     }
 

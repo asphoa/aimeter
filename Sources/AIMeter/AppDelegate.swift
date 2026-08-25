@@ -274,8 +274,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - actions
 
-    /// The one path a person can trigger, and therefore the only one allowed to
-    /// make a request a timer must not.
+    /// One of the two paths a person can trigger, and therefore one of the two
+    /// allowed to do what a timer must not: make a request, or launch another
+    /// program. Both reach a provider as `manual: true`; nothing else does.
     @objc private func doRefresh() {
         lastRefresh = nil
         lastFetched.removeAll()
@@ -381,8 +382,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
     }
 
-    /// Checking one source, on purpose. This is the only path allowed to make a
-    /// request that must not happen on a timer.
+    /// Checking one source, on purpose. The other `manual: true` path - and the
+    /// one the Claude row's CLI refresh and the Antigravity panel are really
+    /// for, since both take seconds and start a vendor binary.
     @objc private func checkProvider(_ sender: NSMenuItem) {
         guard let pid = sender.representedObject as? String,
               let provider = providers.first(where: { $0.id == pid }) else { return }

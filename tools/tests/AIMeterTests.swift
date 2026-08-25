@@ -453,7 +453,13 @@ func testCredentialExpiryReadsBothHalvesOfTheOAuthPair() {
 }
 
 func testClaudeProviderSeparatesAStaleTokenFromARealSignOut() {
-    let p = ClaudeProvider(cfg: Config())
+    // The CLI-refresh offer adds a line whose presence depends on whether a
+    // claude binary happens to be installed on the machine running the tests.
+    // Switched off here so these assertions test the message rather than the
+    // machine; the offer has its own test below.
+    var plain = Config()
+    plain.claudeRefreshViaCLI = false
+    let p = ClaudeProvider(cfg: plain)
     let acct = AccountSpec(name: "Claude Code", keychainService: "Claude Code-credentials")
     let past = Date(timeIntervalSinceNow: -3600)
     let future = Date(timeIntervalSinceNow: 86_400 * 12)
@@ -495,6 +501,159 @@ func testFindStringVisitsKeysInAStableOrder() {
     T.eq("a tie between two subtrees resolves the same way every time", seen.count, 1)
 }
 
+// MARK: - ClaudeCLI: pressing the button the message tells the user to press
+
+/// The whitelist is the whole of the protection. The settings file is plain
+/// text, so a path taken from it unchecked would let anything able to edit that
+/// file choose which binary this app runs, as the user.
+func testClaudeCLIBinaryWhitelist() {
+    let outsider = "/tmp/aimeter-test-claude-\(getpid())"
+    FileManager.default.createFile(atPath: outsider, contents: Data("#!/bin/sh\n".utf8),
+                                   attributes: [.posixPermissions: 0o755])
+    defer { try? FileManager.default.removeItem(atPath: outsider) }
+
+    T.check("the test's own binary really is executable",
+            FileManager.default.isExecutableFile(atPath: outsider))
+    T.isNil("executable outside whitelist is rejected", ClaudeCLI.binary(outsider))
+    T.isNil("nonexistent configured path is rejected", ClaudeCLI.binary("/no/such/claude"))
+    T.check("whitelist covers the installers' own destinations",
+            ClaudeCLI.allowedBinaries == ["~/.local/bin/claude", "/usr/local/bin/claude",
+                                          "/opt/homebrew/bin/claude", "~/.claude/local/claude"])
+    // An empty configured path means "look in the usual places", not "run the
+    // binary at the empty path" — the settings file stores it as "".
+    T.check("empty configured path falls back to the search",
+            ClaudeCLI.binary("") == ClaudeCLI.binary(nil))
+}
+
+/// Only the CLI's own credential may cause the CLI to be launched. Running it
+/// for a pasted API key would spawn a subprocess that cannot possibly help,
+/// since nothing about that key is refreshed by `claude` running.
+func testClaudeCLIOnlyClaimsTheCLIsOwnCredential() {
+    T.check("the CLI's keychain item counts",
+            ClaudeCLI.ownsCLICredential(
+                AccountSpec(name: "a", keychainService: "Claude Code-credentials")))
+    // Not the file the CLI uses where there is no keychain: on macOS the CLI
+    // writes the keychain, and a key-file account carries no expiry to trigger
+    // this path with. See ClaudeCLI for the measurement.
+    T.check("the credentials file is not accepted in the keychain's place",
+            !ClaudeCLI.ownsCLICredential(
+                AccountSpec(name: "a", keyFile: "~/.claude/.credentials.json")))
+    T.check("a pasted key stored by this app does not",
+            !ClaudeCLI.ownsCLICredential(
+                AccountSpec(name: "a", keychainService: "AIMeter · claude · work")))
+    T.check("an unrelated key file does not",
+            !ClaudeCLI.ownsCLICredential(
+                AccountSpec(name: "a", keyFile: "~/.config/anthropic/key")))
+    T.check("an account with no credential source at all does not",
+            !ClaudeCLI.ownsCLICredential(AccountSpec(name: "a")))
+}
+
+/// Measured 2026-08-25 against claude 2.1.243: started without USER, the same
+/// binary reports `loggedIn: false` on a machine that is signed in, because its
+/// keychain item is filed under the account name. Building the environment from
+/// nothing — the habit inherited from AgyTUI — would therefore have produced a
+/// button that ran the CLI, refreshed nothing, and reported the same stale
+/// message as before. This test exists so that regresses loudly.
+func testClaudeCLIEnvironmentCarriesWhatTheCredentialLookupNeeds() {
+    let env = ClaudeCLI.environment(home: "/Users/someone", user: "someone", lang: "en_US.UTF-8")
+    T.eq("USER is passed through", env["USER"], "someone")
+    T.eq("LOGNAME matches USER", env["LOGNAME"], "someone")
+    T.eq("HOME is the account's home", env["HOME"], "/Users/someone")
+    // A menu click must not quietly download a new several-hundred-megabyte CLI.
+    T.eq("the auto-updater is off", env["DISABLE_AUTOUPDATER"], "1")
+    T.eq("non-essential traffic is off", env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1")
+    // Built, not inherited: the parent's environment can point the CLI at a
+    // different credential than the one this row is about.
+    T.isNil("no API key is handed down", env["ANTHROPIC_API_KEY"])
+    T.isNil("no config directory is handed down", env["CLAUDE_CONFIG_DIR"])
+    T.eq("nothing else is smuggled in", Set(env.keys),
+         Set(["HOME", "PATH", "USER", "LOGNAME", "LANG",
+              "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]))
+    T.isNil("an absent LANG is simply omitted",
+            ClaudeCLI.environment(home: "/h", user: "u", lang: nil)["LANG"])
+}
+
+/// Read-only by name and by argument. If this list ever grows a verb, the
+/// justification for running another program at all has changed.
+func testClaudeCLIRunsOnlyTheStatusSubcommand() {
+    T.eq("arguments are the status subcommand", ClaudeCLI.arguments, ["auth", "status", "--json"])
+}
+
+/// The CLI exits 1 both when it is signed out and when it fails, so the exit
+/// code alone cannot decide the message. Measured: signed out prints
+/// `"loggedIn": false` and exits 1, without offering to log in.
+func testClaudeCLIOutcomeReadsTheReportNotJustTheExitCode() {
+    let inJSON = #"{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max"}"#
+    T.eq("a signed-in report is signedIn", ClaudeCLI.outcome(output: inJSON, exitCode: 0), .signedIn)
+    let outJSON = #"{"loggedIn": false, "authMethod": "none"}"#
+    T.eq("a signed-out report is signedOut, exit 1 notwithstanding",
+         ClaudeCLI.outcome(output: outJSON, exitCode: 1), .signedOut)
+    T.check("nothing printed is a failure, not a sign-out",
+            ClaudeCLI.outcome(output: "", exitCode: 1) == .failed("exit 1"))
+    T.check("output that is not the expected report is a failure",
+            ClaudeCLI.outcome(output: "command not found", exitCode: 127) == .failed("exit 127"))
+    T.check("a clean exit printing nothing usable is still a failure",
+            ClaudeCLI.outcome(output: "{}", exitCode: 0) == .failed(L.t("c.refresh.unreadable")))
+}
+
+/// The status report names the account and its organisation. The dump exists to
+/// be pasted somewhere while debugging, so it must not carry them.
+func testClaudeCLIRedactsTheAccountFromTheDump() {
+    let raw = #"{"loggedIn": true, "email": "someone@example.com", "orgId": "ede5df71-cafe", "orgName": "Someone Ltd", "subscriptionType": "max"}"#
+    let safe = ClaudeCLI.redact(raw)
+    T.check("the address is gone", !safe.contains("someone@example.com"))
+    T.check("the organisation id is gone", !safe.contains("ede5df71-cafe"))
+    T.check("the organisation name is gone", !safe.contains("Someone Ltd"))
+    T.check("what the dump is for survives", safe.contains(#""subscriptionType": "max""#))
+    T.check("and so does the field that decides the outcome", safe.contains(#""loggedIn": true"#))
+}
+
+/// A stale row must say that the button can fix it — otherwise the button is
+/// there and nothing tells the user it now does something. And when the feature
+/// is off, or the account is not the CLI's, the offer must not be made.
+func testClaudeProviderOffersTheRefreshOnlyWhenItCouldWork() {
+    let past = Date(timeIntervalSinceNow: -3600)
+    let future = Date(timeIntervalSinceNow: 86_400 * 12)
+    let stale = Credential.Expiry(access: past, refresh: future)
+    let cliAccount = AccountSpec(name: "Claude Code", keychainService: "Claude Code-credentials")
+    let offer = L.t("c.refresh.offer")
+
+    var off = Config()
+    off.claudeRefreshViaCLI = false
+    T.check("switched off, no offer is made",
+            !ClaudeProvider(cfg: off).refused(cliAccount, stale).lines.contains(offer))
+
+    var noBinary = Config()
+    noBinary.claudeRefreshViaCLI = true
+    // Pointed at a path the whitelist rejects, so there is no binary to run
+    // whatever this machine happens to have installed.
+    noBinary.claudeBinary = "/no/such/claude"
+    T.check("with no usable binary, no offer is made",
+            !ClaudeProvider(cfg: noBinary).refused(cliAccount, stale).lines.contains(offer))
+
+    var on = Config()
+    on.claudeRefreshViaCLI = true
+    let pasted = AccountSpec(name: "work", keychainService: "AIMeter · claude · work")
+    T.check("a pasted key is never offered a CLI run",
+            !ClaudeProvider(cfg: on).refused(pasted, stale).lines.contains(offer))
+    // A real sign-out is never offered a refresh: there is nothing to refresh.
+    let dead = Credential.Expiry(access: past, refresh: past)
+    T.check("a dead refresh token gets the sign-in message, not an offer",
+            !ClaudeProvider(cfg: on).refused(cliAccount, dead).lines.contains(offer))
+    // The remaining branch depends on a claude binary being installed, which is
+    // a property of the machine rather than of the code — so it is asserted
+    // where that holds instead of being faked.
+    if ClaudeCLI.binary(nil) != nil {
+        T.check("with the CLI present, the stale row says the button will run it",
+                ClaudeProvider(cfg: on).refused(cliAccount, stale).lines.contains(offer))
+    }
+    // A note from an actual run replaces the offer: the user is told what just
+    // happened, not invited to do again what has just been done.
+    let noted = ClaudeProvider(cfg: on).refused(cliAccount, stale, note: L.t("c.refresh.stale"))
+    T.check("a run's outcome is reported instead of the offer", !noted.lines.contains(offer))
+    T.check("and the outcome itself is on the row", noted.lines.contains(L.t("c.refresh.stale")))
+}
+
 // MARK: - entry point
 //
 // @main rather than a plain main.swift: top-level executable statements are
@@ -528,6 +687,13 @@ struct Runner {
         testCredentialPrefersTheSubscriptionTokenOverMCPTokens()
         testCredentialExpiryReadsBothHalvesOfTheOAuthPair()
         testClaudeProviderSeparatesAStaleTokenFromARealSignOut()
+        testClaudeCLIBinaryWhitelist()
+        testClaudeCLIOnlyClaimsTheCLIsOwnCredential()
+        testClaudeCLIEnvironmentCarriesWhatTheCredentialLookupNeeds()
+        testClaudeCLIRunsOnlyTheStatusSubcommand()
+        testClaudeCLIOutcomeReadsTheReportNotJustTheExitCode()
+        testClaudeCLIRedactsTheAccountFromTheDump()
+        testClaudeProviderOffersTheRefreshOnlyWhenItCouldWork()
         testFindStringVisitsKeysInAStableOrder()
 
         let elapsed = Date().timeIntervalSince(start)
