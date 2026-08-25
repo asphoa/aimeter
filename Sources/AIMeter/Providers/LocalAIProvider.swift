@@ -57,6 +57,25 @@ final class LocalAIProvider: Provider, @unchecked Sendable {
             }
         }
 
+        // --- MLX (mlx_lm.server / mlx_vlm.server) ---
+        // Same OpenAI-compatible /v1/models shape as LM Studio, just a
+        // different default port - this is the community-server pattern
+        // people running their own MLX venv (rather than Ollama or LM
+        // Studio) tend to land on, this machine's own local-model setup
+        // included.
+        if let req = Net.get("http://127.0.0.1:8081/v1/models", timeout: 3),
+           let (obj, http) = try? await Net.json(req), http.statusCode == 200 {
+            anyRuntime = true
+            let models = ((obj as? [String: Any])?["data"] as? [[String: Any]]) ?? []
+            if models.isEmpty {
+                r.lines.append(L.t("l.mlx.idle"))
+            } else {
+                for m in models.prefix(4) {
+                    r.lines.append("MLX: \((m["id"] as? String) ?? "?")")
+                }
+            }
+        }
+
         if !anyRuntime {
             return .off(id, title, nil, L.t("l.none"))
         }

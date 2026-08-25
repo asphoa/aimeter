@@ -139,7 +139,7 @@ This is the part worth reading before you trust it with your credentials.
 | **Antigravity** | The result of the CLI's own quota refresh, read out of `~/.gemini/antigravity-cli/cli.log`. | Snapshot |
 | **OpenRouter** | `GET openrouter.ai/api/v1/key`, once per key. | Live |
 | **DeepSeek** | `GET api.deepseek.com/user/balance`. This is money, not a percentage, so it has no bar. Also flags peak-hour pricing. | Live |
-| **Local AI** | Ollama on `127.0.0.1:11434` and LM Studio on `127.0.0.1:1234`; reports memory held by loaded models. | Live |
+| **Local AI** | Ollama on `127.0.0.1:11434`, LM Studio on `127.0.0.1:1234`, and an MLX server (`mlx_lm.server`/`mlx_vlm.server`) on `127.0.0.1:8081`; reports memory held by loaded models. | Live |
 
 A snapshot is always labelled as one. Nothing is presented as current when it is
 not, and a reading that failed is drawn as three dots — never as an empty bar,
