@@ -57,33 +57,62 @@ enum Palette {
                        alpha: 1)
     }
 
+    /// The ground the panel's marks are drawn against.
+    ///
+    /// A menu is not a window: it is translucent, and on macOS 26 the desktop
+    /// behind it shows through plainly. Every semi-transparent mark drawn into
+    /// one therefore picks up whatever happens to be back there. Resolved at
+    /// draw time, inside the menu's own appearance, so it follows light/dark.
+    private static var ground: NSColor {
+        NSColor.windowBackgroundColor
+    }
+
+    /// A lower emphasis as an *opaque* colour: the tone alpha would have given,
+    /// mixed against the panel's ground here rather than against the desktop.
+    ///
+    /// This is the whole fix for a class of bug that only ever appeared in the
+    /// live menu. A 25%-alpha timestamp over a menu is not grey text, it is a
+    /// window onto the wallpaper; a 30%-alpha gauge track lets a coloured blob
+    /// sit *inside* the bar looking exactly like a reading. Mixing to an opaque
+    /// value keeps the intended tone and makes each mark self-contained.
+    private static func opaque(_ c: NSColor, _ emphasis: CGFloat) -> NSColor {
+        let flat = blend(c, toward: ground, 1 - (c.usingColorSpace(.sRGB)?.alphaComponent ?? 1))
+        guard emphasis < 1 else { return flat }
+        // Held back from the full distance. The emphasis levels were picked
+        // against the opaque white the offscreen render puts behind a row —
+        // a backdrop the live menu never has. Against a real one, with the
+        // desktop showing through around the glyphs, the faintest tier was
+        // being read as absent. Weight is what a lower tier can afford to
+        // spend here; disappearing is not.
+        return blend(flat, toward: ground, (1 - emphasis) * 0.72)
+    }
+
     /// The colour for a role, honouring an override.
     static func colour(_ role: String) -> NSColor {
         if let hex = overrides[role], let c = NSColor(hex: hex) { return c }
         if let d = defaults[role] { return d }
         switch role {
         case text:  return .labelColor
-        case track: return .labelColor.withAlphaComponent(0.30)
+        case track: return opaque(.labelColor, 0.28)
         default:    return .labelColor
         }
     }
 
     /// Text at a lower emphasis. Derived from the text colour so a custom text
     /// colour keeps its hierarchy instead of clashing with a fixed grey.
+    ///
+    /// Opaque, not alpha-blended: see `opaque(_:_:)`. The system's own
+    /// `secondaryLabelColor` and `tertiaryLabelColor` are alpha, which is why
+    /// they were the ones that dissolved into the wallpaper.
     static func text(_ emphasis: CGFloat) -> NSColor {
-        if overrides[text] != nil { return colour(text).withAlphaComponent(emphasis) }
-        switch emphasis {
-        case 1: return .labelColor
-        case 0.7: return .secondaryLabelColor
-        default: return .tertiaryLabelColor
-        }
+        opaque(colour(text), emphasis)
     }
 
     /// Whether a role has been overridden, for the reset button and the pickers.
     static func isCustom(_ role: String) -> Bool { overrides[role] != nil }
 
     static func defaultColour(_ role: String) -> NSColor {
-        defaults[role] ?? (role == track ? NSColor.labelColor.withAlphaComponent(0.30) : .labelColor)
+        defaults[role] ?? (role == track ? opaque(.labelColor, 0.28) : .labelColor)
     }
 }
 

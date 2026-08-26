@@ -80,7 +80,15 @@ enum StatusStrip {
     private static func draw(_ line: StripLine, index: Int, at y: CGFloat,
                              half: CGFloat, scheme: BarColourScheme) {
         let pair = half * 2
-        guard line.hasData, line.state != .error else {
+        // Dots mean "nothing to draw", and `hasData` is the whole of that
+        // question. `state` used to be consulted here as well, which quietly
+        // made this the opposite of a meter: `.error` is two things at once —
+        // a fetch that failed, and a gauge past 90% — so crossing 90% replaced
+        // a service's bar with the same three dots that mean "no reading", at
+        // exactly the moment there was most to report. A failed fetch carries
+        // no gauges anyway (`Reading.failed`), so it still lands on the dots
+        // through `hasData`, which is where that decision belongs.
+        guard line.hasData else {
             drawDots(at: y, height: pair)
             return
         }

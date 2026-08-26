@@ -111,6 +111,83 @@ func renderPanel(to path: String) async {
     print("wrote \(path)  (\(rows.count) rows, \(Int(w))x\(Int(h)) pt)")
 }
 
+/// `AIMeter --menushot out.png` opens the real dropdown — a genuine `NSMenu`,
+/// tracked by AppKit — and photographs it with the pointer resting at a series
+/// of depths down the first section.
+///
+/// `--panel` cannot answer questions about highlighting, material or any other
+/// thing AppKit draws *behind* a row: it renders the row views into a bare
+/// container, and a view outside a menu is never tracked. This flag is the only
+/// way to see what the user sees. It needs Screen Recording permission, and it
+/// moves the pointer, so it is a diagnostic to run deliberately rather than
+/// part of any routine check.
+@MainActor
+func renderMenuShots(to path: String) async {
+    let cfg = Config.load()
+    L.current = cfg.language
+    Palette.overrides = cfg.colours
+    let providers = buildProviders(cfg)
+    var readings: [String: [Reading]] = [:]
+    for p in providers { readings[p.id] = await p.fetchAll() }
+
+    // Built exactly as `rebuildMenu` builds it, including the enabled "Check
+    // now" item: a disabled item and an enabled one do not highlight alike, so
+    // a harness that got that wrong would answer the wrong question.
+    final class Sink: NSObject { @objc func noop(_ s: Any?) {} }
+    let sink = Sink()
+    let menu = NSMenu()
+    for p in providers {
+        let rows = buildPanelRows([p], readings, cfg)
+        guard !rows.isEmpty else { continue }
+        for v in rows {
+            let it = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            v.frame = NSRect(origin: .zero, size: v.intrinsicContentSize)
+            it.view = v
+            menu.addItem(it)
+        }
+        let check = NSMenuItem(title: "    " + L.t("w.checknow"),
+                               action: #selector(Sink.noop(_:)), keyEquivalent: "")
+        check.target = sink
+        menu.addItem(check)
+        menu.addItem(.separator())
+    }
+    guard menu.numberOfItems > 0 else { print("no rows"); return }
+
+    let screenH = NSScreen.main?.frame.height ?? 900
+    let anchor = NSPoint(x: 320, y: screenH - 60)          // AppKit, y from bottom
+    let topLeftY = screenH - anchor.y                       // CoreGraphics, y from top
+    let base = (path as NSString).deletingPathExtension
+    let restore = NSEvent.mouseLocation
+
+    // Down the first section: header, both gauges, "Check now", then past the
+    // separator into the next service as a control.
+    for dy in [-24.0, 12, 30, 48, 66, 84, 104] {
+        let target = CGPoint(x: anchor.x + 90, y: topLeftY + dy)
+        CGWarpMouseCursorPosition(target)
+        let out = "\(base)\(dy < 0 ? "-outside" : "-y\(Int(dy))").png"
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) {
+            // A second warp once the menu is up: AppKit picks its highlight from
+            // pointer movement, and a pointer that never moved after the menu
+            // appeared may leave nothing highlighted at all.
+            CGWarpMouseCursorPosition(CGPoint(x: target.x + 1, y: target.y))
+            CGWarpMouseCursorPosition(target)
+            Thread.sleep(forTimeInterval: 0.45)
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            // Only the menu's own rectangle: a full-screen grab would sweep up
+            // whatever else the person happens to have open.
+            p.arguments = ["-x", "-o", "-R",
+                           "\(Int(anchor.x) - 12),\(Int(topLeftY) - 12),470,330", out]
+            try? p.run()
+            p.waitUntilExit()
+            DispatchQueue.main.async { menu.cancelTracking() }
+        }
+        menu.popUp(positioning: nil, at: anchor, in: nil)
+        print("wrote \(out)")
+    }
+    CGWarpMouseCursorPosition(CGPoint(x: restore.x, y: screenH - restore.y))
+}
+
 /// `AIMeter --settings out.png` renders the Accounts window offscreen, so its
 /// layout can be checked here rather than by asking someone to go and look.
 @MainActor
@@ -187,6 +264,16 @@ if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
     // A semaphore would deadlock here: renderPanel needs the main actor, and
     // the main thread is what would be blocked waiting for it.
     Task { @MainActor in await renderPanel(to: path); done = true }
+    while !done { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
+    exit(0)
+}
+
+if let idx = CommandLine.arguments.firstIndex(of: "--menushot"),
+   CommandLine.arguments.count > idx + 1 {
+    let path = CommandLine.arguments[idx + 1]
+    NSApplication.shared.setActivationPolicy(.accessory)
+    var done = false
+    Task { @MainActor in await renderMenuShots(to: path); done = true }
     while !done { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
     exit(0)
 }
