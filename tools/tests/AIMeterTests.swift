@@ -1099,6 +1099,49 @@ func testTimeoutDoesNotWaitForAnUncooperativeOperation() {
             "returned after \(elapsed)s")
 }
 
+// MARK: - Every L.t("...") call site has a row
+//
+// m.ended/m.expired.hint shipped referenced in Model.swift/main.swift/
+// PanelRows.swift but with no row in gen_l10n.py's table at all - four
+// releases, 226 passing tests, and nobody noticed because L.t() falls back
+// to printing the raw key rather than failing loudly, and it takes a
+// specific locale plus a specific expired-window state to see it with your
+// own eyes. This scans every call site in the real source tree against the
+// real table, the same cross-check a person would have to do by hand.
+
+func testEveryLocalizationCallSiteHasATableRow() {
+    let root = "Sources/AIMeter"
+    guard let enumerator = FileManager.default.enumerator(atPath: root) else {
+        T.check("Sources/AIMeter is readable from the test working directory", false)
+        return
+    }
+    // L.t("literal") and L.t("literal", ...) - not L.t(someVariable), which
+    // is not this bug's shape and cannot be checked without evaluating code.
+    guard let pattern = try? NSRegularExpression(pattern: #"L\.t\(\s*"([^"\\]+)""#) else {
+        T.check("call-site regex compiles", false)
+        return
+    }
+    var missing: [String: String] = [:]  // key -> "file:line"
+    var filesScanned = 0
+    for case let path as String in enumerator {
+        guard path.hasSuffix(".swift") else { continue }
+        let full = root + "/" + path
+        guard let text = try? String(contentsOfFile: full, encoding: .utf8) else { continue }
+        filesScanned += 1
+        for (n, line) in text.components(separatedBy: "\n").enumerated() {
+            let ns = line as NSString
+            for m in pattern.matches(in: line, range: NSRange(location: 0, length: ns.length)) {
+                let key = ns.substring(with: m.range(at: 1))
+                guard !L.allKeys.contains(key) else { continue }
+                missing[key] = "\(path):\(n + 1)"
+            }
+        }
+    }
+    T.check("scanned at least the known source files", filesScanned > 10, "\(filesScanned)")
+    T.eq("every L.t(\"literal\") call site has a row in gen_l10n.py's table",
+         missing.sorted { $0.key < $1.key }.map { "\($0.key) (\($0.value))" }, [])
+}
+
 // MARK: - entry point
 //
 // @main rather than a plain main.swift: top-level executable statements are
@@ -1157,6 +1200,7 @@ struct Runner {
         testAdaptivePaletteSeparatesLinesAndWindows()
         testPanelGaugeColoursKeepWindowIdentityAndSignalUrgency()
         testTimeoutDoesNotWaitForAnUncooperativeOperation()
+        testEveryLocalizationCallSiteHasATableRow()
 
         let elapsed = Date().timeIntervalSince(start)
         print(String(format: "(%.2fs)", elapsed))

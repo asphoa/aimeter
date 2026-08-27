@@ -62,6 +62,15 @@ enum L {
         String(format: t(key), locale: locale, arguments: args)
     }
 
+    /// Every key this table actually has a row for. Exists so the test suite
+    /// can cross-check every L.t call site in the source against a real key
+    /// set, rather than trusting that whoever added a call site also
+    /// remembered to add its row here - m.ended/m.expired.hint shipped
+    /// referenced but rowless for four releases before anyone saw the raw key
+    /// on screen, because it takes a specific locale and a specific expired-
+    /// window state to notice with your own eyes.
+    static var allKeys: Set<String> { Set(table.keys) }
+
     private static let table: [String: (String, String, String, String)] = [
 
         "p.claude": ("Claude Code", "Claude Code", "Claude Code", "Claude Code"),
@@ -145,6 +154,8 @@ enum L {
         "m.loading": ("Loading…", "讀取中…", "Chargement…", "Wird geladen…"),
         "m.snapshot": ("snapshot · %@", "快照 · %@", "instantané · %@", "Schnappschuss · %@"),
         "m.resets": ("resets %@", "%@重置", "réinitialisation %@", "Zurücksetzung %@"),
+        "m.ended": ("ended %@", "%@已結束", "terminée %@", "beendet %@"),
+        "m.expired.hint": ("One window here has already reset since this snapshot - its real number won’t be known until the next check.", "其中一個窗口的重置時間已經過了這份快照——真實數字要等下次查詢才知道。", "Une des fenêtres ici a déjà été réinitialisée depuis cet instantané - son chiffre réel ne sera connu qu’à la prochaine vérification.", "Eines der Fenster hier wurde seit diesem Schnappschuss bereits zurückgesetzt - die tatsächliche Zahl ist erst bei der nächsten Prüfung bekannt."),
         "m.updated": ("Updated %@ · every %ds", "更新於 %@ · 每 %d 秒", "Mis à jour %@ · toutes les %d s", "Aktualisiert %@ · alle %d s"),
         "m.refresh": ("Refresh now", "立即刷新", "Actualiser", "Jetzt aktualisieren"),
         "m.login": ("Start at login", "開機時自動啟動", "Lancer à l’ouverture de session", "Beim Anmelden starten"),
