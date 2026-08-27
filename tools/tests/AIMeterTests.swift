@@ -1061,6 +1061,21 @@ func testAdaptivePaletteSeparatesLinesAndWindows() {
     T.check("critical differs from comfortable", a.hexString != comfortable.hexString)
 }
 
+func testPanelGaugeColoursKeepWindowIdentityAndSignalUrgency() {
+    let shortLow = panelGaugeStyle(kind: .shortWindow, percent: 19)
+    let shortHigh = panelGaugeStyle(kind: .shortWindow, percent: 97)
+    let weeklyLow = panelGaugeStyle(kind: .longWindow, percent: 19)
+    let weeklyHigh = panelGaugeStyle(kind: .longWindow, percent: 97)
+    T.eq("5-hour identity does not change at the limit", shortLow.fill.hexString, shortHigh.fill.hexString)
+    T.check("5-hour and weekly have stable distinct colours", shortLow.fill.hexString != weeklyLow.fill.hexString)
+    T.eq("comfortable window has no urgency cap", Int(shortLow.alertWidth), 0)
+    T.eq("near-limit window has a visible alarm cap", Int(weeklyHigh.alertWidth), 12)
+    T.eq("near-limit cap uses the alarm colour", weeklyHigh.alert?.hexString ?? "", Palette.colour(Palette.alarm).hexString)
+    T.eq("warning window has a smaller amber cap", Int(panelGaugeStyle(kind: .longWindow, percent: 70).alertWidth), 7)
+    T.eq("untyped percentage preserves traffic-light urgency", panelGaugeStyle(kind: .other, percent: 97).fill.hexString,
+         Palette.colour(Palette.alarm).hexString)
+}
+
 func testTimeoutDoesNotWaitForAnUncooperativeOperation() {
     let sem = DispatchSemaphore(value: 0)
     var elapsed = Double.infinity
@@ -1140,6 +1155,7 @@ struct Runner {
         testNearLimitIsNotAFetchFailure()
         testCodexQuotaWireStatusesNeverReachTheUI()
         testAdaptivePaletteSeparatesLinesAndWindows()
+        testPanelGaugeColoursKeepWindowIdentityAndSignalUrgency()
         testTimeoutDoesNotWaitForAnUncooperativeOperation()
 
         let elapsed = Date().timeIntervalSince(start)

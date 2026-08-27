@@ -320,6 +320,8 @@ struct AccountsView: View {
                 colourWell(L.t("w.c.alarm"), Palette.alarm)
                 colourWell(L.t("w.c.ok"), Palette.ok)
                 colourWell(L.t("w.c.warn"), Palette.warn)
+                colourWell(L.t("w.c.panel5h"), Palette.panelShortWindow)
+                colourWell(L.t("w.c.panelweek"), Palette.panelLongWindow)
             }
             Text(L.t("w.c.lines")).font(.subheadline).padding(.top, 4)
             VStack(alignment: .leading, spacing: 4) {

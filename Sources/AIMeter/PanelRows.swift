@@ -20,13 +20,13 @@ enum Panel {
     }
 
     static func gauge(label: String, percent: Double?, value: String,
-                      trailing: String?, fill: NSColor, expired: Bool = false) -> NSView {
+                      trailing: String?, style: PanelGaugeStyle, expired: Bool = false) -> NSView {
         let v = GaugeRowView()
         v.label = label
         v.percent = percent
         v.value = value
         v.trailing = trailing
-        v.fill = fill
+        v.style = style
         v.expired = expired
         return v
     }
@@ -37,6 +37,45 @@ enum Panel {
         v.isError = error
         return v
     }
+}
+
+/// A panel bar spends its main colour on the thing that stays true from one
+/// refresh to the next: which window it measures.  Urgency is a short cap at
+/// the end of an already-filled bar, not a replacement for that identity.
+///
+/// Unlike the status strip, the panel has a 90pt bar, so a 7–12pt cap is large
+/// enough to read as an alarm while leaving the larger part of the mark to say
+/// "5-hour" or "weekly".  A percentage with no recognised time window keeps
+/// the old traffic-light treatment because there is no competing identity to
+/// preserve.
+struct PanelGaugeStyle {
+    var fill: NSColor
+    var alert: NSColor?
+    var alertWidth: CGFloat
+}
+
+func panelGaugeStyle(kind: GaugeKind, percent: Double?) -> PanelGaugeStyle {
+    let pct = percent ?? 0
+    let identity: NSColor?
+    switch kind {
+    case .shortWindow: identity = Palette.colour(Palette.panelShortWindow)
+    case .longWindow:  identity = Palette.colour(Palette.panelLongWindow)
+    case .other:       identity = nil
+    }
+
+    guard let identity else {
+        // A money balance or another untyped percentage has no time-window
+        // identity to communicate, so retain the established traffic light.
+        let fill = Palette.colour(pct >= 90 ? Palette.alarm : (pct >= 70 ? Palette.warn : Palette.ok))
+        return PanelGaugeStyle(fill: fill, alert: nil, alertWidth: 0)
+    }
+    if pct >= 90 {
+        return PanelGaugeStyle(fill: identity, alert: Palette.colour(Palette.alarm), alertWidth: 12)
+    }
+    if pct >= 70 {
+        return PanelGaugeStyle(fill: identity, alert: Palette.colour(Palette.warn), alertWidth: 7)
+    }
+    return PanelGaugeStyle(fill: identity, alert: nil, alertWidth: 0)
 }
 
 /// Builds the panel's rows once, for both the live menu and the offscreen
@@ -59,12 +98,8 @@ func buildPanelRows(_ providers: [Provider],
             rows.append(Panel.header(dot: stateColour(r.state), title: name,
                                      trailing: r.snapshotAt.map { L.t("m.snapshot", Fmt.relative($0)) }))
             for g in r.gauges {
-                // The panel keeps the traffic light: it has room for a label as
-                // well, so hue can carry urgency here without costing identity.
                 let pct = g.percent ?? 0
-                // Brighter than the system greens/oranges so the fill still
-                // separates from a track that is now considerably darker.
-                let fill = Palette.colour(pct >= 90 ? Palette.alarm : (pct >= 70 ? Palette.warn : Palette.ok))
+                let style = panelGaugeStyle(kind: g.kind, percent: g.percent)
                 var trailing = g.resetsAt.map {
                     L.t(g.expired ? "m.ended" : "m.resets", Fmt.relative($0))
                 }
@@ -72,7 +107,7 @@ func buildPanelRows(_ providers: [Provider],
                     trailing = g.text
                 }
                 rows.append(Panel.gauge(label: g.label, percent: g.percent,
-                                        value: g.text, trailing: trailing, fill: fill,
+                                        value: g.text, trailing: trailing, style: style,
                                         expired: g.expired))
             }
             for l in r.lines {
@@ -135,7 +170,7 @@ private final class GaugeRowView: NSView {
     var percent: Double?
     var value = ""
     var trailing: String?
-    var fill: NSColor = .systemGreen
+    var style = PanelGaugeStyle(fill: .systemGreen, alert: nil, alertWidth: 0)
     var expired = false
 
     private let barX: CGFloat = 148
@@ -157,9 +192,14 @@ private final class GaugeRowView: NSView {
                          xRadius: barH / 2, yRadius: barH / 2).fill()
             let w = max(pct > 0 ? 2 : 0, min(barW, barW * CGFloat(pct) / 100))
             if w > 0 {
-                fill.setFill()
+                style.fill.setFill()
                 NSBezierPath(roundedRect: NSRect(x: barX, y: y, width: w, height: barH),
                              xRadius: barH / 2, yRadius: barH / 2).fill()
+                if let alert = style.alert {
+                    let cap = min(style.alertWidth, w)
+                    alert.setFill()
+                    NSRect(x: barX + w - cap, y: y, width: cap, height: barH).fill()
+                }
             }
             drawText(String(format: "%.0f%%", pct), at: 0, in: bounds,
                  font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),

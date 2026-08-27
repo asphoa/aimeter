@@ -21,6 +21,27 @@ func highUsageDemo(_ cfg: inout Config) -> [String: [Reading]] {
     })
 }
 
+/// The reported shape, as distinct from the five-line high-usage stress case:
+/// one Claude row with a little-used five-hour window and a nearly-spent week.
+/// It is also credential-free and is solely for visual regression checks.
+func contrastUsageDemo(_ cfg: inout Config) -> [String: [Reading]] {
+    cfg.menuBar.lines = [MenuLine(provider: "claude")]
+    cfg.menuBar.colourScheme = .adaptive
+    var reading = Reading(id: "claude", title: ProviderKind.find("claude")?.title ?? "Claude")
+    reading.gauges = [
+        Gauge(label: L.t("g.5h"), percent: 19, text: "19%", resetsAt: Date().addingTimeInterval(3600), kind: .shortWindow),
+        Gauge(label: L.t("g.week"), percent: 97, text: "97%", resetsAt: Date().addingTimeInterval(86_400), kind: .longWindow)
+    ]
+    reading.state = .nearLimit
+    return ["claude": [reading]]
+}
+
+func diagnosticDemo(_ cfg: inout Config) -> [String: [Reading]]? {
+    if CommandLine.arguments.contains("--demo-contrast") { return contrastUsageDemo(&cfg) }
+    if CommandLine.arguments.contains("--demo-high") { return highUsageDemo(&cfg) }
+    return nil
+}
+
 /// Bridges the screen-capture worker back to AppKit's main queue without
 /// capturing NSMenu directly in a Sendable closure.
 private final class MenuCanceller: @unchecked Sendable {
@@ -72,8 +93,8 @@ func renderIcon(to path: String) async {
     var cfg = Config.load()
     L.current = cfg.language
     var readings: [String: [Reading]] = [:]
-    if CommandLine.arguments.contains("--demo-high") {
-        readings = highUsageDemo(&cfg)
+    if let demo = diagnosticDemo(&cfg) {
+        readings = demo
     } else {
         for p in buildProviders(cfg) { readings[p.id] = await p.fetchAll() }
     }
@@ -121,20 +142,7 @@ func renderIcon(to path: String) async {
 /// a PNG is cheaper to check than asking someone to open the menu and describe
 /// what they see.
 @MainActor
-func renderPanel(to path: String) async {
-    var cfg = Config.load()
-    L.current = cfg.language
-    Palette.overrides = cfg.colours
-    var providers = buildProviders(cfg)
-    var readings: [String: [Reading]] = [:]
-    if CommandLine.arguments.contains("--demo-high") {
-        readings = highUsageDemo(&cfg)
-        providers = providers.filter { readings[$0.id] != nil }
-    } else {
-        for p in providers { readings[p.id] = await p.fetchAll() }
-    }
-
-    let rows = buildPanelRows(providers, readings, cfg)
+private func renderPanelRows(_ rows: [NSView], to path: String) {
     guard !rows.isEmpty else { print("no rows"); return }
     let w = Panel.width
     let h = rows.reduce(CGFloat(0)) { $0 + $1.intrinsicContentSize.height }
@@ -146,16 +154,56 @@ func renderPanel(to path: String) async {
         v.frame = NSRect(x: 0, y: y, width: w, height: rh)
         container.addSubview(v)
     }
-    guard let rep = container.bitmapImageRepForCachingDisplay(in: container.bounds) else { return }
+    // A detached NSView has no backing store on a machine without an attached
+    // display.  Draw into an explicit bitmap instead: this is still the real
+    // row views, but does not silently turn a visual check into no PNG.
+    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                     pixelsWide: Int(w), pixelsHigh: Int(h),
+                                     bitsPerSample: 8, samplesPerPixel: 4,
+                                     hasAlpha: true, isPlanar: false,
+                                     colorSpaceName: .deviceRGB,
+                                     bytesPerRow: 0, bitsPerPixel: 0) else { return }
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     NSColor.windowBackgroundColor.setFill()
     container.bounds.fill()
+    for v in rows {
+        NSGraphicsContext.current?.saveGraphicsState()
+        NSGraphicsContext.current?.cgContext.translateBy(x: v.frame.origin.x, y: v.frame.origin.y)
+        v.draw(v.bounds)
+        NSGraphicsContext.current?.restoreGraphicsState()
+    }
     NSGraphicsContext.restoreGraphicsState()
-    container.cacheDisplay(in: container.bounds, to: rep)
     try? rep.representation(using: .png, properties: [:])?
         .write(to: URL(fileURLWithPath: path))
     print("wrote \(path)  (\(rows.count) rows, \(Int(w))x\(Int(h)) pt)")
+}
+
+@MainActor
+private func renderPanelDemo(to path: String) {
+    var cfg = Config.load()
+    L.current = cfg.language
+    Palette.overrides = cfg.colours
+    guard let readings = diagnosticDemo(&cfg) else { return }
+    let providers = buildProviders(cfg).filter { readings[$0.id] != nil }
+    renderPanelRows(buildPanelRows(providers, readings, cfg), to: path)
+}
+
+@MainActor
+func renderPanel(to path: String) async {
+    var cfg = Config.load()
+    L.current = cfg.language
+    Palette.overrides = cfg.colours
+    var providers = buildProviders(cfg)
+    var readings: [String: [Reading]] = [:]
+    if let demo = diagnosticDemo(&cfg) {
+        readings = demo
+        providers = providers.filter { readings[$0.id] != nil }
+    } else {
+        for p in providers { readings[p.id] = await p.fetchAll() }
+    }
+
+    renderPanelRows(buildPanelRows(providers, readings, cfg), to: path)
 }
 
 /// `AIMeter --menushot out.png` opens the real dropdown — a genuine `NSMenu`,
@@ -175,8 +223,8 @@ func renderMenuShots(to path: String) async {
     Palette.overrides = cfg.colours
     var providers = buildProviders(cfg)
     var readings: [String: [Reading]] = [:]
-    if CommandLine.arguments.contains("--demo-high") {
-        readings = highUsageDemo(&cfg)
+    if let demo = diagnosticDemo(&cfg) {
+        readings = demo
         providers = providers.filter { readings[$0.id] != nil }
     } else {
         for p in providers { readings[p.id] = await p.fetchAll() }
@@ -313,6 +361,12 @@ if let idx = CommandLine.arguments.firstIndex(of: "--about"),
 if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
    CommandLine.arguments.count > idx + 1 {
     let path = CommandLine.arguments[idx + 1]
+    if CommandLine.arguments.contains("--demo-high") || CommandLine.arguments.contains("--demo-contrast") {
+        // No fetch is involved in a fixture.  Calling it synchronously avoids
+        // depending on an application run loop merely to render an NSBitmap.
+        MainActor.assumeIsolated { renderPanelDemo(to: path) }
+        exit(0)
+    }
     // An NSView can draw only after AppKit has an application/appearance.  In
     // a headless diagnostic invocation that is not created by the normal app
     // startup path, so make it explicit just as --settings and --menushot do.

@@ -181,9 +181,10 @@ enum StatusStrip {
             case .other:       c = NSColor(srgbRed: 0.231, green: 0.784, blue: 0.745, alpha: 1)
             }
         case .provider:
-            // Red is reserved: it overrides identity so that "nearly spent" is
-            // never something the eye has to decode.
-            if pct >= 90 { return Palette.colour(Palette.alarm) }
+            // The alert belongs in `bar`'s trailing cap, just as it does in
+            // adaptive mode.  Replacing both halves with alarm red made a
+            // near-limit 5-hour/weekly pair indistinguishable precisely when
+            // the reader most needs to know which reset is approaching.
             c = Palette.colour(Palette.service(line.provider, kind))
         case .adaptive:
             c = adaptiveColour(index: index, count: count, kind: kind, critical: pct >= 90)

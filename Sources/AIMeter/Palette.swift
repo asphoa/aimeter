@@ -20,6 +20,11 @@ enum Palette {
     static let alarm = "alarm"
     static let ok = "ok"
     static let warn = "warn"
+    /// Stable identities for the two time windows in the dropdown panel.  They
+    /// are deliberately not the warning colours: a window does not turn into a
+    /// different thing merely because its current number has changed.
+    static let panelShortWindow = "panel.5h"
+    static let panelLongWindow = "panel.week"
     /// Each service has two colours, one per window. They are separate roles
     /// rather than one colour plus a derivation, because a derived shade is not
     /// something the user can choose.
@@ -45,7 +50,12 @@ enum Palette {
         var out: [String: NSColor] = [
             alarm: NSColor(srgbRed: 1.0, green: 0.271, blue: 0.227, alpha: 1),
             ok:    NSColor(srgbRed: 0.196, green: 0.843, blue: 0.294, alpha: 1),
-            warn:  NSColor(srgbRed: 1.0, green: 0.702, blue: 0.251, alpha: 1)
+            warn:  NSColor(srgbRed: 1.0, green: 0.702, blue: 0.251, alpha: 1),
+            // Purple and cyan remain distinct at the similar lightness needed
+            // for a five-point mark, and neither borrows red/orange from the
+            // urgency vocabulary.
+            panelShortWindow: NSColor(srgbRed: 0.561, green: 0.376, blue: 0.925, alpha: 1),
+            panelLongWindow:  NSColor(srgbRed: 0.122, green: 0.698, blue: 0.804, alpha: 1)
         ]
         for (id, base) in bases {
             out["service." + id + ".5h"] = base

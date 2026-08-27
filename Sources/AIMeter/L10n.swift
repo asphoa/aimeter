@@ -238,6 +238,8 @@ enum L {
         "w.c.alarm": ("Nearly spent", "快用完", "Presque épuisé", "Fast aufgebraucht"),
         "w.c.ok": ("Panel bar, plenty left", "面板長條・還很多", "Barre du panneau, reste beaucoup", "Panel-Balken, viel übrig"),
         "w.c.warn": ("Panel bar, getting low", "面板長條・偏少", "Barre du panneau, faible", "Panel-Balken, wird knapp"),
+        "w.c.panel5h": ("Panel 5-hour window", "面板・5 小時窗", "Panneau : fenêtre 5 h", "Panel: 5-Stunden-Fenster"),
+        "w.c.panelweek": ("Panel weekly window", "面板・週窗", "Panneau : fenêtre hebdomadaire", "Panel: Wochenfenster"),
         "w.c.lines": ("Line colour per service", "各服務的線條顏色", "Couleur de ligne par service", "Linienfarbe je Dienst"),
         "w.c.reset": ("Reset all colours", "全部恢復預設", "Réinitialiser les couleurs", "Alle Farben zurücksetzen"),
         "e.httpsonly": ("The address must start with https://", "網址必須以 https:// 開頭", "L’adresse doit commencer par https://", "Die Adresse muss mit https:// beginnen"),

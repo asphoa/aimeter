@@ -94,11 +94,16 @@ missed the bug too.
 
 ```bash
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --once          # every reading, as text
-./dist/AIMeter.app/Contents/MacOS/AIMeter --icon out.png  # the strip, 8x, both colour schemes
+./dist/AIMeter.app/Contents/MacOS/AIMeter --icon out.png  # the strip, 8x, all three schemes
+./dist/AIMeter.app/Contents/MacOS/AIMeter --panel out.png # panel rows on an opaque diagnostic ground
+./dist/AIMeter.app/Contents/MacOS/AIMeter --menushot out.png # the real translucent NSMenu
 ```
 
-Both run the same code as the menu, so they show what the app actually sees
-rather than a separate approximation of it.
+`--icon` and `--panel` draw the same strip and row views as the app.  The
+panel image deliberately has an opaque diagnostic ground; use `--menushot` to
+check the real menu material and highlighting.  Add `--demo-high` for five
+near-limit services, or `--demo-contrast` for the reported 19% 5-hour / 97%
+weekly Claude shape, without reading credentials or making a request.
 
 ## Security: what this app reads, and what it sends
 
@@ -303,19 +308,28 @@ full-height bar instead, which is how you can tell the two cases apart.
 
 ### Colours
 
-Two schemes, switchable in the same place:
+Three schemes, switchable in the same place:
 
 - **By service** (default) — each service has its own hue, so the strip is not a
-  wall of one colour. Red is held back: any bar at 90% or more turns red
-  regardless of which service it belongs to, so "nearly spent" never has to be
-  decoded.
+  wall of one colour. The 5-hour and weekly halves retain their separately
+  chosen shades even near the limit; a short red cap at the end is the alarm.
 - **By window** — red for the 5-hour half, blue for the weekly half, teal for a
-  single-window service. Identity then comes from position alone, and there is
-  no colour alarm; length is the only signal of how full a bar is.
+  single-window service. A red end cap still marks a nearly spent window.
+- **Adaptive** — assigns evenly spaced OKLCH hues to the visible services,
+  uses lightness within each hue for 5-hour versus weekly, and preserves that
+  identity at the limit with the same red end cap. **Optimize colours for
+  visible lines** rerolls the starting hue and updates the preview immediately.
 
 Every colour is yours to change, in the **Colours** section of the same window:
-the text, the bar background, the nearly-spent alarm, the two panel bar states,
-and — per service — one colour for the 5-hour half and one for the weekly half.
+the text, the bar background, the nearly-spent alarm, the stable 5-hour and
+weekly panel colours, and — per service — one colour for each strip half.
+
+The panel uses its large bar primarily for stable window identity: purple is
+the 5-hour window and cyan is the weekly window by default. A 7pt amber cap at
+70–89% or a 12pt red cap at 90%+ carries urgency without changing the rest of
+the bar into a different window. Untyped percentage gauges keep the ordinary
+green/amber/red traffic light because they have no 5-hour/weekly identity to
+preserve.
 
 A colour you set is a fixed value and will not follow light and dark mode; the
 defaults are semantic colours that do. Leave a role alone to keep the adaptive
