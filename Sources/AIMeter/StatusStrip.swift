@@ -201,7 +201,7 @@ enum StatusStrip {
     static func adaptiveColour(index: Int, count: Int, kind: GaugeKind,
                                critical: Bool) -> NSColor {
         let n = max(1, count)
-        let hue = fmod(218 + Double(index) * 360 / Double(n), 360)
+        let hue = fmod(Palette.adaptiveHueOffset + Double(index) * 360 / Double(n), 360)
         let lightness: Double
         let chroma: Double
         if critical {

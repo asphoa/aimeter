@@ -76,7 +76,10 @@ final class AccountsStore: ObservableObject {
 
     func persist(cosmetic: Bool = false) {
         cfg.save()
-        if cosmetic { Palette.overrides = cfg.colours }
+        if cosmetic {
+            Palette.overrides = cfg.colours
+            Palette.adaptiveHueOffset = cfg.menuBar.adaptiveHueOffset
+        }
         NotificationCenter.default.post(name: cosmetic ? Self.restyled : Self.changed, object: nil)
     }
 

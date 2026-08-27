@@ -9,6 +9,11 @@ enum Palette {
     /// Set from the config at launch and whenever the user changes a colour.
     nonisolated(unsafe) static var overrides: [String: String] = [:]
 
+    /// Where the adaptive strip scheme's hue circle starts. Set alongside
+    /// `overrides` everywhere that reads from config, so a reroll from the
+    /// Accounts window's "Optimize colours" button is visible immediately.
+    nonisolated(unsafe) static var adaptiveHueOffset: Double = 218
+
     // Role names, also the config keys.
     static let text = "text"
     static let track = "track"

@@ -84,6 +84,11 @@ struct MenuBarConfig: Codable {
     /// A snapshot older than this is drawn dimmed.
     var staleAfterMinutes: Int = 360
     var colourScheme: BarColourScheme = .provider
+    /// Where the adaptive scheme's hue circle starts. Fixed until "Optimize
+    /// colours for visible lines" rerolls it - the button's whole purpose is
+    /// letting someone click until a rotation reads well to them, which needs
+    /// a stored choice, not a value recomputed the same way every time.
+    var adaptiveHueOffset: Double = 218
 
     init() {}
 
@@ -92,6 +97,7 @@ struct MenuBarConfig: Codable {
         let def = MenuBarConfig()
         staleAfterMinutes = (try? c.decode(Int.self, forKey: .staleAfterMinutes)) ?? def.staleAfterMinutes
         colourScheme = (try? c.decode(BarColourScheme.self, forKey: .colourScheme)) ?? def.colourScheme
+        adaptiveHueOffset = (try? c.decode(Double.self, forKey: .adaptiveHueOffset)) ?? def.adaptiveHueOffset
         if let decoded = try? c.decode([MenuLine].self, forKey: .lines), !decoded.isEmpty {
             lines = decoded
         } else if let legacy = try? c.decode([String].self, forKey: .rows), !legacy.isEmpty {
@@ -108,7 +114,7 @@ struct MenuBarConfig: Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case lines, staleAfterMinutes, colourScheme, rows
+        case lines, staleAfterMinutes, colourScheme, rows, adaptiveHueOffset
     }
 
     func encode(to e: Encoder) throws {
@@ -116,6 +122,7 @@ struct MenuBarConfig: Codable {
         try c.encode(lines, forKey: .lines)
         try c.encode(staleAfterMinutes, forKey: .staleAfterMinutes)
         try c.encode(colourScheme, forKey: .colourScheme)
+        try c.encode(adaptiveHueOffset, forKey: .adaptiveHueOffset)
     }
 }
 
@@ -217,6 +224,7 @@ struct Config: Codable {
         // Applied here rather than at each call site: one of those call sites
         // was missed, and the only symptom was colours silently not applying.
         Palette.overrides = cfg.colours
+        Palette.adaptiveHueOffset = cfg.menuBar.adaptiveHueOffset
         return cfg
     }
 

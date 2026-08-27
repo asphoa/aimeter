@@ -273,6 +273,33 @@ func testConfigMigratesLegacyPerServiceColourKey() {
     T.eq("non-service key untouched", cfg.colours["text"] ?? "", "#00FF00FF")
 }
 
+func testConfigDefaultsAndRoundTripsAdaptiveHueOffset() {
+    // An old settings file predating the "Optimize colours" reroll button
+    // has no adaptiveHueOffset at all - it must fall back to the same
+    // default StatusStrip's adaptive scheme has always used, not to 0
+    // (which would silently change everyone's existing adaptive palette on
+    // upgrade even though nobody clicked anything).
+    let old = """
+    {"menuBar": {"lines": [{"provider": "claude", "account": "*", "gauge": "*"}]}}
+    """
+    guard let cfg = try? JSONDecoder().decode(Config.self, from: Data(old.utf8)) else {
+        T.check("config without adaptiveHueOffset decodes", false)
+        return
+    }
+    T.eq("missing offset defaults to the original constant", cfg.menuBar.adaptiveHueOffset, 218)
+
+    // A stored reroll must survive a save/load cycle exactly - this is the
+    // one field the whole button exists to persist.
+    var rerolled = cfg
+    rerolled.menuBar.adaptiveHueOffset = 47.5
+    guard let data = try? JSONEncoder().encode(rerolled),
+          let reloaded = try? JSONDecoder().decode(Config.self, from: data) else {
+        T.check("config with a rerolled offset round-trips", false)
+        return
+    }
+    T.eq("rerolled offset survives encode/decode", reloaded.menuBar.adaptiveHueOffset, 47.5)
+}
+
 func testConfigMigratesLegacyRowsToMenuLines() {
     // Before MenuLine existed, menuBar.rows held "provider/account/gauge"
     // strings. An old settings file with that shape should upgrade in place.
@@ -1081,6 +1108,7 @@ struct Runner {
         testConfigDecodesMinimalJSON()
         testConfigIgnoresUnknownFieldsAndFillsMissingOnes()
         testConfigMigratesLegacyPerServiceColourKey()
+        testConfigDefaultsAndRoundTripsAdaptiveHueOffset()
         testConfigMigratesLegacyRowsToMenuLines()
         testResolveStripLineSplitsTwoWindowsIntoTopAndBottom()
         testResolveStripLineMergesASingleWindowService()

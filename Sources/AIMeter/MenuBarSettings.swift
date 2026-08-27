@@ -86,9 +86,14 @@ struct MenuBarSection: View {
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
             Button(L.t("w.menubar.optimize")) {
-                // Adaptive is computed from these slots at draw time.  Do not
-                // bake swatches into Config.colours: a later slot edit must not
+                // Adaptive is computed from these slots at draw time, not
+                // baked into Config.colours - a later slot edit must not
                 // quietly leave two visible services sharing an old colour.
+                // What *is* stored is where the hue circle starts: the whole
+                // point of this button is a reroll to click through until one
+                // reads well, which needs a remembered choice, not the same
+                // arrangement every time.
+                store.cfg.menuBar.adaptiveHueOffset = Double.random(in: 0..<360)
                 store.cfg.menuBar.colourScheme = .adaptive
                 store.persist(cosmetic: true)
             }

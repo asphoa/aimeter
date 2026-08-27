@@ -261,7 +261,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
         add(menu, L.t("m.accounts"), #selector(openAccounts), key: ",")
-        menu.addItem(iconMenu())
         menu.addItem(languageMenu())
         menu.addItem(intervalMenu())
         add(menu, L.t("m.debug"), #selector(openDebug))
@@ -304,40 +303,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             a.informativeText = error.localizedDescription
             a.runModal()
         }
-        rebuildMenu()
-    }
-
-    private func iconMenu() -> NSMenuItem {
-        let parent = NSMenuItem(title: L.t("m.icon"), action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        let header = NSMenuItem(title: L.t("m.barcolour"), action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        sub.addItem(header)
-        for scheme in BarColourScheme.allCases {
-            let key: String
-            switch scheme {
-            case .provider: key = "m.barcolour.provider"
-            case .window: key = "m.barcolour.window"
-            case .adaptive: key = "m.barcolour.adaptive"
-            }
-            let it = NSMenuItem(title: L.t(key),
-                                action: #selector(pickColourMode(_:)), keyEquivalent: "")
-            it.target = self
-            it.representedObject = scheme.rawValue
-            it.state = cfg.menuBar.colourScheme == scheme ? .on : .off
-            it.indentationLevel = 1
-            sub.addItem(it)
-        }
-        parent.submenu = sub
-        return parent
-    }
-
-    @objc private func pickColourMode(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let scheme = BarColourScheme(rawValue: raw) else { return }
-        cfg.menuBar.colourScheme = scheme
-        cfg.save()
-        updateTitle()
         rebuildMenu()
     }
 
