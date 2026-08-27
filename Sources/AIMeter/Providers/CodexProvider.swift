@@ -76,12 +76,30 @@ final class CodexProvider: Provider, @unchecked Sendable {
                 r.lines.append(L.t("x.credits", bal))
             }
         }
-        if let reached = limits["rate_limit_reached_type"] as? String {
-            r.lines.append(L.t("x.reached", reached))
-            r.state = .error
+        if let rawStatus = limits["rate_limit_reached_type"] as? String,
+           let status = Self.rateLimitStatus(rawStatus) {
+            r.lines.append(L.t(status.key))
+            r.state = max(r.state, status.state)
         }
         r.state = max(r.state, worstState(r.gauges))
         return r
+    }
+
+    /// This field is an implementation enum from Codex's local snapshot, not
+    /// language for a person.  Do not leak a new wire value into the menu: an
+    /// unrecognised value is still a useful warning, but it is described in
+    /// stable human terms until this mapping can be extended deliberately.
+    static func rateLimitStatus(_ raw: String) -> (key: String, state: ReadingState)? {
+        switch raw.lowercased() {
+        case "", "allowed":
+            return nil
+        case "allowed_warning":
+            return ("x.rate.allowedwarning", .warn)
+        case "rate_limit_reached", "reached", "blocked":
+            return ("x.rate.reached", .nearLimit)
+        default:
+            return ("x.rate.unknown", .warn)
+        }
     }
 
     /// Walks sessions/YYYY/MM/DD newest-first for the most recent token_count

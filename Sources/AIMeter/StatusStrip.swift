@@ -10,6 +10,10 @@ enum BarColourScheme: String, Codable, Sendable, CaseIterable {
     case provider
     /// Hue identifies the window: red = 5-hour, blue = weekly, teal = single.
     case window
+    /// Computes a maximally separated palette for the currently visible rows.
+    /// It is deliberately live rather than a saved set of swatches: changing
+    /// the rows cannot leave an old, now-colliding palette behind.
+    case adaptive
 }
 
 /// One line of the strip: one service, split into a 5-hour half above and a
@@ -68,7 +72,7 @@ enum StatusStrip {
             var y = ((height - total) / 2 * 2).rounded() / 2
 
             for (i, line) in lines.enumerated() {
-                draw(line, index: i, at: y, half: half, scheme: scheme)
+                draw(line, index: i, count: lines.count, at: y, half: half, scheme: scheme)
                 y += pair + gap
             }
             return true
@@ -77,12 +81,12 @@ enum StatusStrip {
         return img
     }
 
-    private static func draw(_ line: StripLine, index: Int, at y: CGFloat,
+    private static func draw(_ line: StripLine, index: Int, count: Int, at y: CGFloat,
                              half: CGFloat, scheme: BarColourScheme) {
         let pair = half * 2
         // Dots mean "nothing to draw", and `hasData` is the whole of that
         // question. `state` used to be consulted here as well, which quietly
-        // made this the opposite of a meter: `.error` is two things at once —
+        // made this the opposite of a meter: one error state was two things at once —
         // a fetch that failed, and a gauge past 90% — so crossing 90% replaced
         // a service's bar with the same three dots that mean "no reading", at
         // exactly the moment there was most to report. A failed fetch carries
@@ -93,16 +97,19 @@ enum StatusStrip {
             return
         }
         if let merged = line.merged {
-            bar(merged, x: y, height: pair, colour: colour(line, line.mergedKind, merged, scheme))
+            bar(merged, x: y, height: pair,
+                colour: colour(line, index, count, line.mergedKind, merged, scheme), critical: merged >= 90)
             return
         }
         if let top = line.top {
-            bar(top, x: y, height: half, colour: colour(line, .shortWindow, top, scheme))
+            bar(top, x: y, height: half,
+                colour: colour(line, index, count, .shortWindow, top, scheme), critical: top >= 90)
         } else {
             dim(y, half)
         }
         if let bottom = line.bottom {
-            bar(bottom, x: y + half, height: half, colour: colour(line, .longWindow, bottom, scheme))
+            bar(bottom, x: y + half, height: half,
+                colour: colour(line, index, count, .longWindow, bottom, scheme), critical: bottom >= 90)
         } else {
             dim(y + half, half)
         }
@@ -112,7 +119,7 @@ enum StatusStrip {
         NSRect(x: 0, y: y + half - 0.25, width: width, height: 0.5).fill()
     }
 
-    private static func bar(_ pct: Double, x y: CGFloat, height: CGFloat, colour: NSColor) {
+    private static func bar(_ pct: Double, x y: CGFloat, height: CGFloat, colour: NSColor, critical: Bool) {
         Palette.colour(Palette.track).setFill()
         NSBezierPath(roundedRect: NSRect(x: 0, y: y, width: width, height: height),
                      xRadius: radius, yRadius: radius).fill()
@@ -123,6 +130,15 @@ enum StatusStrip {
         colour.setFill()
         NSBezierPath(roundedRect: NSRect(x: 0, y: y, width: w, height: height),
                      xRadius: radius, yRadius: radius).fill()
+        // Adaptive mode deliberately keeps a row's hue even at 90%+ so five
+        // urgent services do not collapse into one indistinguishable red slab.
+        // This opaque red cap is the common alarm glyph: it says "critical"
+        // without spending the remaining 90% of a near-full bar's identity.
+        if critical {
+            let cap = min(CGFloat(2), w)
+            Palette.colour(Palette.alarm).setFill()
+            NSRect(x: w - cap, y: y, width: cap, height: height).fill()
+        }
     }
 
     /// Half of a pair whose window this service does not have. Drawn as a bare
@@ -152,7 +168,7 @@ enum StatusStrip {
     /// system light/dark setting — measured, not assumed — so they have to hold
     /// up against a mid-luminance coloured bar as well as white and black.
 
-    private static func colour(_ line: StripLine, _ kind: GaugeKind,
+    private static func colour(_ line: StripLine, _ index: Int, _ count: Int, _ kind: GaugeKind,
                                _ pct: Double, _ scheme: BarColourScheme) -> NSColor {
         var c: NSColor
         switch scheme {
@@ -169,9 +185,33 @@ enum StatusStrip {
             // never something the eye has to decode.
             if pct >= 90 { return Palette.colour(Palette.alarm) }
             c = Palette.colour(Palette.service(line.provider, kind))
+        case .adaptive:
+            c = adaptiveColour(index: index, count: count, kind: kind, critical: pct >= 90)
         }
         if line.stale { c = c.withAlphaComponent(0.55) }
         return c
+    }
+
+    /// The objective is maximin perceptual separation among visible *lines*.
+    /// On the OKLCH hue circle the solution for N interchangeable lines is N
+    /// equal arcs (360/N), so this is an exact optimum for the hue term rather
+    /// than an RGB-distance heuristic.  Lightness encodes window type in every
+    /// row; urgency darkens/saturates the same hue, while `bar` adds its red
+    /// cap.  That gives three independent, glanceable signals in 1.5pt bars.
+    static func adaptiveColour(index: Int, count: Int, kind: GaugeKind,
+                               critical: Bool) -> NSColor {
+        let n = max(1, count)
+        let hue = fmod(218 + Double(index) * 360 / Double(n), 360)
+        let lightness: Double
+        let chroma: Double
+        if critical {
+            lightness = kind == .longWindow ? 0.60 : (kind == .shortWindow ? 0.47 : 0.53)
+            chroma = 0.18
+        } else {
+            lightness = kind == .longWindow ? 0.78 : (kind == .shortWindow ? 0.62 : 0.70)
+            chroma = kind == .longWindow ? 0.13 : 0.16
+        }
+        return Palette.oklch(lightness, chroma, hue)
     }
 
     private static func blend(_ a: NSColor, with b: NSColor, _ t: CGFloat) -> NSColor {

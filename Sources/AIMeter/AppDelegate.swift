@@ -314,8 +314,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         header.isEnabled = false
         sub.addItem(header)
         for scheme in BarColourScheme.allCases {
-            let it = NSMenuItem(title: L.t(scheme == .provider ? "m.barcolour.provider"
-                                                               : "m.barcolour.window"),
+            let key: String
+            switch scheme {
+            case .provider: key = "m.barcolour.provider"
+            case .window: key = "m.barcolour.window"
+            case .adaptive: key = "m.barcolour.adaptive"
+            }
+            let it = NSMenuItem(title: L.t(key),
                                 action: #selector(pickColourMode(_:)), keyEquivalent: "")
             it.target = self
             it.representedObject = scheme.rawValue

@@ -92,7 +92,7 @@ final class AgyProvider: Provider, @unchecked Sendable {
         r.snapshotAt = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date ?? Date()
 
         if line.contains("PERMISSION_DENIED") || line.contains("403") {
-            r.state = .error
+            r.state = .failure
             r.lines = [L.t("a.403"), L.t("a.403b")]
         } else if line.lowercased().contains("failed") {
             r.state = .warn

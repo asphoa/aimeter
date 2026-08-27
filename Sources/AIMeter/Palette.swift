@@ -114,6 +114,32 @@ enum Palette {
     static func defaultColour(_ role: String) -> NSColor {
         defaults[role] ?? (role == track ? opaque(.labelColor, 0.28) : .labelColor)
     }
+
+    /// Converts perceptually-uniform OKLCH directly to opaque sRGB.  Values
+    /// outside the display's gamut are gently reduced in chroma instead of
+    /// clipped channel-by-channel, which would change the hue and defeat the
+    /// spacing the adaptive strip just calculated.
+    static func oklch(_ l: Double, _ c: Double, _ hueDegrees: Double) -> NSColor {
+        let h = hueDegrees * .pi / 180
+        var chroma = c
+        for _ in 0..<12 {
+            let a = chroma * cos(h), b = chroma * sin(h)
+            let l1 = l + 0.3963377774 * a + 0.2158037573 * b
+            let m1 = l - 0.1055613458 * a - 0.0638541728 * b
+            let s1 = l - 0.0894841775 * a - 1.2914855480 * b
+            let l3 = l1 * l1 * l1, m3 = m1 * m1 * m1, s3 = s1 * s1 * s1
+            let r = 4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3
+            let g = -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3
+            let bl = -0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3
+            func srgb(_ x: Double) -> Double { x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1 / 2.4) - 0.055 }
+            let rgb = (srgb(r), srgb(g), srgb(bl))
+            if rgb.0 >= 0, rgb.0 <= 1, rgb.1 >= 0, rgb.1 <= 1, rgb.2 >= 0, rgb.2 <= 1 {
+                return NSColor(srgbRed: rgb.0, green: rgb.1, blue: rgb.2, alpha: 1)
+            }
+            chroma *= 0.88
+        }
+        return NSColor(white: CGFloat(max(0, min(1, l))), alpha: 1)
+    }
 }
 
 extension NSColor {

@@ -211,7 +211,7 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         guard let refresh = expiry.refresh, refresh > Date() else {
             return .failed(id, title, account.name, L.t("c.expired"))
         }
-        // Deliberately .warn, not .error: the whole point of telling these two
+        // Deliberately .warn, not .failure: the whole point of telling these two
         // cases apart is that this one is a one-second fix and the sign-in is
         // fine, so it should not read as urgent as an actual logout - the red
         // dot was undermining the message right next to it.
@@ -258,7 +258,7 @@ func worstState(_ gauges: [Gauge]) -> ReadingState {
     var s = ReadingState.ok
     for g in gauges {
         guard let p = g.percent else { continue }
-        if p >= 90 { s = max(s, .error) } else if p >= 70 { s = max(s, .warn) }
+        if p >= 90 { s = max(s, .nearLimit) } else if p >= 70 { s = max(s, .warn) }
     }
     return s
 }

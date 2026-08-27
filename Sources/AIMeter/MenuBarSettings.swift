@@ -81,9 +81,18 @@ struct MenuBarSection: View {
                 set: { store.cfg.menuBar.colourScheme = $0; store.persist(cosmetic: true) })) {
                     Text(L.t("m.barcolour.provider")).tag(BarColourScheme.provider)
                     Text(L.t("m.barcolour.window")).tag(BarColourScheme.window)
+                    Text(L.t("m.barcolour.adaptive")).tag(BarColourScheme.adaptive)
                 }
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
+            Button(L.t("w.menubar.optimize")) {
+                // Adaptive is computed from these slots at draw time.  Do not
+                // bake swatches into Config.colours: a later slot edit must not
+                // quietly leave two visible services sharing an old colour.
+                store.cfg.menuBar.colourScheme = .adaptive
+                store.persist(cosmetic: true)
+            }
+            .help(L.t("w.menubar.optimize.help"))
         }
     }
 

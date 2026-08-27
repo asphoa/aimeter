@@ -568,7 +568,7 @@ func testClaudeProviderSeparatesAStaleTokenFromARealSignOut() {
     // one-second fix should not carry the same red-dot urgency as an actual
     // logout, or the message right next to it is undermined.
     T.eq("stale token reads as a warning, not an error", stale.state, .warn)
-    T.eq("a real sign-out is still an error", [dead.state, unknown.state], [.error, .error])
+    T.eq("a real sign-out is still a failure", [dead.state, unknown.state], [.failure, .failure])
 }
 
 func testFindStringVisitsKeysInAStableOrder() {
@@ -833,12 +833,12 @@ func testAsOfDropsTheColourTheDeadNumberWasDriving() {
 }
 
 func testAsOfKeepsAStateSomethingElseSet() {
-    // Codex's own "rate_limit_reached_type" sets .error with no gauge above 90.
+    // A provider failure with no gauge above 90 must survive expiry.
     // That is not the expired gauge talking, so it must survive the withdrawal.
     let now = Date()
     var r = codexLikeReading(now: now)
-    r.state = .error
-    T.eq("a non-gauge error is not cleared by expiry", r.asOf(now).state, .error)
+    r.state = .failure
+    T.eq("a non-gauge failure is not cleared by expiry", r.asOf(now).state, .failure)
 }
 
 func testAsOfLeavesLiveReadingsAlone() {
@@ -875,6 +875,61 @@ func testStripDrawsNoBarForAWindowThatHasEnded() {
     T.eq("and it is drawn as the long window it is", line.mergedKind, .longWindow)
     T.isNil("no bar for the window that ended", line.top)
     T.check("the row is still flagged stale", line.stale)
+}
+
+// MARK: - distinct failures, quota warnings, and adaptive colour
+
+func testNearLimitIsNotAFetchFailure() {
+    let gauges = [Gauge(label: "quota", percent: 95, text: "95%", resetsAt: nil)]
+    T.eq("90% is a near-limit state, not a fetch failure", worstState(gauges), .nearLimit)
+    T.eq("near-limit uses the warning dot", stateColour(.nearLimit).hexString,
+         NSColor.systemOrange.hexString)
+    T.eq("a failed read alone uses the failure dot", stateColour(.failure).hexString,
+         NSColor.systemRed.hexString)
+}
+
+func testCodexQuotaWireStatusesNeverReachTheUI() {
+    let warning = CodexProvider.rateLimitStatus("allowed_warning")
+    T.eq("allowed_warning becomes a warning", warning?.state, .warn)
+    T.eq("allowed_warning is human language", warning.map { L.t($0.key) }, L.t("x.rate.allowedwarning"))
+    let reached = CodexProvider.rateLimitStatus("rate_limit_reached")
+    T.eq("a reached limit is near-limit, not fetch failure", reached?.state, .nearLimit)
+    T.isNil("allowed needs no status line", CodexProvider.rateLimitStatus("allowed"))
+    let unknown = CodexProvider.rateLimitStatus("future_wire_name")
+    T.eq("unknown wire values are still not printed", unknown.map { L.t($0.key) }, L.t("x.rate.unknown"))
+}
+
+func testAdaptivePaletteSeparatesLinesAndWindows() {
+    let a = StatusStrip.adaptiveColour(index: 0, count: 5, kind: .shortWindow, critical: true)
+    let b = StatusStrip.adaptiveColour(index: 1, count: 5, kind: .shortWindow, critical: true)
+    let weekly = StatusStrip.adaptiveColour(index: 0, count: 5, kind: .longWindow, critical: true)
+    let comfortable = StatusStrip.adaptiveColour(index: 0, count: 5, kind: .shortWindow, critical: false)
+    T.check("critical lines keep distinct identities", a.hexString != b.hexString)
+    T.check("weekly half differs from 5-hour half", a.hexString != weekly.hexString)
+    T.check("critical differs from comfortable", a.hexString != comfortable.hexString)
+}
+
+func testTimeoutDoesNotWaitForAnUncooperativeOperation() {
+    let sem = DispatchSemaphore(value: 0)
+    var elapsed = Double.infinity
+    Task {
+        let start = Date()
+        _ = await withTimeout(0.05, {
+            // This deliberately ignores cancellation for long enough to prove
+            // the race does not wait for it, but it eventually resumes so the
+            // harness leaves no leaked continuation diagnostic behind.
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.7) {
+                    continuation.resume(returning: Reading(id: "late", title: "late"))
+                }
+            }
+        }, onTimeout: { .failed("test", "test", nil, "timeout") })
+        elapsed = Date().timeIntervalSince(start)
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 1)
+    T.check("timeout returns without waiting for a stuck child", elapsed < 0.5,
+            "returned after \(elapsed)s")
 }
 
 // MARK: - entry point
@@ -926,6 +981,10 @@ struct Runner {
         testAsOfKeepsAStateSomethingElseSet()
         testAsOfLeavesLiveReadingsAlone()
         testStripDrawsNoBarForAWindowThatHasEnded()
+        testNearLimitIsNotAFetchFailure()
+        testCodexQuotaWireStatusesNeverReachTheUI()
+        testAdaptivePaletteSeparatesLinesAndWindows()
+        testTimeoutDoesNotWaitForAnUncooperativeOperation()
 
         let elapsed = Date().timeIntervalSince(start)
         print(String(format: "(%.2fs)", elapsed))

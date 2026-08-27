@@ -43,7 +43,7 @@ final class DeepSeekProvider: Provider, @unchecked Sendable {
         }
         if (d["is_available"] as? Bool) == false {
             r.lines.append(L.t("d.unavailable"))
-            r.state = .error
+            r.state = .failure
         }
         r.lines.append(Self.peakHourNote())
         return r

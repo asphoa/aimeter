@@ -1,7 +1,7 @@
 import Foundation
 
 enum ReadingState: Int {
-    case off = -1, ok = 0, warn = 1, error = 2
+    case off = -1, ok = 0, warn = 1, nearLimit = 2, failure = 3
 }
 
 /// One measurable quantity inside a provider (a 5h window, a weekly window, a
@@ -54,15 +54,34 @@ extension Provider {
 func withTimeout(_ seconds: Double,
                  _ operation: @escaping @Sendable () async -> Reading,
                  onTimeout: @escaping @Sendable () -> Reading) async -> Reading {
-    await withTaskGroup(of: Reading.self) { group in
-        group.addTask { await operation() }
-        group.addTask {
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            return onTimeout()
+    // Do not use a task group for this race.  Cancelling a child task does not
+    // make a structured task group return: its scope still waits for every
+    // child to finish.  A keychain prompt, or a transport which ignores
+    // cancellation, would therefore turn a supposed timeout into an infinite
+    // wait.  The detached operation may finish later, but the one-shot gate
+    // makes it unable to alter the already returned reading.
+    final class Gate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var won = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard !won else { return false }
+            won = true
+            return true
         }
-        let first = await group.next() ?? onTimeout()
-        group.cancelAll()
-        return first
+    }
+    let gate = Gate()
+    return await withCheckedContinuation { continuation in
+        let work = Task.detached(priority: .utility) {
+            let result = await operation()
+            if gate.claim() { continuation.resume(returning: result) }
+        }
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled, gate.claim() else { return }
+            work.cancel()
+            continuation.resume(returning: onTimeout())
+        }
     }
 }
 
@@ -144,7 +163,7 @@ extension Reading {
     static func asOfNow(_ list: [Reading]) -> [Reading] { list.map { $0.asOf() } }
 
     static func failed(_ id: String, _ title: String, _ account: String?, _ message: String) -> Reading {
-        Reading(id: id, title: title, account: account, lines: [message], state: .error)
+        Reading(id: id, title: title, account: account, lines: [message], state: .failure)
     }
     static func off(_ id: String, _ title: String, _ account: String?, _ message: String) -> Reading {
         Reading(id: id, title: title, account: account, lines: [message], state: .off)

@@ -1,6 +1,34 @@
 import AppKit
 import SwiftUI
 
+/// A deterministic, credential-free rendering fixture.  It is intentionally
+/// opt-in (`--demo-high`) and only used by the diagnostic render flags, so a
+/// visual regression check can reproduce five simultaneous near-limit rows
+/// without touching a person's config or making a provider request.
+func highUsageDemo(_ cfg: inout Config) -> [String: [Reading]] {
+    let ids = ["claude", "codex", "agy", "openrouter", "deepseek"]
+    cfg.menuBar.lines = ids.map { MenuLine(provider: $0) }
+    cfg.menuBar.colourScheme = .adaptive
+    return Dictionary(uniqueKeysWithValues: ids.map { id in
+        let title = ProviderKind.find(id)?.title ?? id
+        var r = Reading(id: id, title: title)
+        r.gauges = [
+            Gauge(label: L.t("g.5h"), percent: 96, text: "96%", resetsAt: Date().addingTimeInterval(3600), kind: .shortWindow),
+            Gauge(label: L.t("g.week"), percent: 93, text: "93%", resetsAt: Date().addingTimeInterval(86_400), kind: .longWindow)
+        ]
+        r.state = .nearLimit
+        return (id, [r])
+    })
+}
+
+/// Bridges the screen-capture worker back to AppKit's main queue without
+/// capturing NSMenu directly in a Sendable closure.
+private final class MenuCanceller: @unchecked Sendable {
+    weak var menu: NSMenu?
+    init(_ menu: NSMenu) { self.menu = menu }
+    func cancel() { DispatchQueue.main.async { self.menu?.cancelTracking() } }
+}
+
 /// `AIMeter --once` prints every provider's reading as plain text and exits.
 /// Same code path as the menu, so it is the honest way to see what the app is
 /// actually reading without staring at the menu bar.
@@ -14,7 +42,8 @@ func runOnce(manual: Bool = false) async {
             switch r.state {
             case .ok: mark = "OK  "
             case .warn: mark = "WARN"
-            case .error: mark = "ERR "
+            case .nearLimit: mark = "LIMIT"
+            case .failure: mark = "ERR "
             case .off: mark = "--  "
             }
             var head = "[\(mark)] \(r.title)"
@@ -40,10 +69,14 @@ func runOnce(manual: Bool = false) async {
 /// to the main actor while the main thread waits on the semaphore below would
 /// deadlock.
 func renderIcon(to path: String) async {
-    let cfg = Config.load()
+    var cfg = Config.load()
     L.current = cfg.language
     var readings: [String: [Reading]] = [:]
-    for p in buildProviders(cfg) { readings[p.id] = await p.fetchAll() }
+    if CommandLine.arguments.contains("--demo-high") {
+        readings = highUsageDemo(&cfg)
+    } else {
+        for p in buildProviders(cfg) { readings[p.id] = await p.fetchAll() }
+    }
     let lines = cfg.menuBar.lines.map { resolveStripLine($0, readings, cfg) }
 
     for scheme in BarColourScheme.allCases {
@@ -62,8 +95,15 @@ func renderIcon(to path: String) async {
         NSRect(origin: .zero, size: size).fill()
         strip.draw(in: NSRect(origin: .zero, size: size))
         NSGraphicsContext.restoreGraphicsState()
-        let out = scheme == .provider ? path
-                : (path as NSString).deletingPathExtension + "-window.png"
+        let out: String
+        switch scheme {
+        case .provider:
+            out = path
+        case .window:
+            out = (path as NSString).deletingPathExtension + "-window.png"
+        case .adaptive:
+            out = (path as NSString).deletingPathExtension + "-adaptive.png"
+        }
         try? rep.representation(using: .png, properties: [:])?
             .write(to: URL(fileURLWithPath: out))
         print("wrote \(out)")
@@ -82,12 +122,17 @@ func renderIcon(to path: String) async {
 /// what they see.
 @MainActor
 func renderPanel(to path: String) async {
-    let cfg = Config.load()
+    var cfg = Config.load()
     L.current = cfg.language
     Palette.overrides = cfg.colours
-    let providers = buildProviders(cfg)
+    var providers = buildProviders(cfg)
     var readings: [String: [Reading]] = [:]
-    for p in providers { readings[p.id] = await p.fetchAll() }
+    if CommandLine.arguments.contains("--demo-high") {
+        readings = highUsageDemo(&cfg)
+        providers = providers.filter { readings[$0.id] != nil }
+    } else {
+        for p in providers { readings[p.id] = await p.fetchAll() }
+    }
 
     let rows = buildPanelRows(providers, readings, cfg)
     guard !rows.isEmpty else { print("no rows"); return }
@@ -125,12 +170,17 @@ func renderPanel(to path: String) async {
 /// part of any routine check.
 @MainActor
 func renderMenuShots(to path: String) async {
-    let cfg = Config.load()
+    var cfg = Config.load()
     L.current = cfg.language
     Palette.overrides = cfg.colours
-    let providers = buildProviders(cfg)
+    var providers = buildProviders(cfg)
     var readings: [String: [Reading]] = [:]
-    for p in providers { readings[p.id] = await p.fetchAll() }
+    if CommandLine.arguments.contains("--demo-high") {
+        readings = highUsageDemo(&cfg)
+        providers = providers.filter { readings[$0.id] != nil }
+    } else {
+        for p in providers { readings[p.id] = await p.fetchAll() }
+    }
 
     // Built exactly as `rebuildMenu` builds it, including the enabled "Check
     // now" item: a disabled item and an enabled one do not highlight alike, so
@@ -138,6 +188,7 @@ func renderMenuShots(to path: String) async {
     final class Sink: NSObject { @objc func noop(_ s: Any?) {} }
     let sink = Sink()
     let menu = NSMenu()
+    let canceller = MenuCanceller(menu)
     for p in providers {
         let rows = buildPanelRows([p], readings, cfg)
         guard !rows.isEmpty else { continue }
@@ -182,7 +233,7 @@ func renderMenuShots(to path: String) async {
                            "\(Int(anchor.x) - 12),\(Int(topLeftY) - 12),470,330", out]
             try? p.run()
             p.waitUntilExit()
-            DispatchQueue.main.async { menu.cancelTracking() }
+            canceller.cancel()
         }
         menu.popUp(positioning: nil, at: anchor, in: nil)
         print("wrote \(out)")
@@ -262,6 +313,10 @@ if let idx = CommandLine.arguments.firstIndex(of: "--about"),
 if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
    CommandLine.arguments.count > idx + 1 {
     let path = CommandLine.arguments[idx + 1]
+    // An NSView can draw only after AppKit has an application/appearance.  In
+    // a headless diagnostic invocation that is not created by the normal app
+    // startup path, so make it explicit just as --settings and --menushot do.
+    NSApplication.shared.setActivationPolicy(.accessory)
     var done = false
     // A semaphore would deadlock here: renderPanel needs the main actor, and
     // the main thread is what would be blocked waiting for it.

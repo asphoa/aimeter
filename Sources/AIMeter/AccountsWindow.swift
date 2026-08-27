@@ -173,7 +173,7 @@ final class AccountsStore: ObservableObject {
         if parts.isEmpty { parts = r.lines }
         // A working account and a broken one otherwise look the same: both are
         // just a sentence in the same colour.
-        let mark = r.state == .error ? "✗" : (r.state == .off ? "—" : "✓")
+        let mark = r.state == .failure ? "✗" : (r.state == .off ? "—" : "✓")
         return ([mark] + parts).joined(separator: " ")
     }
 }

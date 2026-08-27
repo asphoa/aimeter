@@ -76,7 +76,7 @@ func buildPanelRows(_ providers: [Provider],
                                         expired: g.expired))
             }
             for l in r.lines {
-                rows.append(Panel.info(l, error: r.state == .error))
+                rows.append(Panel.info(l, error: r.state == .failure))
             }
         }
     }
@@ -86,8 +86,8 @@ func buildPanelRows(_ providers: [Provider],
 func stateColour(_ s: ReadingState) -> NSColor {
     switch s {
     case .ok: return .systemGreen
-    case .warn: return .systemOrange
-    case .error: return .systemRed
+    case .warn, .nearLimit: return .systemOrange
+    case .failure: return .systemRed
     case .off: return .tertiaryLabelColor
     }
 }
