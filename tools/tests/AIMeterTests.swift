@@ -654,10 +654,93 @@ func testClaudeCLIEnvironmentCarriesWhatTheCredentialLookupNeeds() {
             ClaudeCLI.environment(home: "/h", user: "u", lang: nil)["LANG"])
 }
 
-/// Read-only by name and by argument. If this list ever grows a verb, the
-/// justification for running another program at all has changed.
-func testClaudeCLIRunsOnlyTheStatusSubcommand() {
-    T.eq("arguments are the status subcommand", ClaudeCLI.arguments, ["auth", "status", "--json"])
+/// Read-only by name and by argument. This is the gate in front of the step
+/// that costs something, so it must stay the local, free, cannot-open-a-browser
+/// subcommand it is relied on for.
+func testClaudeCLIStatusStaysTheReadOnlySubcommand() {
+    T.eq("status arguments are the status subcommand",
+         ClaudeCLI.statusArguments, ["auth", "status", "--json"])
+}
+
+/// The argument list that fixes the bug, pinned whole.
+///
+/// v1.0.10 ran `auth status` believing that starting the CLI refreshes its
+/// token. Measured on 2026-08-27 against a genuinely expired token, it does not:
+/// 0.45s, a normal report, and the same expired token still in the keychain. The
+/// refresh happens when the CLI needs a working token for a live request, so the
+/// second step has to be a real one-turn prompt.
+///
+/// Pinned as a whole list because every entry is load-bearing, and pinned again
+/// item by item for the two that are load-bearing for reasons a reader of the
+/// list would not guess.
+func testClaudeCLIRefreshRunsARealButMinimalPrompt() {
+    T.eq("the refresh arguments are exactly this", ClaudeCLI.refreshArguments, [
+        "-p", ".",
+        "--model", "haiku",
+        "--safe-mode",
+        "--tools", "",
+        "--system-prompt", "Reply with the single character: .",
+        "--effort", "low",
+        "--max-budget-usd", "0.02",
+        "--no-session-persistence",
+        "--output-format", "json"
+    ])
+
+    let args = ClaudeCLI.refreshArguments
+    // The one that keeps a menu-bar click from starting a Claude session with
+    // Bash and Edit in the user's home directory. Everything else on the list is
+    // about cost; this one is about what the subprocess is allowed to do.
+    guard let tools = args.firstIndex(of: "--tools") else {
+        return T.check("the tool set is pinned shut", false)
+    }
+    T.eq("no tools at all are available to the run", args[tools + 1], "")
+    T.check("customisations are off, so no hook or MCP server runs from a click",
+            args.contains("--safe-mode"))
+    // A stale-token click is not the moment to discover that a permission
+    // bypass was left on the list.
+    T.check("nothing on the list bypasses permissions",
+            !args.contains { $0.contains("dangerously") || $0.contains("bypass") })
+    T.check("it is a one-turn print, not a session", args.contains("-p"))
+    // Not claudeProbeModel: that comes out of the settings file, which this
+    // project treats as untrusted, and a pinned dated id rots where an alias
+    // does not.
+    T.check("the model is the alias", args.contains("haiku"))
+    T.check("a spend ceiling is set", args.contains("--max-budget-usd"))
+    T.check("the run leaves no transcript behind", args.contains("--no-session-persistence"))
+    // The reply is discarded, so the only thing the output has to support is
+    // reading a failure off it.
+    T.check("the result is machine-readable", args.contains("--output-format"))
+}
+
+/// A failure is only ever a message. What decides whether the refresh worked is
+/// the keychain, read afterwards — asking the subprocess instead is exactly how
+/// the broken version reported success at something it had not done.
+func testClaudeCLIPromptFailureReadsTheRunWithoutJudgingIt() {
+    let ok = #"{"is_error":false,"subtype":"success","result":".","api_error_status":null}"#
+    T.isNil("a clean run has nothing to say",
+            ClaudeCLI.promptFailure(output: ok, error: "", exitCode: 0))
+    let refused = #"{"is_error":true,"subtype":"error","api_error_status":"401","result":"x"}"#
+    T.eq("an API refusal is reported as itself",
+         ClaudeCLI.promptFailure(output: refused, error: "", exitCode: 1), "401")
+    // An older CLI rejects an argument it does not know, and says so on stderr.
+    // Reporting a bare "exit 1" for that would leave no way to tell a rejected
+    // flag from a network failure.
+    T.eq("a rejected argument is quoted from stderr",
+         ClaudeCLI.promptFailure(output: "", error: "error: unknown option '--effort'\n",
+                                 exitCode: 1),
+         "error: unknown option '--effort'")
+    T.check("with nothing said at all, the exit code is the message",
+            ClaudeCLI.promptFailure(output: "", error: "", exitCode: 1) == "exit 1")
+    T.eq("a clean exit printing nothing usable is still a failure",
+         ClaudeCLI.promptFailure(output: "not json", error: "", exitCode: 0),
+         L.t("c.refresh.unreadable"))
+    // A menu row is one line wide, and stderr is not.
+    let flood = String(repeating: "x", count: 500)
+    T.check("a wall of output is cut to one line that fits",
+            (ClaudeCLI.promptFailure(output: "", error: flood, exitCode: 1) ?? "").count <= 161)
+    T.check("multi-line output does not become a multi-line row",
+            !(ClaudeCLI.promptFailure(output: "", error: "one\ntwo\n", exitCode: 1) ?? "x")
+                .contains("\n"))
 }
 
 /// The CLI exits 1 both when it is signed out and when it fails, so the exit
@@ -687,6 +770,48 @@ func testClaudeCLIRedactsTheAccountFromTheDump() {
     T.check("the organisation name is gone", !safe.contains("Someone Ltd"))
     T.check("what the dump is for survives", safe.contains(#""subscriptionType": "max""#))
     T.check("and so does the field that decides the outcome", safe.contains(#""loggedIn": true"#))
+
+    // The prompt run writes a second dump, and that one carries session
+    // identifiers instead of an address.
+    let run = #"{"is_error":false,"session_id":"82ac5c71-cafe","uuid":"4de032aa-cafe","subtype":"success"}"#
+    let scrubbed = ClaudeCLI.redact(run)
+    T.check("the session id is gone", !scrubbed.contains("82ac5c71-cafe"))
+    T.check("the message uuid is gone", !scrubbed.contains("4de032aa-cafe"))
+    T.check("what the dump is for survives here too", scrubbed.contains(#""is_error":false"#))
+}
+
+/// Runs the real binary — the free step only — because the plumbing both steps
+/// share is the part no amount of string-pinning can vouch for.
+///
+/// `execute` builds the environment from nothing, drains two pipes, enforces a
+/// timeout and writes a redacted dump. Step two differs from step one in its
+/// argument list and in costing something; everything underneath is this code.
+/// The failure this whole change is about was a causal claim nobody could test,
+/// so the parts that *can* be tested are, on any machine that has the CLI.
+///
+/// Deliberately not the prompt step: a test suite must not spend the user's
+/// window every time it runs. That step is verified by hand, with the same
+/// arguments and the same from-scratch environment — measured 2026-08-27, 2.5s,
+/// 264 input and 83 output tokens.
+func testClaudeCLIActuallyRunsTheBinaryOnThisMachine() {
+    guard let bin = ClaudeCLI.binary(nil) else { return }
+    let home = trustedHome("~", marker: ".claude") ?? NSHomeDirectory()
+    let outcome = ClaudeCLI.status(binary: bin, home: home)
+    // Either answer means the subprocess started, spoke, and was understood.
+    // What must not happen is `.failed`, which here would mean the environment
+    // or the parsing is wrong — the 2026-08-25 USER bug, caught this way.
+    switch outcome {
+    case .signedIn, .signedOut:
+        T.check("the real CLI ran and its report was understood", true)
+    case .failed(let why):
+        T.check("the real CLI ran and its report was understood (got: \(why))", false)
+    }
+    let dump = Config.dir + "/claude-cli-last.json"
+    T.check("and the run left a dump to look at",
+            FileManager.default.fileExists(atPath: dump))
+    // The dump is the file most likely to be pasted somewhere while debugging.
+    let text = (try? String(contentsOfFile: dump, encoding: .utf8)) ?? ""
+    T.check("with no address in it", !text.contains("@") || text.contains("<redacted>"))
 }
 
 /// A stale row must say that the button can fix it — otherwise the button is
@@ -969,7 +1094,10 @@ struct Runner {
         testClaudeCLIBinaryWhitelist()
         testClaudeCLIOnlyClaimsTheCLIsOwnCredential()
         testClaudeCLIEnvironmentCarriesWhatTheCredentialLookupNeeds()
-        testClaudeCLIRunsOnlyTheStatusSubcommand()
+        testClaudeCLIStatusStaysTheReadOnlySubcommand()
+        testClaudeCLIRefreshRunsARealButMinimalPrompt()
+        testClaudeCLIPromptFailureReadsTheRunWithoutJudgingIt()
+        testClaudeCLIActuallyRunsTheBinaryOnThisMachine()
         testClaudeCLIOutcomeReadsTheReportNotJustTheExitCode()
         testClaudeCLIRedactsTheAccountFromTheDump()
         testClaudeProviderOffersTheRefreshOnlyWhenItCouldWork()

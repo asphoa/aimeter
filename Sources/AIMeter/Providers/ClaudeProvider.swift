@@ -18,11 +18,15 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         let accounts = cfg.accounts(id, fallback: Discovery.claude())
         var out: [Reading] = []
         for a in accounts {
-            // A manual check may launch the CLI to unstick a stale token, and
-            // then still has the probe request to make. Budgeting the automatic
-            // 25s for both is how that path would report a timeout instead of
-            // the reading it had just gone and fetched.
-            let budget: Double = manual ? 50 : 25
+            // A manual check may launch the CLI twice to unstick a stale token
+            // - once for the free local status check, once for the prompt that
+            // does the refreshing - and then still has the probe request to
+            // make. Budgeting the automatic 25s for all three is how that path
+            // would report a timeout instead of the reading it had just gone
+            // and fetched. This is a ceiling on three sub-timeouts (20 + 30 +
+            // 20), not an expectation: measured end to end, the two CLI runs
+            // take about three seconds together.
+            let budget: Double = manual ? 90 : 25
             out.append(await withTimeout(budget, { await self.fetch(a, manual: manual) },
                                          onTimeout: { .failed(self.id, self.title, a.name,
                                                               L.t("e.timeout.keychain")) }))
@@ -136,12 +140,28 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         return r
     }
 
-    /// Runs the vendor's own CLI once, then reads the keychain again.
+    /// Runs the vendor's own CLI, then reads the keychain again.
     ///
     /// Nothing here writes a credential or speaks any part of Anthropic's
-    /// authentication protocol: it starts the genuine binary on its read-only
-    /// status subcommand and lets that program do what it already does on every
-    /// start. See ClaudeCLI for why that line matters and where it is drawn.
+    /// authentication protocol: it starts the genuine binary and lets that
+    /// program refresh its own token the way it does for its own sake. See
+    /// ClaudeCLI for why that line matters and where it is drawn.
+    ///
+    /// Two steps, and the first one is free. `auth status` cannot refresh
+    /// anything - measured, twice, on 2026-08-27, which is the whole subject of
+    /// ClaudeCLI's opening comment - but it can say whether this machine is
+    /// signed in at all, locally, in under half a second, and without any
+    /// possibility of a browser window. Only when it says yes does the second
+    /// step run a real one-turn prompt, which is what makes the CLI need a
+    /// working token and therefore go and get one.
+    ///
+    /// **The keychain is the verdict, not the subprocess.** Whatever the prompt
+    /// run says about itself, the question being asked is "is the stored token
+    /// fresh now", and the only place that can be answered is the keychain. The
+    /// broken version asked the subprocess instead, was told `"loggedIn": true`,
+    /// and reported success at refreshing a token it had not refreshed. So the
+    /// run's own complaint, if it has one, is used for the message and never for
+    /// the decision.
     ///
     /// Each way this can fail says something different, and each is reported as
     /// itself. An earlier draft returned the unchanged stale message whatever
@@ -156,26 +176,31 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         guard let home = trustedHome(account.home ?? "~", marker: ".claude") else {
             return refused(account, expiry, note: L.t("c.refresh.nobin"))
         }
-        let outcome = await Task.detached(priority: .utility) {
-            ClaudeCLI.run(binary: bin, home: home)
-        }.value
-
-        switch outcome {
+        switch await Task.detached(priority: .utility, operation: {
+            ClaudeCLI.status(binary: bin, home: home)
+        }).value {
         case .failed(let why):
             return refused(account, expiry, note: L.t("c.refresh.failed", why))
         case .signedOut:
             // The CLI has the last word on this: it can see a credential this
             // app cannot, and if it says there is none, the stored blob's own
-            // dates are not the thing to report.
+            // dates are not the thing to report. Nothing is spent finding out.
             return .failed(id, title, account.name, L.t("c.refresh.signedout"))
         case .signedIn:
-            Credential.invalidate(account)
-            let fresh = Credential.expiry(account)
-            guard !fresh.accessExpired else {
-                return refused(account, fresh, note: L.t("c.refresh.stale"))
-            }
-            return await fetch(account, manual: true, afterCLI: true)
+            break
         }
+
+        let complaint = await Task.detached(priority: .utility) {
+            ClaudeCLI.prompt(binary: bin, home: home)
+        }.value
+        Credential.invalidate(account)
+        let fresh = Credential.expiry(account)
+        guard !fresh.accessExpired else {
+            return refused(account, fresh,
+                           note: complaint.map { L.t("c.refresh.failed", $0) }
+                               ?? L.t("c.refresh.stale"))
+        }
+        return await fetch(account, manual: true, afterCLI: true)
     }
 
     /// A refused token, reported in the terms that decide what the user has to

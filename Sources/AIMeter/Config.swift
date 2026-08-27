@@ -148,10 +148,18 @@ struct Config: Codable {
     /// request that does return a number is one to make by hand.
     var intervals: [String: Int] = ["agy": 0]
     var claudeProbeModel: String = "claude-haiku-4-5-20251001"
-    /// A manual check on a Claude row whose access token has gone stale runs
-    /// the real `claude auth status` once and re-reads the keychain, which is
-    /// the only thing that refreshes that token. On by default: the alternative
-    /// is a "Check now" button that cannot succeed, which is what this replaces.
+    /// A manual check on a Claude row whose access token has gone stale runs the
+    /// real `claude` once - a local status check, then a minimal one-turn
+    /// prompt - and re-reads the keychain, because the CLI making a live request
+    /// is the only thing that refreshes that token. On by default: the
+    /// alternative is a "Check now" button that cannot succeed, which is what
+    /// this replaces. Turning it off costs nothing but the button; the row still
+    /// says what to run by hand.
+    ///
+    /// The prompt is charged against the user's own window - measured at 264
+    /// input and 83 output tokens of Haiku, and the row says so before it
+    /// happens. That is the only thing this app does that spends anything the
+    /// user did not ask for by name, which is why it is a setting at all.
     /// Never on a timer - see ClaudeCLI and ClaudeProvider.
     var claudeRefreshViaCLI: Bool = true
     /// Path to the claude binary; empty means look in the usual places.

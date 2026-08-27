@@ -110,6 +110,13 @@ This is the part worth reading before you trust it with your credentials.
   launch, kept in memory, and used for exactly one request per refresh:
   `POST api.anthropic.com/v1/messages` with `max_tokens: 1`. The usage figures
   come from that response's headers. The token goes nowhere else.
+  One exception, and only ever on a button press: if you press **Check now** on
+  a Claude row whose access token has gone stale, this app runs the real
+  `claude` CLI, which sends a request of its own to refresh that token — a
+  one-turn Haiku prompt, measured at 264 input and 83 output tokens, charged to
+  your own subscription window. The row says so before you press it, and
+  `claudeRefreshViaCLI: false` switches it off. See below for why it has to be a
+  real request.
 - **Keys you paste** into the Accounts window are stored in your login keychain
   under `AIMeter · <service> · <account>`, never in the settings file.
 - **The settings file and debug dumps are written 0600 in a 0700 directory**,
@@ -175,18 +182,58 @@ it did was read the same unchanged keychain item again.
 
 So it now presses the button it was telling you to press. On a manual check of a
 Claude row whose access token is stale (and whose sign-in is still good), this
-app runs the real, vendor-installed `claude auth status` once, waits for it to
-finish, and re-reads the keychain. It does **not** refresh the token itself:
-that would mean replaying Anthropic's private token endpoint under the CLI's
-own client id, and writing a rotated refresh token back into the CLI's keychain
-item while a real `claude` might be doing the same. This app only starts the
-genuine program and reads the result.
+app runs the real, vendor-installed `claude` — first its local `auth status`,
+then a minimal one-turn prompt — waits, and re-reads the keychain. It does
+**not** refresh the token itself: that would mean replaying Anthropic's private
+token endpoint under the CLI's own client id, and writing a rotated refresh
+token back into the CLI's keychain item while a real `claude` might be doing the
+same. This app only starts the genuine program and reads the result.
 
+#### Why it has to be a real request (v1.0.10 through v1.0.14 were wrong)
+
+The first version of this ran `claude auth status --json` on the theory that
+starting the CLI is what refreshes the token. **It is not**, and the button did
+nothing for five releases. Measured on 2026-08-27 against a genuinely expired
+access token, twice — once through this app's own `--once --manual` path, once
+by hand outside the app:
+
+| Command | Time | Effect on the stored token |
+|---|---|---|
+| `claude auth status --json` | 0.45s | **none** — reports `"loggedIn": true`, leaves the expired token exactly as it found it |
+| `claude -p "."` | ~2s | **refreshed** |
+
+`auth status` is a local read. It never contacts the network, so it never has
+occasion to refresh anything. The CLI refreshes when it needs a working token
+for a live request — and there is no `claude auth refresh`; that subcommand has
+login, logout and status and nothing else. So the second step has to be a real
+prompt, and a real prompt costs something.
+
+- **It is made as small as the CLI allows.** Plain `claude -p "hi"` costs 57,250
+  cache-creation input tokens ($0.229 at list price) — the default system
+  prompt, your `CLAUDE.md`, every skill, every MCP tool definition. Run with
+  `--safe-mode --tools "" --system-prompt … --model haiku --effort low`, the
+  same refresh costs **264 input and 83 output tokens** ($0.00068). About 190×
+  less, and the same order as the 1-token probe this app already sends on every
+  ordinary refresh. It is not retried with a smaller flag set on an older CLI,
+  because the only universally-safe argument list is the expensive one, and
+  quietly spending 57,000 tokens where you were promised 300 is worse than
+  failing visibly.
+- **It cannot do anything but talk.** `--tools ""` means the spawned session
+  holds no Bash, no Edit, no tools at all; `--safe-mode` means no hooks, no MCP
+  servers, no plugins, no `CLAUDE.md`. A menu-bar click must not be able to set
+  your own automation going, and `--no-session-persistence` means it leaves no
+  transcript behind. A `--max-budget-usd` ceiling caps the spend at ~30× the
+  measured cost.
+- **The free step still runs first, as a gate.** `auth status` refreshes
+  nothing, but it says — locally, in under half a second, with no possibility of
+  a browser window — whether this machine is signed in at all. Only if it says
+  yes does the prompt run. Nothing is spent discovering that you are logged out.
+- **The keychain is the verdict, not the subprocess.** Whatever the run says
+  about itself, what decides the row is re-reading the stored token. Trusting
+  the subprocess's own report is the exact mistake that let the broken version
+  pass review.
 - **Manual only.** Never on the timer, never at launch, never on opening the
   menu — the same rule as Antigravity.
-- **Read-only subcommand.** `auth status` reports; it makes no model request, so
-  nothing here is charged against the window it is reporting on. With no
-  credential present it prints its report and exits, without offering to log in.
 - **Only the CLI's own account.** An account holding a pasted API key never
   causes the CLI to be launched: running `claude` would not refresh it.
 - **Only from the installers' own locations** — `~/.local/bin`, `/usr/local/bin`,
@@ -195,8 +242,8 @@ genuine program and reads the result.
 - **The auto-updater is switched off for the run**, so a menu click cannot
   quietly pull down a new CLI build.
 - Every outcome is reported as itself — CLI not found, CLI says signed out, CLI
-  ran and the token is still stale — rather than repeating the same message and
-  leaving you to guess whether anything happened.
+  ran and the token is still stale, CLI rejected an argument — rather than
+  repeating the same message and leaving you to guess whether anything happened.
 
 Set `claudeRefreshViaCLI: false` in the settings file to switch it off; set
 `claudeBinary` to pick one of the allowed paths explicitly.

@@ -21,11 +21,48 @@ import Foundation
 /// the replacement back into the CLI's keychain item while a real `claude`
 /// might be doing the same. Losing that race logs the user out for real.
 ///
-/// Instead it runs the genuine, vendor-shipped binary with its own read-only
-/// status subcommand and lets that program do whatever it already does on every
-/// start, then re-reads the keychain. This app is only pressing the button.
-/// Same line this project drew for Antigravity, and a milder version of it:
-/// one non-interactive subcommand rather than a screen-scraped TUI.
+/// Instead it runs the genuine, vendor-shipped binary and lets that program do
+/// its own refresh, then re-reads the keychain. This app is only pressing the
+/// button. Same line this project drew for Antigravity, and a milder version of
+/// it: non-interactive subcommands rather than a screen-scraped TUI.
+///
+/// ## What v1.0.10 got wrong, and how it was found out
+///
+/// The first version of this ran `claude auth status --json` on the theory that
+/// starting the CLI at all is what refreshes the token. That theory was written
+/// down as unconfirmed at the time - the one manual test that appeared to
+/// support it had a real `claude` session running alongside it, which is a
+/// confound, not a control. Measured properly on 2026-08-27 against a genuinely
+/// expired access token, twice, once through this app's own `--once --manual`
+/// path and once by hand outside the app:
+///
+///   - `claude auth status --json` returns in 0.45s, prints `"loggedIn": true`,
+///     and leaves the expired token in the keychain exactly as it found it. It
+///     is a local read. It never touches the network, so it never has occasion
+///     to refresh anything.
+///   - `claude -p "..."` immediately afterwards succeeds, and the token in the
+///     keychain is refreshed.
+///
+/// So the button shipped non-functional and stayed that way, reporting "claude
+/// ran, but the stored token is still expired" - which was true, and useless.
+/// The refresh is driven by the CLI needing a working token for a live request,
+/// not by the CLI starting. Only a command that makes one will do.
+///
+/// ## Why it costs something now, and how little
+///
+/// There is no `claude auth refresh`; `auth` has exactly login, logout and
+/// status (checked against 2.1.246). So the second step has to be a real
+/// request, and a real request is charged against the user's own window - a new
+/// kind of side effect for a button called "Check now", and the reason the
+/// row's own text now says so before it happens.
+///
+/// It is made as small as the CLI allows. Measured on 2026-08-27, plain
+/// `claude -p "hi"` costs **57,250 cache-creation input tokens** ($0.229 at list
+/// price): the default system prompt, the user's CLAUDE.md, every skill and
+/// every MCP tool definition. With the arguments below it costs **264 input and
+/// 83 output tokens on Haiku** ($0.00068) - about 190x less, and comparable to
+/// the 1-output-token probe this provider already sends on every ordinary
+/// refresh. That only happens on a manual click that finds a stale token.
 ///
 /// Manual only. See ClaudeProvider for the gate; a timer must never launch
 /// another program.
@@ -69,12 +106,74 @@ enum ClaudeCLI {
         a.keychainService == credentialService
     }
 
+    /// Step one, and the reason the expensive step stays safe.
+    ///
     /// Read-only by name and by measurement: with no credential present it
     /// prints `"loggedIn": false` and exits 1 without offering to log in, so
     /// the worst case is a report, never a browser window. It makes no model
     /// request, so nothing here is charged against the window it is reporting
-    /// on - unlike the probe this provider otherwise sends.
-    static let arguments = ["auth", "status", "--json"]
+    /// on, and it answers in under half a second.
+    ///
+    /// It refreshes nothing - that is the bug this file exists to record. It is
+    /// kept anyway, as the gate in front of step two: this app must never spawn
+    /// a *prompt* on a machine that turns out to be signed out, where the CLI's
+    /// response to a missing credential is its own business and could reasonably
+    /// be a browser window. Asking a free, local, proven-harmless question first
+    /// is how the "worst case is a report" guarantee survives step two.
+    static let statusArguments = ["auth", "status", "--json"]
+
+    /// Step two: the one that actually refreshes the token, because it is the
+    /// one that makes the CLI need a working token.
+    ///
+    /// Every argument is here to make the request smaller or to make sure a
+    /// menu-bar click cannot turn into something a menu-bar click should not do.
+    ///
+    ///   - `-p .` - print mode, one turn, then exit. A full stop is the shortest
+    ///     prompt that is still a prompt.
+    ///   - `--tools ""` - **the safety-critical one.** Without it, clicking a
+    ///     menu item would start a Claude session holding Bash and Edit in the
+    ///     user's home directory. With it the subprocess can emit text and
+    ///     nothing else. Pinned by test for that reason.
+    ///   - `--safe-mode` - no hooks, plugins, MCP servers, custom agents or
+    ///     CLAUDE.md. Auth, by the CLI's own documentation, still works
+    ///     normally, which is the whole point. This is both the bulk of the cost
+    ///     saving and a second reason the run cannot set the user's own
+    ///     automation going behind a button labelled "Check now".
+    ///   - `--system-prompt` - replaces the default one. Two effects: the
+    ///     request stops carrying the user's machine and project context off to
+    ///     the API, and the token count drops by two orders of magnitude.
+    ///   - `--model haiku` - the alias, deliberately not `claudeProbeModel`.
+    ///     That setting comes out of a plain-text file this project treats as
+    ///     untrusted, and a pinned dated id rots; an alias cannot.
+    ///   - `--effort low` - the reply is thrown away, so thinking tokens bought
+    ///     nothing. Measured: 194 output tokens without it, 83 with.
+    ///   - `--max-budget-usd 0.02` - a ceiling, ~30x the measured cost. If a
+    ///     future CLI or a stuck loop makes this cost more than a rounding
+    ///     error, it stops instead.
+    ///   - `--no-session-persistence` - a button press must not leave a
+    ///     transcript in the user's session history.
+    ///   - `--output-format json` - so a failure can be read rather than
+    ///     guessed at.
+    ///
+    /// These flags need a reasonably current CLI (verified against 2.1.246). An
+    /// older one rejects an unknown option and exits non-zero, which is reported
+    /// as itself, with its own message - see `promptFailure`. It is deliberately
+    /// not retried with a smaller flag set: the only argument list old enough to
+    /// be universally safe is bare `-p`, which costs 190x more, and quietly
+    /// spending 57,000 tokens where the user was promised 300 is exactly the
+    /// "produce something else under the same name" failure this project's
+    /// pipeline conventions exist to forbid.
+    static let refreshArguments = [
+        "-p", ".",
+        "--model", "haiku",
+        "--safe-mode",
+        "--tools", "",
+        "--system-prompt", "Reply with the single character: .",
+        "--effort", "low",
+        "--max-budget-usd", "0.02",
+        "--no-session-persistence",
+        "--output-format", "json"
+    ]
 
     /// The environment the subprocess gets - built rather than inherited,
     /// because the parent's environment can carry an `ANTHROPIC_API_KEY` and a
@@ -107,14 +206,16 @@ enum ClaudeCLI {
     }
 
     /// What the run established, in the terms that decide what the user reads.
-    /// Deliberately four cases and not a Bool: "the CLI could not be run",
+    /// Deliberately three cases and not a Bool: "the CLI could not be run",
     /// "the CLI says this machine is signed out" and "the CLI ran and the
     /// credential is still stale" call for three different things from the
     /// user, and collapsing them into one would put this row back where it
     /// started - a message that does not match what happened.
     enum Outcome: Equatable {
-        /// Ran, and reported a signed-in account. Whatever it left in the
-        /// keychain is now the current state; re-read it.
+        /// Ran, and reported a signed-in account. This says the machine has a
+        /// credential worth trying to refresh - nothing more. It was once read
+        /// as "and therefore the token has just been refreshed", which is how
+        /// the broken version passed its own review.
         case signedIn
         /// Ran cleanly, and reported no signed-in account on this machine.
         case signedOut
@@ -135,15 +236,53 @@ enum ClaudeCLI {
         return loggedIn ? .signedIn : .signedOut
     }
 
+    /// What the prompt run complained about, or nil if it did not.
+    ///
+    /// Advisory, and only ever advisory. The verdict on whether the refresh
+    /// worked is the keychain, read afterwards - see ClaudeProvider. Deciding
+    /// from a subprocess's own report whether the thing it was run for happened
+    /// is precisely the mistake that let the broken version ship: `auth status`
+    /// said `"loggedIn": true` every time, and the token stayed expired every
+    /// time. So this returns a string to put in front of the user when the run
+    /// went wrong, not a judgement on the outcome.
+    ///
+    /// `error` is the CLI's own stderr, which is where an argument this build
+    /// does not recognise gets explained. Reporting a bare "exit 1" for that
+    /// would leave the user with no way to tell a rejected flag from a network
+    /// failure.
+    static func promptFailure(output: String, error: String, exitCode: Int32) -> String? {
+        if let data = output.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data),
+           let d = obj as? [String: Any], let failed = d["is_error"] as? Bool {
+            guard failed else { return nil }
+            let why = (d["api_error_status"] as? String) ?? (d["subtype"] as? String)
+                ?? (d["result"] as? String)
+            return brief(why ?? "error")
+        }
+        let complaint = brief(error)
+        if !complaint.isEmpty { return complaint }
+        return exitCode == 0 ? L.t("c.refresh.unreadable") : "exit \(exitCode)"
+    }
+
+    /// One redacted line, short enough to sit on a menu row.
+    static func brief(_ s: String) -> String {
+        let one = redact(s).split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        return one.count > 160 ? String(one.prefix(160)) + "…" : one
+    }
+
     /// The status output names the account, its organisation and that
-    /// organisation's id. This file is written so a failure can be looked at
-    /// instead of guessed at, and it is the file most likely to be pasted
-    /// somewhere while debugging, so those come out before it touches disk.
+    /// organisation's id; the prompt output carries session identifiers. These
+    /// files are written so a failure can be looked at instead of guessed at,
+    /// and they are the files most likely to be pasted somewhere while
+    /// debugging, so those come out before either touches disk.
     static func redact(_ s: String) -> String {
         var out = s.replacingOccurrences(
             of: #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#,
             with: "<redacted>", options: .regularExpression)
-        for field in ["email", "orgId", "orgName", "organizationId", "accountUuid", "userId"] {
+        for field in ["email", "orgId", "orgName", "organizationId", "accountUuid", "userId",
+                      "session_id", "sessionId", "uuid", "parent_tool_use_id"] {
             out = out.replacingOccurrences(
                 of: "(\"\(field)\"\\s*:\\s*)\"[^\"]*\"",
                 with: "$1\"<redacted>\"", options: .regularExpression)
@@ -151,8 +290,52 @@ enum ClaudeCLI {
         return out
     }
 
-    /// Runs it. Blocking; call off the main thread.
-    static func run(binary path: String, home: String, timeout: TimeInterval = 20) -> Outcome {
+    /// Step one. Blocking; call off the main thread.
+    static func status(binary path: String, home: String,
+                       timeout: TimeInterval = 20) -> Outcome {
+        switch execute(binary: path, arguments: statusArguments, home: home,
+                       timeout: timeout, dumpTo: "claude-cli-last.json") {
+        case .couldNotRun(let why): return .failed(why)
+        case .ran(let run): return outcome(output: run.output, exitCode: run.code)
+        }
+    }
+
+    /// Step two. Blocking; call off the main thread. Nil means it did not
+    /// complain - not that the token was refreshed, which only the keychain can
+    /// say.
+    ///
+    /// The longer ceiling is because this one waits on a model, not on a local
+    /// file read. Measured at 2.5s end to end on 2026-08-27; 30 seconds is the
+    /// point at which something has gone wrong rather than slowly.
+    static func prompt(binary path: String, home: String,
+                       timeout: TimeInterval = 30) -> String? {
+        switch execute(binary: path, arguments: refreshArguments, home: home,
+                       timeout: timeout, dumpTo: "claude-cli-last-refresh.json") {
+        case .couldNotRun(let why): return why
+        case .ran(let run):
+            return promptFailure(output: run.output, error: run.error, exitCode: run.code)
+        }
+    }
+
+    struct Completed {
+        let output: String
+        let error: String
+        let code: Int32
+    }
+
+    /// Either the program ran and said something, or it never got to say
+    /// anything at all. Kept apart because they are different messages: one
+    /// quotes the CLI, the other quotes this app.
+    enum Attempt {
+        case ran(Completed)
+        case couldNotRun(String)
+    }
+
+    /// Runs the binary and reports what it printed. Blocking; call off the main
+    /// thread. `.failure` is reserved for "it did not get to say anything" -
+    /// could not be started, or had to be killed.
+    static func execute(binary path: String, arguments: [String], home: String,
+                        timeout: TimeInterval, dumpTo file: String) -> Attempt {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
@@ -163,19 +346,24 @@ enum ClaudeCLI {
         // that decided to ask a question gets an answer immediately instead of
         // waiting for one that is never coming.
         process.standardInput = FileHandle.nullDevice
-        let outPipe = Pipe()
+        let outPipe = Pipe(), errPipe = Pipe()
         process.standardOutput = outPipe
-        process.standardError = FileHandle.nullDevice
+        // Kept apart rather than merged: stdout has to stay parseable JSON, and
+        // stderr is the only place a rejected argument is explained.
+        process.standardError = errPipe
 
-        do { try process.run() } catch { return .failed(error.localizedDescription) }
+        do { try process.run() } catch { return .couldNotRun(brief(error.localizedDescription)) }
 
-        // Drained on another thread so a subprocess that fills the pipe cannot
+        // Drained on other threads so a subprocess that fills either pipe cannot
         // deadlock against a parent that is waiting for it to exit.
-        let box = Drain()
-        let drained = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .utility).async {
-            box.data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            drained.signal()
+        let out = Drain(), err = Drain()
+        let drained = DispatchGroup()
+        for (pipe, box) in [(outPipe, out), (errPipe, err)] {
+            drained.enter()
+            DispatchQueue.global(qos: .utility).async {
+                box.data = pipe.fileHandleForReading.readDataToEndOfFile()
+                drained.leave()
+            }
         }
 
         let deadline = Date().addingTimeInterval(timeout)
@@ -183,14 +371,16 @@ enum ClaudeCLI {
         if process.isRunning {
             process.terminate()
             _ = drained.wait(timeout: .now() + 2)
-            return .failed(L.t("c.refresh.timeout"))
+            return .couldNotRun(L.t("c.refresh.timeout"))
         }
         process.waitUntilExit()
         _ = drained.wait(timeout: .now() + 5)
 
-        let text = String(decoding: box.data, as: UTF8.self)
-        writePrivate(Data(redact(text).utf8), to: Config.dir + "/claude-cli-last.json")
-        return outcome(output: text, exitCode: process.terminationStatus)
+        let text = String(decoding: out.data, as: UTF8.self)
+        writePrivate(Data(redact(text).utf8), to: Config.dir + "/" + file)
+        return .ran(Completed(output: text,
+                              error: String(decoding: err.data, as: UTF8.self),
+                              code: process.terminationStatus))
     }
 }
 
