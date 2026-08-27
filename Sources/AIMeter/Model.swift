@@ -14,6 +14,11 @@ struct Gauge: Sendable {
     /// What this gauge measures. Only the menu bar strip's "by window type"
     /// colour mode reads it; everything else can leave it at `.other`.
     var kind: GaugeKind = .other
+    /// Set by `Reading.asOf` when this gauge's own window ended after the
+    /// snapshot was taken. Its `percent` is cleared at the same time, so
+    /// nothing draws a bar for it; this flag is what tells the panel to draw an
+    /// empty track and a dash rather than treat it as a money balance.
+    var expired = false
 }
 
 struct Reading: Sendable {
@@ -80,6 +85,64 @@ func readKey(file: String?) -> String? {
 }
 
 extension Reading {
+    /// This reading as it stands *now*, rather than as it stood when it was
+    /// captured.
+    ///
+    /// A snapshot ages at a rate the reader cannot see, because the rate
+    /// depends on the window each figure describes rather than on the snapshot.
+    /// Fifteen hours off a weekly window is a rounding error; fifteen hours off
+    /// a five-hour window is two or three complete cycles, and the number is
+    /// then not stale but *wrong* - it describes a window that no longer
+    /// exists. Measured on 2026-08-27 against ChatGPT's own panel: Codex's
+    /// weekly figure agreed exactly (27%, resetting 2 September) off a snapshot
+    /// taken the previous afternoon, while the five-hour figure from the same
+    /// snapshot read 84% against a live 0%. Both came from one correctly parsed
+    /// line; only one of them still meant anything, and the row's single
+    /// "snapshot · 15h ago" label said nothing about which.
+    ///
+    /// The tell is in the data itself and needs no guessing: the vendor states
+    /// each window's `resets_at`. Once that moment has passed, this app knows
+    /// the cycle it measured has been replaced, and knows it cannot say by what.
+    /// So the figure goes, and the label says the window ended. Suppressing it
+    /// costs one number nobody could have used; keeping it is a specific,
+    /// confident, wrong percentage - the failure this project treats as worse
+    /// than producing less (see the pipeline conventions in CLAUDE.md).
+    ///
+    /// Only snapshot-backed readings are touched. A live reading's reset time
+    /// arrives from the same response as its percentage, so a moment in the
+    /// past there means clock skew, not a spent cycle - and blanking a number
+    /// that was accurate a second ago would be a regression, not a fix. The
+    /// grace period covers the same skew for snapshots.
+    func asOf(_ now: Date = Date(), grace: TimeInterval = 60) -> Reading {
+        guard snapshotAt != nil, state != .off else { return self }
+        var out = self
+        var any = false
+        for i in out.gauges.indices {
+            guard let ends = out.gauges[i].resetsAt,
+                  ends.addingTimeInterval(grace) < now else { continue }
+            out.gauges[i].expired = true
+            out.gauges[i].percent = nil
+            out.gauges[i].text = "—"
+            any = true
+        }
+        guard any else { return self }
+        out.lines.append(L.t("m.expired.hint"))
+        // Recomputed rather than kept: a dead window that read 84% left this
+        // row amber, which is the same claim as the number, made in colour.
+        // Anything the gauges alone did not justify - a vendor's own
+        // "rate limit reached" flag, say - was set by something else and stays.
+        let fromGauges = worstState(gauges)
+        let floor = state > fromGauges ? state : .ok
+        out.state = max(floor, worstState(out.gauges))
+        return out
+    }
+
+    /// Every place that shows a reading goes through this, so a snapshot is
+    /// aged where it is drawn rather than where it was fetched: a five-hour
+    /// window can lapse between two refreshes, and the panel must not still be
+    /// claiming a percentage for it when it does.
+    static func asOfNow(_ list: [Reading]) -> [Reading] { list.map { $0.asOf() } }
+
     static func failed(_ id: String, _ title: String, _ account: String?, _ message: String) -> Reading {
         Reading(id: id, title: title, account: account, lines: [message], state: .error)
     }
@@ -162,6 +225,25 @@ enum Net {
 
 /// Read the last `limit` bytes of a file - session logs get large and we only
 /// ever care about the most recent record.
+///
+/// Seeking to a byte offset lands in the middle of a character whenever the
+/// text there is not ASCII, and `String(data:encoding:.utf8)` is strict: one
+/// stray continuation byte at the front and it returns nil for the entire
+/// window. The caller then has no tail at all and moves on to an older file, so
+/// a single misaligned byte silently promoted a stale reading to the current
+/// one - with no error anywhere, because nothing had failed.
+///
+/// This is not a rare alignment either, in logs full of CJK. Measured on this
+/// machine on 2026-08-27 across the 116 Codex rollout files larger than the
+/// window: 7 of them, 6%, decode to nil on their own tail, every one of them
+/// "invalid start byte at position 0". One was written the same afternoon as
+/// the reading the user reported as wrong.
+///
+/// So: skip the partial line the cut landed in - which is also, by
+/// construction, a character boundary - and decode what is left, replacing
+/// anything still malformed rather than discarding the file over it. A damaged
+/// line fails to parse on its own and costs that one record; a nil tail costs
+/// every record in the file, including the newest one in existence.
 func tailBytes(_ path: String, limit: Int = 512 * 1024) -> String? {
     guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
     defer { try? fh.close() }
@@ -169,7 +251,13 @@ func tailBytes(_ path: String, limit: Int = 512 * 1024) -> String? {
     let start = size > UInt64(limit) ? size - UInt64(limit) : 0
     try? fh.seek(toOffset: start)
     guard let data = try? fh.readToEnd() else { return nil }
-    return String(data: data, encoding: .utf8)
+    var slice = data[data.startIndex...]
+    // Only when the read began mid-file: a whole file starts on a boundary and
+    // its first line is a real one, not the tail of somebody else's.
+    if start > 0, let nl = slice.firstIndex(of: 0x0A) {
+        slice = slice[slice.index(after: nl)...]
+    }
+    return String(decoding: slice, as: UTF8.self)
 }
 
 func expand(_ p: String) -> String { (p as NSString).expandingTildeInPath }

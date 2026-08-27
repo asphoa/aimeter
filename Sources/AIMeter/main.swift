@@ -9,7 +9,7 @@ func runOnce(manual: Bool = false) async {
     let cfg = Config.load()
     L.current = cfg.language
     for p in buildProviders(cfg) {
-        for r in await p.fetchAll(manual: manual) {
+        for r in Reading.asOfNow(await p.fetchAll(manual: manual)) {
             let mark: String
             switch r.state {
             case .ok: mark = "OK  "
@@ -23,7 +23,9 @@ func runOnce(manual: Bool = false) async {
             print(head)
             for g in r.gauges {
                 let pct = g.percent.map { String(format: " %5.1f%%", $0) } ?? "       "
-                let reset = g.resetsAt.map { "  · " + L.t("m.resets", Fmt.relative($0)) } ?? ""
+                let reset = g.resetsAt.map {
+                    "  · " + L.t(g.expired ? "m.ended" : "m.resets", Fmt.relative($0))
+                } ?? ""
                 print("        \(g.label)\(pct)  \(g.text)\(reset)")
             }
             for l in r.lines { print("        \(l)") }

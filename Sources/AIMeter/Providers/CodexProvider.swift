@@ -7,6 +7,23 @@ import Foundation
 /// is therefore accurate as of the last time Codex ran, not live - each reading
 /// carries its own timestamp so a stale figure is labelled stale rather than
 /// passed off as current.
+///
+/// There is no fresher local source and no read-only way to ask. Checked on
+/// 2026-08-27 against codex-cli 0.149.1: `codex doctor --json` reports auth,
+/// config and daemon health and no usage at all, and none of the four SQLite
+/// databases in `~/.codex` (`state_5`, `logs_2`, `queue_1`, `thread_history_1`)
+/// contains the string `rate_limits`. The rollout files are the whole of it.
+/// The only way to a live figure is to make a model request, which would spend
+/// the very quota being reported - so this row is a snapshot by construction,
+/// and the work is in saying so accurately. `Reading.asOf` does that part.
+///
+/// The shape of what is parsed here moves under us, which is why nothing below
+/// keys off slot names. Observed in this machine's own session files:
+/// `primary` was a weekly window (`window_minutes: 10080`) from 31 July to 25
+/// August, a 30-day one (43200) on 2 August, both slots null on 7 August, and
+/// from 26 August a five-hour window (300) with the weekly demoted to
+/// `secondary`. Labelling by `window_minutes` survived all four; labelling by
+/// slot would have called the weekly figure "5-hour" for a month.
 final class CodexProvider: Provider, @unchecked Sendable {
     let id = "codex"
     var title: String { L.t("p.codex") }
@@ -67,8 +84,17 @@ final class CodexProvider: Provider, @unchecked Sendable {
         return r
     }
 
-    /// Walks sessions/YYYY/MM/DD newest-first for the first token_count event
-    /// carrying rate_limits.
+    /// Walks sessions/YYYY/MM/DD newest-first for the most recent token_count
+    /// event carrying rate_limits.
+    ///
+    /// Within a day it reads every candidate file and keeps the entry with the
+    /// newest event timestamp, rather than taking the first hit in the
+    /// most-recently-touched file. Those are not the same file when several
+    /// Codex sessions are open at once, which is normal here - 26 August has
+    /// thirteen rollouts, several written within the same minute. A session
+    /// that is still being appended to for other reasons wins on modification
+    /// time while another session logged the newer quota line, and the older
+    /// figure would then be shown as the current one.
     private func newestSnapshot(_ root: String) -> ([String: Any], Date)? {
         let fm = FileManager.default
         func children(_ p: String) -> [String] {
@@ -90,6 +116,7 @@ final class CodexProvider: Provider, @unchecked Sendable {
                     return (full, d ?? .distantPast)
                 }
                 .sorted { $0.date > $1.date }
+            var best: ([String: Any], Date)?
             for f in files.prefix(8) {
                 guard let text = tailBytes(f.path) else { continue }
                 for line in text.split(separator: "\n").reversed() {
@@ -101,9 +128,13 @@ final class CodexProvider: Provider, @unchecked Sendable {
                     var when = f.date
                     if let ts = dict["timestamp"] as? String,
                        let d = ISO8601DateFormatter.withFractional.date(from: ts) { when = d }
-                    return (payload, when)
+                    if best == nil || when > best!.1 { best = (payload, when) }
+                    // The last such line in this file is its newest; the rest
+                    // of the file cannot beat it, so move on to the next one.
+                    break
                 }
             }
+            if let best { return best }
         }
         return nil
     }

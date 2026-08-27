@@ -20,13 +20,14 @@ enum Panel {
     }
 
     static func gauge(label: String, percent: Double?, value: String,
-                      trailing: String?, fill: NSColor) -> NSView {
+                      trailing: String?, fill: NSColor, expired: Bool = false) -> NSView {
         let v = GaugeRowView()
         v.label = label
         v.percent = percent
         v.value = value
         v.trailing = trailing
         v.fill = fill
+        v.expired = expired
         return v
     }
 
@@ -52,7 +53,7 @@ func buildPanelRows(_ providers: [Provider],
         }
         if list.isEmpty { continue }
         let showAccounts = list.count > 1
-        for r in list {
+        for r in Reading.asOfNow(list) {
             var name = r.title
             if showAccounts, let a = r.account { name += " · \(a)" }
             rows.append(Panel.header(dot: stateColour(r.state), title: name,
@@ -64,12 +65,15 @@ func buildPanelRows(_ providers: [Provider],
                 // Brighter than the system greens/oranges so the fill still
                 // separates from a track that is now considerably darker.
                 let fill = Palette.colour(pct >= 90 ? Palette.alarm : (pct >= 70 ? Palette.warn : Palette.ok))
-                var trailing = g.resetsAt.map { L.t("m.resets", Fmt.relative($0)) }
+                var trailing = g.resetsAt.map {
+                    L.t(g.expired ? "m.ended" : "m.resets", Fmt.relative($0))
+                }
                 if trailing == nil, g.percent != nil, g.text != String(format: "%.0f%%", pct) {
                     trailing = g.text
                 }
                 rows.append(Panel.gauge(label: g.label, percent: g.percent,
-                                        value: g.text, trailing: trailing, fill: fill))
+                                        value: g.text, trailing: trailing, fill: fill,
+                                        expired: g.expired))
             }
             for l in r.lines {
                 rows.append(Panel.info(l, error: r.state == .error))
@@ -132,6 +136,7 @@ private final class GaugeRowView: NSView {
     var value = ""
     var trailing: String?
     var fill: NSColor = .systemGreen
+    var expired = false
 
     private let barX: CGFloat = 148
     private let barW: CGFloat = 90
@@ -159,6 +164,23 @@ private final class GaugeRowView: NSView {
             drawText(String(format: "%.0f%%", pct), at: 0, in: bounds,
                  font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
                  colour: Palette.text(1), rightAlignedTo: 284)
+            if let trailing {
+                drawText(trailing, at: 292, in: bounds, font: .systemFont(ofSize: 11),
+                     colour: Palette.text(0.5), maxWidth: bounds.width - 292 - Panel.rightInset)
+            }
+        } else if expired {
+            // A window whose cycle ended after the snapshot: the track stays,
+            // because this is still a window and the row should not shrink into
+            // the shape used for a money balance, but nothing fills it - there
+            // is no honest length to draw. The dash sits where the percentage
+            // was, so the eye lands on "not known" in the column it was reading.
+            let y = (bounds.height - barH) / 2
+            Palette.colour(Palette.track).setFill()
+            NSBezierPath(roundedRect: NSRect(x: barX, y: y, width: barW, height: barH),
+                         xRadius: barH / 2, yRadius: barH / 2).fill()
+            drawText(value, at: 0, in: bounds,
+                 font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+                 colour: Palette.text(0.5), rightAlignedTo: 284)
             if let trailing {
                 drawText(trailing, at: 292, in: bounds, font: .systemFont(ofSize: 11),
                      colour: Palette.text(0.5), maxWidth: bounds.width - 292 - Panel.rightInset)

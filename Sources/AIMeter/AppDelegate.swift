@@ -35,9 +35,13 @@ final class ReadingsBox: @unchecked Sendable {
 func resolveStripLine(_ line: MenuLine,
                       _ readings: [String: [Reading]],
                       _ cfg: Config) -> StripLine {
-    guard let all = readings[line.provider], !all.isEmpty else {
+    guard let raw = readings[line.provider], !raw.isEmpty else {
         return .noData(line.provider)
     }
+    // Aged first: an expired window loses its percentage, and a bar drawn from
+    // a percentage the panel has already withdrawn would be the same wrong
+    // claim, made where there is no room to qualify it.
+    let all = Reading.asOfNow(raw)
     let chosen = line.account == "*" ? all : all.filter { $0.account == line.account }
     guard !chosen.isEmpty else { return .noData(line.provider) }
 

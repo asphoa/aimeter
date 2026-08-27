@@ -135,11 +135,20 @@ This is the part worth reading before you trust it with your credentials.
 | Row | Source | Live or snapshot |
 |---|---|---|
 | **Claude Code** | One 1-token request to `api.anthropic.com/v1/messages`; the figures are the `anthropic-ratelimit-unified-*` response headers. | Live |
-| **Codex** | The `rate_limits` block Codex writes into its own session files under `~/.codex/sessions/`. No network call and no credential needed. | **Snapshot** — as of the last time Codex ran. Labelled with its age; dimmed once stale. |
+| **Codex** | The `rate_limits` block Codex writes into its own session files under `~/.codex/sessions/`. No network call and no credential needed. | **Snapshot** — as of the last time Codex ran. Labelled with its age; dimmed once stale; a window that ended since is shown as `—` rather than as a number. |
 | **Antigravity** | The result of the CLI's own quota refresh, read out of `~/.gemini/antigravity-cli/cli.log`. | Snapshot |
 | **OpenRouter** | `GET openrouter.ai/api/v1/key`, once per key. | Live |
 | **DeepSeek** | `GET api.deepseek.com/user/balance`. This is money, not a percentage, so it has no bar. Also flags peak-hour pricing. | Live |
 | **Local AI** | Ollama on `127.0.0.1:11434`, LM Studio on `127.0.0.1:1234`, and an MLX server (`mlx_lm.server`/`mlx_vlm.server`) on `127.0.0.1:8081`; reports memory held by loaded models. | Live |
+
+A snapshot ages at a rate that depends on the window, not on the snapshot, and
+one age label cannot speak for both. Fifteen hours off a weekly figure is a
+rounding error; fifteen hours off a five-hour figure is two or three complete
+cycles, and the number then describes a window that no longer exists. Each
+window states its own reset time, so once that moment has passed the figure is
+withdrawn and the row says the window ended, rather than showing a percentage
+nothing can stand behind. Only the affected window is withdrawn — the weekly one
+beside it is still right, and still shown.
 
 A snapshot is always labelled as one. Nothing is presented as current when it is
 not, and a reading that failed is drawn as three dots — never as an empty bar,

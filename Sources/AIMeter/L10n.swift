@@ -142,6 +142,16 @@ enum L {
         "m.loading": ("Loading…", "讀取中…", "Chargement…", "Wird geladen…"),
         "m.snapshot": ("snapshot · %@", "快照 · %@", "instantané · %@", "Schnappschuss · %@"),
         "m.resets": ("resets %@", "%@重置", "réinitialisation %@", "Zurücksetzung %@"),
+        // Short on purpose: this shares the panel's narrow trailing column with
+        // "resets in 23h 35m", and rendering the longer "window ended 11h 53m
+        // ago" truncated it to "window en…1h 53m ago" - which does not merely
+        // look untidy, it reads as a different, smaller number. The row's own
+        // label already says which window this is.
+        "m.ended": ("ended %@", "%@已結束", "terminée %@", "endete %@"),
+        "m.expired.hint": ("— : that window ended after this snapshot; run the tool once to refresh",
+                           "—：該窗在此快照之後已經結束，跑一次該工具即可刷新",
+                           "— : cette fenêtre s’est terminée après cet instantané ; relancez l’outil une fois pour actualiser",
+                           "— : dieses Fenster endete nach diesem Schnappschuss; das Werkzeug einmal ausführen zum Aktualisieren"),
         "m.updated": ("Updated %@ · every %ds", "更新於 %@ · 每 %d 秒", "Mis à jour %@ · toutes les %d s", "Aktualisiert %@ · alle %d s"),
         "m.refresh": ("Refresh now", "立即刷新", "Actualiser", "Jetzt aktualisieren"),
         "m.login": ("Start at login", "開機時自動啟動", "Lancer à l’ouverture de session", "Beim Anmelden starten"),

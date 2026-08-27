@@ -735,6 +735,148 @@ func testClaudeProviderOffersTheRefreshOnlyWhenItCouldWork() {
     T.check("and the outcome itself is on the row", noted.lines.contains(L.t("c.refresh.stale")))
 }
 
+// MARK: - tailBytes: the half of the Codex complaint that was a real bug
+//
+// A byte-offset seek lands inside a character whenever the text there is not
+// ASCII. Strict UTF-8 decoding then rejects the whole window, the caller sees
+// no tail at all, and it moves on to an older file - so the newest reading in
+// existence is skipped and an older one shown as current, with nothing logged
+// because nothing failed. Measured across this machine's own Codex rollouts on
+// 2026-08-27: 6% of the files over the window size decode to nil on their own
+// tail.
+
+func testTailBytesSurvivesACutInsideACharacter() {
+    let dir = NSTemporaryDirectory() + "aimeter-tail-\(UUID().uuidString)"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: dir) }
+    let path = dir + "/rollout.jsonl"
+
+    let limit = 1024
+    let newest = "{\"payload\":{\"rate_limits\":{\"primary\":{\"used_percent\":7}}}}"
+    var strictFailures = 0
+    for pad in 0..<3 {
+        // Three-byte characters, shifted a byte at a time, so at least one of
+        // these three cuts must fall inside one.
+        let filler = String(repeating: "語", count: 900) + String(repeating: "x", count: pad)
+        try? (filler + "\n" + newest + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+
+        // What the old code did with this window, measured rather than assumed.
+        let raw = FileManager.default.contents(atPath: path)!
+        if String(data: raw.suffix(limit), encoding: .utf8) == nil { strictFailures += 1 }
+
+        let tail = tailBytes(path, limit: limit)
+        T.notNil("pad \(pad): a tail is returned", tail)
+        T.check("pad \(pad): the newest record is in it",
+                tail?.contains("rate_limits") == true)
+    }
+    T.check("the test actually exercises a mid-character cut", strictFailures > 0,
+            "no alignment produced an invalid window")
+}
+
+func testTailBytesReadsASmallFileWhole() {
+    // Below the window there is no cut to land badly, and the first line is a
+    // real one - dropping it would lose the only record in a short log.
+    let dir = NSTemporaryDirectory() + "aimeter-tail-\(UUID().uuidString)"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: dir) }
+    let path = dir + "/short.jsonl"
+    try? "第一行 rate_limits\nsecond\n".write(toFile: path, atomically: true, encoding: .utf8)
+    T.check("the first line of a short file survives",
+            tailBytes(path, limit: 512 * 1024)?.contains("第一行") == true)
+}
+
+// MARK: - Reading.asOf: the Codex accuracy complaint of 2026-08-27
+//
+// The numbers below are the real ones, taken off this machine's own session
+// file (~/.codex/sessions/2026/08/26) and off ChatGPT's own usage panel at the
+// same moment. The snapshot was captured 26 August 15:51 (+07); its weekly
+// window reset at 1788314596 = 2 September, its five-hour window at
+// 1787747461 = 26 August 19:31. Read the next morning, the weekly figure was
+// still exactly right (27%, matching the panel) and the five-hour figure read
+// 84% against a live 0%. One snapshot, one parse, two figures of completely
+// different worth - which is the whole point of this function.
+
+private func codexLikeReading(now: Date) -> Reading {
+    var r = Reading(id: "codex", title: "Codex")
+    r.snapshotAt = now.addingTimeInterval(-15 * 3600 - 16 * 60)   // "15h 16m ago"
+    r.gauges = [
+        Gauge(label: "5-hour window", percent: 84, text: "84%",
+              resetsAt: now.addingTimeInterval(-11 * 3600 - 37 * 60), kind: .shortWindow),
+        Gauge(label: "Weekly window", percent: 27, text: "27%",
+              resetsAt: now.addingTimeInterval(6 * 86400 + 3600), kind: .longWindow)
+    ]
+    r.state = worstState(r.gauges)
+    return r
+}
+
+func testAsOfWithdrawsAWindowThatHasAlreadyEnded() {
+    let now = Date()
+    let aged = codexLikeReading(now: now).asOf(now)
+
+    T.check("expired window is marked", aged.gauges[0].expired)
+    T.isNil("expired window carries no percentage", aged.gauges[0].percent)
+    T.eq("expired window shows a dash", aged.gauges[0].text, "—")
+    T.notNil("expired window keeps its reset time, to say when it ended",
+             aged.gauges[0].resetsAt)
+
+    // The half that was right stays right. Withdrawing both would have been a
+    // different wrong answer: a week-long window 15 hours old is accurate.
+    T.check("live window is untouched", !aged.gauges[1].expired)
+    T.near("live window keeps its figure", aged.gauges[1].percent ?? -1, 27)
+}
+
+func testAsOfDropsTheColourTheDeadNumberWasDriving() {
+    let now = Date()
+    let before = codexLikeReading(now: now)
+    T.eq("84% made the row amber to begin with", before.state, .warn)
+    T.eq("and it is green once only the live 27% is left", before.asOf(now).state, .ok)
+}
+
+func testAsOfKeepsAStateSomethingElseSet() {
+    // Codex's own "rate_limit_reached_type" sets .error with no gauge above 90.
+    // That is not the expired gauge talking, so it must survive the withdrawal.
+    let now = Date()
+    var r = codexLikeReading(now: now)
+    r.state = .error
+    T.eq("a non-gauge error is not cleared by expiry", r.asOf(now).state, .error)
+}
+
+func testAsOfLeavesLiveReadingsAlone() {
+    // Claude's reset time arrives in the same response as its percentage, so a
+    // moment in the past there is clock skew, not a spent cycle. Blanking it
+    // would break a row that was correct.
+    let now = Date()
+    var live = Reading(id: "claude", title: "Claude")
+    live.gauges = [Gauge(label: "5-hour", percent: 55, text: "55%",
+                         resetsAt: now.addingTimeInterval(-90), kind: .shortWindow)]
+    T.near("a live reading keeps its figure", live.asOf(now).gauges[0].percent ?? -1, 55)
+    T.check("and is never marked expired", !live.asOf(now).gauges[0].expired)
+
+    // A snapshot whose window ended half a minute ago is inside the skew
+    // grace: the two clocks are not the same clock, and a row must not flicker
+    // to a dash at the moment of reset.
+    var snap = live
+    snap.snapshotAt = now.addingTimeInterval(-120)
+    snap.gauges[0].resetsAt = now.addingTimeInterval(-30)
+    T.check("a snapshot within the grace period is not expired",
+            !snap.asOf(now).gauges[0].expired)
+    snap.gauges[0].resetsAt = now.addingTimeInterval(-600)
+    T.check("and is expired once well past it", snap.asOf(now).gauges[0].expired)
+}
+
+func testStripDrawsNoBarForAWindowThatHasEnded() {
+    // The menu bar has no room to qualify anything, so an 84% bar there is the
+    // same claim with none of the caveat. It must simply not be drawn - leaving
+    // the weekly figure as one honest full-height bar.
+    let now = Date()
+    let line = resolveStripLine(MenuLine(provider: "codex"),
+                                ["codex": [codexLikeReading(now: now)]], Config())
+    T.near("only the live window reaches the strip", line.merged ?? -1, 27)
+    T.eq("and it is drawn as the long window it is", line.mergedKind, .longWindow)
+    T.isNil("no bar for the window that ended", line.top)
+    T.check("the row is still flagged stale", line.stale)
+}
+
 // MARK: - entry point
 //
 // @main rather than a plain main.swift: top-level executable statements are
@@ -777,6 +919,13 @@ struct Runner {
         testClaudeCLIRedactsTheAccountFromTheDump()
         testClaudeProviderOffersTheRefreshOnlyWhenItCouldWork()
         testFindStringVisitsKeysInAStableOrder()
+        testTailBytesSurvivesACutInsideACharacter()
+        testTailBytesReadsASmallFileWhole()
+        testAsOfWithdrawsAWindowThatHasAlreadyEnded()
+        testAsOfDropsTheColourTheDeadNumberWasDriving()
+        testAsOfKeepsAStateSomethingElseSet()
+        testAsOfLeavesLiveReadingsAlone()
+        testStripDrawsNoBarForAWindowThatHasEnded()
 
         let elapsed = Date().timeIntervalSince(start)
         print(String(format: "(%.2fs)", elapsed))
