@@ -52,29 +52,35 @@ func resolveStripLine(_ line: MenuLine,
     }
     let state = chosen.map(\.state).max() ?? .off
 
-    var gauges = chosen.flatMap(\.gauges).filter { $0.percent != nil }
-    if line.gauge != "*" { gauges = gauges.filter { $0.label == line.gauge } }
+    // Keep the structural list separate from the drawable one. A snapshot can
+    // lose a percentage when one of its windows ends, but that does not turn a
+    // two-window provider into a one-window provider. In that case the empty
+    // half is meaningful: it says a window exists but has no honest value now.
+    var allGauges = chosen.flatMap(\.gauges)
+    if line.gauge != "*" { allGauges = allGauges.filter { $0.label == line.gauge } }
+    let gauges = allGauges.filter { $0.percent != nil }
     guard !gauges.isEmpty else { return .noData(line.provider, state: state) }
 
     var out = StripLine(provider: line.provider, top: nil, bottom: nil, merged: nil,
                         state: state, stale: stale)
-    // One measurement means one full-height bar: a service with a single window
-    // should look different from one with two, not like one with a half missing.
-    if gauges.count == 1 {
-        out.merged = gauges[0].percent
-        out.mergedKind = gauges[0].kind == .shortWindow ? .shortWindow : .longWindow
+    let hasShortWindow = allGauges.contains { $0.kind == .shortWindow }
+    let hasLongWindow = allGauges.contains { $0.kind == .longWindow }
+    if hasShortWindow && hasLongWindow {
+        out.top = gauges.filter { $0.kind == .shortWindow }.compactMap(\.percent).max()
+        out.bottom = gauges.filter { $0.kind == .longWindow }.compactMap(\.percent).max()
         return out
     }
-    out.top = gauges.filter { $0.kind == .shortWindow }.compactMap(\.percent).max()
-    out.bottom = gauges.filter { $0.kind == .longWindow }.compactMap(\.percent).max()
-    // Only one kind of window present - several OpenRouter keys, say, which are
-    // all weekly caps. That is one measurement conceptually, so it draws as one
-    // full-height bar rather than a half-empty pair.
-    if out.top == nil || out.bottom == nil {
-        out.mergedKind = out.top != nil ? .shortWindow : .longWindow
-        out.merged = out.top ?? out.bottom ?? gauges.compactMap(\.percent).max()
-        out.top = nil
-        out.bottom = nil
+
+    // A provider that structurally exposes only one window remains one full
+    // height bar, even if it has several readings for that same kind (for
+    // example, several OpenRouter weekly caps). `.other` is a real single
+    // measurement category too, rather than an implicit weekly window.
+    out.merged = gauges.compactMap(\.percent).max()
+    let liveKinds = Set(gauges.map(\.kind))
+    if liveKinds.contains(.shortWindow) && !liveKinds.contains(.longWindow) {
+        out.mergedKind = .shortWindow
+    } else if liveKinds.contains(.longWindow) && !liveKinds.contains(.shortWindow) {
+        out.mergedKind = .longWindow
     }
     return out
 }

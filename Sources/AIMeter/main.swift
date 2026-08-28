@@ -36,7 +36,26 @@ func contrastUsageDemo(_ cfg: inout Config) -> [String: [Reading]] {
     return ["claude": [reading]]
 }
 
+/// A snapshot with a five-hour window that has ended and a still-current
+/// weekly window. This is the shape a local Codex snapshot reaches between
+/// refreshes, and keeps the strip's handling reproducible without waiting for
+/// a particular real reset time.
+func expiredWindowDemo(_ cfg: inout Config) -> [String: [Reading]] {
+    cfg.menuBar.lines = [MenuLine(provider: "codex")]
+    cfg.menuBar.colourScheme = .window
+    var reading = Reading(id: "codex", title: ProviderKind.find("codex")?.title ?? "Codex")
+    reading.snapshotAt = Date().addingTimeInterval(-7_200)
+    reading.gauges = [
+        Gauge(label: L.t("g.5h"), percent: 58, text: "58%",
+              resetsAt: Date().addingTimeInterval(-1_800), kind: .shortWindow),
+        Gauge(label: L.t("g.week"), percent: 41, text: "41%",
+              resetsAt: Date().addingTimeInterval(86_400), kind: .longWindow)
+    ]
+    return ["codex": [reading]]
+}
+
 func diagnosticDemo(_ cfg: inout Config) -> [String: [Reading]]? {
+    if CommandLine.arguments.contains("--demo-expired") { return expiredWindowDemo(&cfg) }
     if CommandLine.arguments.contains("--demo-contrast") { return contrastUsageDemo(&cfg) }
     if CommandLine.arguments.contains("--demo-high") { return highUsageDemo(&cfg) }
     return nil
@@ -361,7 +380,8 @@ if let idx = CommandLine.arguments.firstIndex(of: "--about"),
 if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
    CommandLine.arguments.count > idx + 1 {
     let path = CommandLine.arguments[idx + 1]
-    if CommandLine.arguments.contains("--demo-high") || CommandLine.arguments.contains("--demo-contrast") {
+    if CommandLine.arguments.contains("--demo-high") || CommandLine.arguments.contains("--demo-contrast") ||
+       CommandLine.arguments.contains("--demo-expired") {
         // No fetch is involved in a fixture.  Calling it synchronously avoids
         // depending on an application run loop merely to render an NSBitmap.
         MainActor.assumeIsolated { renderPanelDemo(to: path) }

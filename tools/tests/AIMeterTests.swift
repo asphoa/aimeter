@@ -331,10 +331,10 @@ func testResolveStripLineSplitsTwoWindowsIntoTopAndBottom() {
 }
 
 func testResolveStripLineMergesASingleWindowService() {
-    // Codex only ever reports a weekly figure - this must draw as one
-    // full-height bar, not a pair with a mysteriously empty top half.
-    let reading = Reading(id: "codex", title: "Codex", gauges: [gauge(33, .longWindow)])
-    let line = resolveStripLine(MenuLine(provider: "codex"), ["codex": [reading]], Config())
+    // A truly single-window service must still draw as one full-height bar,
+    // not as a pair with a mysteriously empty top half.
+    let reading = Reading(id: "openrouter", title: "OpenRouter", gauges: [gauge(33, .longWindow)])
+    let line = resolveStripLine(MenuLine(provider: "openrouter"), ["openrouter": [reading]], Config())
     T.near("single window merges", line.merged ?? -1, 33)
     T.eq("merged bar keeps the window it actually measured", line.mergedKind, .longWindow)
     T.isNil("no top half for a single-window service", line.top)
@@ -352,6 +352,20 @@ func testResolveStripLineHandlesSeveralSameWindowGauges() {
     T.notNil("merged bar present for multiple same-window gauges", line.merged)
     T.isNil("no top half", line.top)
     T.isNil("no bottom half", line.bottom)
+}
+
+func testResolveStripLineKeepsAnExpiredWindowInATwoWindowShape() {
+    // This is the real Codex shape after a cached 5-hour window resets: its
+    // percentage is deliberately withdrawn, while the weekly one remains
+    // accurate. The missing short half must not reclassify the service as a
+    // single weekly bar.
+    let now = Date()
+    let reading = codexLikeReading(now: now)
+    let line = resolveStripLine(MenuLine(provider: "codex"),
+                                ["codex": [reading]], Config())
+    T.isNil("expired short window is an empty top half", line.top)
+    T.near("live weekly window stays in the bottom half", line.bottom ?? -1, 27)
+    T.isNil("two-window shape never becomes a merged bar", line.merged)
 }
 
 func testResolveStripLineReturnsNoDataWhenProviderAbsent() {
@@ -1018,13 +1032,13 @@ func testAsOfLeavesLiveReadingsAlone() {
 
 func testStripDrawsNoBarForAWindowThatHasEnded() {
     // The menu bar has no room to qualify anything, so an 84% bar there is the
-    // same claim with none of the caveat. It must simply not be drawn - leaving
-    // the weekly figure as one honest full-height bar.
+    // same claim with none of the caveat. It must simply not be drawn, while
+    // its empty half stays visible to preserve this service's two-window shape.
     let now = Date()
     let line = resolveStripLine(MenuLine(provider: "codex"),
                                 ["codex": [codexLikeReading(now: now)]], Config())
-    T.near("only the live window reaches the strip", line.merged ?? -1, 27)
-    T.eq("and it is drawn as the long window it is", line.mergedKind, .longWindow)
+    T.near("only the live window reaches the bottom half", line.bottom ?? -1, 27)
+    T.isNil("no merged bar reclassifies the remaining weekly window", line.merged)
     T.isNil("no bar for the window that ended", line.top)
     T.check("the row is still flagged stale", line.stale)
 }
@@ -1171,6 +1185,7 @@ struct Runner {
         testResolveStripLineSplitsTwoWindowsIntoTopAndBottom()
         testResolveStripLineMergesASingleWindowService()
         testResolveStripLineHandlesSeveralSameWindowGauges()
+        testResolveStripLineKeepsAnExpiredWindowInATwoWindowShape()
         testResolveStripLineReturnsNoDataWhenProviderAbsent()
         testResolveStripLineReturnsNoDataWhenGaugesHaveNoPercent()
         testCredentialPrefersTheSubscriptionTokenOverMCPTokens()
