@@ -1065,6 +1065,35 @@ func testCodexQuotaWireStatusesNeverReachTheUI() {
     T.eq("unknown wire values are still not printed", unknown.map { L.t($0.key) }, L.t("x.rate.unknown"))
 }
 
+func testCodexSkipsAWindowlessRateLimitsEntry() {
+    // Both shapes captured verbatim from a real ~/.codex/sessions rollout on
+    // 2026-08-28: a normal "codex" entry with real numbers, immediately
+    // followed later in the same file by a "premium" entry with both windows
+    // null. newestSnapshot() used to take whichever line was textually last,
+    // so this exact pair reported "no percentage field" with a usable
+    // reading sitting one line above it.
+    let usable: [String: Any] = [
+        "limit_id": "codex",
+        "primary": ["used_percent": 99.0, "window_minutes": 300, "resets_at": 1787894162],
+        "secondary": ["used_percent": 16.0, "window_minutes": 10080, "resets_at": 1788480962]
+    ]
+    T.check("a normal codex entry has a usable window", CodexProvider.hasUsableWindow(usable))
+
+    let windowless: [String: Any] = [
+        "limit_id": "premium", "primary": NSNull(), "secondary": NSNull(),
+        "plan_type": "plus", "rate_limit_reached_type": NSNull()
+    ]
+    T.check("a premium entry with both windows null has nothing to show",
+            !CodexProvider.hasUsableWindow(windowless))
+
+    // A window present but itself missing used_percent (a shape this has not
+    // been seen to emit, but the check should not assume the field is always
+    // there) must not be read as usable either.
+    let noPercentField: [String: Any] = ["primary": ["window_minutes": 300, "resets_at": 0]]
+    T.check("a window object without used_percent is not usable",
+            !CodexProvider.hasUsableWindow(noPercentField))
+}
+
 func testAdaptivePaletteSeparatesLinesAndWindows() {
     let a = StatusStrip.adaptiveColour(index: 0, count: 5, kind: .shortWindow, critical: true)
     let b = StatusStrip.adaptiveColour(index: 1, count: 5, kind: .shortWindow, critical: true)
@@ -1212,6 +1241,7 @@ struct Runner {
         testStripDrawsNoBarForAWindowThatHasEnded()
         testNearLimitIsNotAFetchFailure()
         testCodexQuotaWireStatusesNeverReachTheUI()
+        testCodexSkipsAWindowlessRateLimitsEntry()
         testAdaptivePaletteSeparatesLinesAndWindows()
         testPanelGaugeColoursKeepWindowIdentityAndSignalUrgency()
         testTimeoutDoesNotWaitForAnUncooperativeOperation()

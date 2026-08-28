@@ -113,6 +113,21 @@ final class CodexProvider: Provider, @unchecked Sendable {
     /// that is still being appended to for other reasons wins on modification
     /// time while another session logged the newer quota line, and the older
     /// figure would then be shown as the current one.
+    /// Whether a `rate_limits` object actually carries a number to show.
+    /// Codex has been observed writing entries for a `limit_id` (e.g.
+    /// "premium") whose `primary`/`secondary` are both null - a real object
+    /// under the same key, just with nothing in it. Internal rather than
+    /// private so the test suite can hold it against real captured shapes.
+    static func hasUsableWindow(_ rateLimits: [String: Any]) -> Bool {
+        for key in ["primary", "secondary"] {
+            if let w = rateLimits[key] as? [String: Any],
+               findNumber(in: w, names: ["used_percent"]) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
     private func newestSnapshot(_ root: String) -> ([String: Any], Date)? {
         let fm = FileManager.default
         func children(_ p: String) -> [String] {
@@ -142,13 +157,23 @@ final class CodexProvider: Provider, @unchecked Sendable {
                           let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
                           let dict = obj as? [String: Any],
                           let payload = dict["payload"] as? [String: Any],
-                          payload["rate_limits"] is [String: Any] else { continue }
+                          let rateLimits = payload["rate_limits"] as? [String: Any] else { continue }
+                    // Codex now writes more than one rate_limits shape per
+                    // session - a "premium"/other limit_id with both windows
+                    // null has been observed sitting *after* a normal "codex"
+                    // entry that does carry real numbers. Taking whichever is
+                    // textually last, as this used to, reported "no
+                    // percentage field" with a usable reading one line above
+                    // it. Keep scanning backward within the file past an
+                    // entry with nothing to show, rather than accepting the
+                    // newest line unconditionally.
+                    guard Self.hasUsableWindow(rateLimits) else { continue }
                     var when = f.date
                     if let ts = dict["timestamp"] as? String,
                        let d = ISO8601DateFormatter.withFractional.date(from: ts) { when = d }
                     if best == nil || when > best!.1 { best = (payload, when) }
-                    // The last such line in this file is its newest; the rest
-                    // of the file cannot beat it, so move on to the next one.
+                    // The last such usable line in this file is its newest;
+                    // the rest of the file cannot beat it, so move on.
                     break
                 }
             }
