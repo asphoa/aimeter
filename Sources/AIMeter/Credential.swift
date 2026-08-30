@@ -12,27 +12,60 @@ import Security
 /// authorisation panel. Re-reading on every 60-second refresh multiplies the
 /// chances of that panel appearing; once per launch is enough, and a 401 clears
 /// the entry so a token refreshed by the owning app is picked up next time.
+///
+/// Entries are stamped with the keychain item's own modification date, which
+/// `Keychain.modified` can read without authorisation and therefore without a
+/// panel. That turns "is this cached copy still current?" from a guess into a
+/// question with an answer: unchanged stamp, unchanged token, no read. It also
+/// gives a refusal somewhere to live. Before this, a denied read left nothing
+/// behind, so the next timer tick asked again, and again - one dismissed panel
+/// became a panel a minute for as long as the app stayed open. A refusal is now
+/// remembered against the stamp it was refused for, and reconsidered when the
+/// item next changes or when a person presses "Check now".
 private final class TokenCache: @unchecked Sendable {
     static let shared = TokenCache()
-    private var store: [String: String] = [:]
+    private var store: [String: (value: String, stamp: Date?)] = [:]
+    private var denials: [String: Date?] = [:]
     private let lock = NSLock()
 
-    func value(_ key: String) -> String? {
+    /// The cached token, but only if it was read from the item as it stands now.
+    /// A nil `stamp` means the modification date could not be established, and
+    /// nothing may be served from cache on a guess.
+    func value(_ key: String, stamp: Date?) -> String? {
+        guard let stamp else { return nil }
         lock.lock(); defer { lock.unlock() }
-        return store[key]
+        guard let hit = store[key], hit.stamp == stamp else { return nil }
+        return hit.value
     }
 
-    func set(_ key: String, _ value: String) {
-        lock.lock(); store[key] = value; lock.unlock()
+    func set(_ key: String, _ value: String, stamp: Date?) {
+        lock.lock(); store[key] = (value, stamp); denials[key] = nil; lock.unlock()
+    }
+
+    /// True when this exact version of the item has already been refused, so
+    /// asking again would only put the same panel in front of the same person.
+    func refused(_ key: String, stamp: Date?) -> Bool {
+        guard let stamp else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard let d = denials[key] else { return false }
+        return d == stamp
+    }
+
+    func refuse(_ key: String, stamp: Date?) {
+        guard let stamp else { return }
+        lock.lock(); denials[key] = stamp; lock.unlock()
     }
 
     func clear(_ key: String) {
-        lock.lock(); store[key] = nil; lock.unlock()
+        lock.lock(); store[key] = nil; denials[key] = nil; lock.unlock()
     }
 }
 
 enum Credential {
-    /// Drops a cached keychain read so the next fetch goes back to the keychain.
+    /// Drops a cached keychain read, and any remembered refusal, so the next
+    /// fetch goes back to the keychain. This is the "a person asked for it"
+    /// door: it is what makes "Check now" able to put the authorisation panel
+    /// back up after one was dismissed, which nothing on a timer may do.
     static func invalidate(_ a: AccountSpec) {
         if let svc = a.keychainService { TokenCache.shared.clear(svc) }
     }
@@ -72,14 +105,26 @@ enum Credential {
     /// The stored blob for an account, cached, before anything is pulled out of
     /// it. Shared by `read` and `expiry` so a blob is fetched - and its keychain
     /// dialog risked - once, not once per question asked about it.
+    ///
+    /// The item's modification date is established first, for nothing: it is an
+    /// attribute, so reading it decrypts no data and needs no authorisation.
+    /// Everything else here hangs off that one free fact. An unchanged item is
+    /// served from cache without a read, and an item this app has just been
+    /// refused is not asked for again until it changes. See `Keychain.modified`
+    /// for the measurements behind both.
     private static func blob(_ a: AccountSpec) -> Result<String, Fail> {
         if let svc = a.keychainService {
-            if let cached = TokenCache.shared.value(svc) { return .success(cached) }
+            let stamp = Keychain.modified(service: svc)
+            if let cached = TokenCache.shared.value(svc, stamp: stamp) { return .success(cached) }
+            if TokenCache.shared.refused(svc, stamp: stamp) {
+                return .failure(Fail(message: L.t("k.denied"), denied: true))
+            }
             switch Keychain.genericPassword(service: svc) {
             case .success(let s):
-                TokenCache.shared.set(svc, s)
+                TokenCache.shared.set(svc, s, stamp: stamp)
                 return .success(s)
             case .failure(let e):
+                if e.denied { TokenCache.shared.refuse(svc, stamp: stamp) }
                 return .failure(e)
             }
         }

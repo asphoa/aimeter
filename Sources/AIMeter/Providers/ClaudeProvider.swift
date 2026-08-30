@@ -45,19 +45,30 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         // the access token goes stale by itself while the account behind it is
         // untouched. That is the whole of the "expired after a few hours" report.
         //
-        // A token already past its expiry cannot be made to work by sending it.
-        // Drop the cached copy first: the CLI may have refreshed the keychain
-        // item since this app launched, and re-reading is the only way to notice
-        // - waiting for a 401 to invalidate the cache means one wasted round
-        // trip every time, and a stale reading in between.
-        if !retryingAfter401, Credential.expiry(account).accessExpired {
-            Credential.invalidate(account)
-        }
+        // The cached copy used to be dropped here on every refresh whose token
+        // looked expired, so that a rotation by the CLI would be noticed. It
+        // was the right worry and the wrong instrument: a stale token stays
+        // stale for hours, and dropping the cache each minute meant a real,
+        // uncached keychain read each minute - every one of them a chance for
+        // macOS to put its password panel in front of someone who was not
+        // asking for anything. `Credential.blob` now settles the same question
+        // off the item's modification date, which costs no authorisation at
+        // all, so a rotation is still picked up on the very next refresh and
+        // an unrotated item is not touched. See `Keychain.modified`.
 
         let token: String
         switch Credential.read(account) {
         case .success(let t): token = t
-        case .failure(let e): return .failed(id, title, account.name, e.message)
+        case .failure(let e):
+            guard e.denied else { return .failed(id, title, account.name, e.message) }
+            // Not a lost sign-in, and not this app malfunctioning: macOS threw
+            // away the grant when Claude Code last rewrote its own stored
+            // token, and is asking again. Said plainly, because the previous
+            // message told the user to relaunch the app, which does not help -
+            // the panel returns after the next token refresh whatever they do.
+            // Deliberately .warn: nothing is broken and nothing is spent.
+            return Reading(id: id, title: title, account: account.name,
+                           lines: [e.message, L.t("k.denied.why")], state: .warn)
         }
 
         let expiry = Credential.expiry(account)

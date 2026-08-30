@@ -574,6 +574,62 @@ func testCredentialKeyFileHonoursJSONFieldThroughTheSameNarrowing() {
     }
 }
 
+// MARK: - The keychain cache is stamped, not merely warm
+
+// Both of these pin the property the repeating-password-panel fix is built on,
+// and they run against the real keychain because that is the only place the
+// property exists. Each uses an item of this app's own, under a fresh UUID
+// service, and deletes it again; nothing here reads or writes anybody else's.
+
+func testKeychainModificationDateIsReadableAndAbsentWhenTheItemIs() {
+    T.isNil("no item, no modification date",
+            Keychain.modified(service: "AIMeter · tests · \(UUID().uuidString)"))
+
+    let svc = "AIMeter · tests · \(UUID().uuidString)"
+    defer { Credential.delete(service: svc) }
+    T.check("test item stored", Credential.store("first", service: svc))
+    // The claim being pinned: this returns a date having decrypted nothing, so
+    // it costs no authorisation and can be asked on every refresh. Measured
+    // separately on 2026-08-30 with an ad-hoc probe that was in neither the
+    // item's ACL nor its partition list - it answered, with no panel.
+    T.notNil("an existing item has a modification date", Keychain.modified(service: svc))
+}
+
+func testCredentialCacheFollowsTheItemRatherThanTheProcess() {
+    // ClaudeProvider used to drop this cache by hand on every refresh whose
+    // token looked expired, because a rotation by the CLI had to be noticed
+    // somehow. That is now the cache's own job, and this is the assertion that
+    // made removing the hand-written drop safe: a rewritten item is picked up
+    // on the next read, with nobody having called `invalidate`.
+    let svc = "AIMeter · tests · \(UUID().uuidString)"
+    let acct = AccountSpec(name: "t", keychainService: svc)
+    defer { Credential.delete(service: svc) }
+
+    T.check("first value stored", Credential.store("token-one", service: svc))
+    guard case .success(let first) = Credential.read(acct) else {
+        return T.check("first read succeeds", false)
+    }
+    T.eq("first read returns what was stored", first, "token-one")
+
+    guard case .success(let again) = Credential.read(acct) else {
+        return T.check("second read succeeds", false)
+    }
+    T.eq("an unchanged item reads the same", again, "token-one")
+
+    // The keychain records modification dates to the second, so a rewrite
+    // inside the same second would be indistinguishable from no rewrite at all
+    // - which is a real (and harmless) limit of this mechanism, not a flaw in
+    // the test: it costs one extra refresh interval, once, in the second a
+    // token happens to rotate.
+    Thread.sleep(forTimeInterval: 1.2)
+    T.check("second value stored", Credential.store("token-two", service: svc))
+
+    guard case .success(let rotated) = Credential.read(acct) else {
+        return T.check("post-rotation read succeeds", false)
+    }
+    T.eq("a rewritten item is picked up without invalidate()", rotated, "token-two")
+}
+
 func testClaudeProviderSeparatesAStaleTokenFromARealSignOut() {
     // The CLI-refresh offer adds a line whose presence depends on whether a
     // claude binary happens to be installed on the machine running the tests.
@@ -1220,6 +1276,8 @@ struct Runner {
         testCredentialPrefersTheSubscriptionTokenOverMCPTokens()
         testCredentialExpiryReadsBothHalvesOfTheOAuthPair()
         testCredentialKeyFileHonoursJSONFieldThroughTheSameNarrowing()
+        testKeychainModificationDateIsReadableAndAbsentWhenTheItemIs()
+        testCredentialCacheFollowsTheItemRatherThanTheProcess()
         testClaudeProviderSeparatesAStaleTokenFromARealSignOut()
         testClaudeCLIBinaryWhitelist()
         testClaudeCLIOnlyClaimsTheCLIsOwnCredential()

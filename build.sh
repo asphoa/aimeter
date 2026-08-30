@@ -65,13 +65,33 @@ PLIST
 IDENTITY="AIMeter Local Signing"
 # The certificate is untrusted by design, so it does not appear in
 # `find-identity -p codesigning`; look for the certificate itself.
+#
+# A missing certificate is a hard stop, not a fallback. It used to print one
+# line and ad-hoc sign anyway, and the login keychain still carries the
+# evidence of what that cost: of the thirty applications trusted on the
+# `Claude Code-credentials` item, twenty-six are pinned by `cdhash` - grants
+# recorded against a build's own bytes, dead the moment the next build
+# existed - against three pinned to this certificate. Producing a differently
+# identified application under the same name is exactly the "something else
+# under the same name" this project's pipeline conventions forbid, and here it
+# silently spends the user's "Always Allow" click. AIMETER_ALLOW_ADHOC=1 is
+# for someone who has read this paragraph and wants a throwaway build anyway.
 if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
     echo "→ signing with $IDENTITY"
     codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
-else
-    echo "→ signing ad-hoc (run tools/make_signing_cert.sh for a stable identity)"
+elif [ "${AIMETER_ALLOW_ADHOC:-0}" = "1" ]; then
+    echo "⚠ signing ad-hoc on request — this build has a throwaway code identity,"
+    echo "  and any keychain grant it is given dies with it."
     codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+else
+    echo "✗ signing certificate “$IDENTITY” not found." >&2
+    echo "  Run tools/make_signing_cert.sh once, then build again." >&2
+    echo "  (AIMETER_ALLOW_ADHOC=1 forces an ad-hoc build; see build.sh for the cost.)" >&2
+    exit 1
 fi
 codesign --verify --verbose=1 "$APP" 2>&1 | tail -2
+# Says which of the two happened, in the app's own terms, so a build that
+# quietly took the throwaway identity cannot be mistaken for one that did not.
+echo "→ $(codesign -d --requirements - "$APP" 2>&1 | grep '^designated' || echo 'designated => (ad-hoc)')"
 
 echo "✅ $PWD/$APP"
