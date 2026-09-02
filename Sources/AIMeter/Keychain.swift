@@ -7,6 +7,13 @@ struct Fail: LocalizedError {
     /// past it. Kept apart from every other failure because it is the one that
     /// must not be retried on a timer: each retry is another panel.
     var denied: Bool = false
+    /// True when the credential was read fine and holds a token field that is
+    /// empty. That is what Claude Code leaves in its keychain item when the CLI
+    /// is signed out: the item stays, with `accessToken: ""`, `expiresAt: 0`,
+    /// and the account metadata around them. It is a different message from
+    /// "could not obtain a token" - the read worked; there is no sign-in behind
+    /// it - and it is the one the user can act on.
+    var blank: Bool = false
     var errorDescription: String? { message }
 }
 

@@ -115,6 +115,11 @@ This is the part worth reading before you trust it with your credentials.
   launch, kept in memory, and used for exactly one request per refresh:
   `POST api.anthropic.com/v1/messages` with `max_tokens: 1`. The usage figures
   come from that response's headers. The token goes nowhere else.
+  If the item is there but holds an empty token — which is what Claude Code
+  leaves behind when the CLI is signed out — the row says so and tells you to
+  sign in with `claude` in a terminal; nothing is read from anywhere else. In
+  particular `~/.claude/.credentials.json`, which a Claude Code session hosted
+  by the Claude desktop app writes for itself, is deliberately not consulted.
   One exception, and only ever on a button press: if you press **Check now** on
   a Claude row whose access token has gone stale, this app runs the real
   `claude` CLI, which sends a request of its own to refresh that token — a

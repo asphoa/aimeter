@@ -22,7 +22,10 @@ import Security
 /// became a panel a minute for as long as the app stayed open. A refusal is now
 /// remembered against the stamp it was refused for, and reconsidered when the
 /// item next changes or when a person presses "Check now".
-private final class TokenCache: @unchecked Sendable {
+///
+/// Internal rather than private so the test suite can plant a refusal without
+/// putting a real panel in front of whoever runs the tests.
+final class TokenCache: @unchecked Sendable {
     static let shared = TokenCache()
     private var store: [String: (value: String, stamp: Date?)] = [:]
     private var denials: [String: Date?] = [:]
@@ -59,6 +62,13 @@ private final class TokenCache: @unchecked Sendable {
     func clear(_ key: String) {
         lock.lock(); store[key] = nil; denials[key] = nil; lock.unlock()
     }
+
+    /// Drops a remembered refusal and nothing else. A token that was read
+    /// successfully stays cached: forgetting a "no" must not cost a fresh read
+    /// - and a fresh panel - of an item that was never refused.
+    func forgive(_ key: String) {
+        lock.lock(); denials[key] = nil; lock.unlock()
+    }
 }
 
 enum Credential {
@@ -68,6 +78,20 @@ enum Credential {
     /// back up after one was dismissed, which nothing on a timer may do.
     static func invalidate(_ a: AccountSpec) {
         if let svc = a.keychainService { TokenCache.shared.clear(svc) }
+    }
+
+    /// Forgets a remembered refusal, keeping any cached token. This is what a
+    /// manual check calls before reading: the "not now" the user gave a timer
+    /// tick does not answer the question they are now asking by hand.
+    ///
+    /// Shipped missing in v1.0.21. The refusal memory was added there so that
+    /// one dismissed panel did not become a panel a minute, and the row's own
+    /// text promised that "Check now" would put the panel back - but nothing
+    /// on the manual path ever cleared the memory, so after one "Deny" the
+    /// button re-read the remembered refusal and did nothing, until the CLI
+    /// next rewrote the item or the app was relaunched.
+    static func forgetRefusal(_ a: AccountSpec) {
+        if let svc = a.keychainService { TokenCache.shared.forgive(svc) }
     }
 
     /// Keychain service name for a key this app stores itself.
@@ -97,9 +121,32 @@ enum Credential {
             return .failure(Fail(message: L.t("e.notoken")))
         }
         guard let found = unwrap(json: obj, field: a.keyJSONField) else {
+            // Two different things arrive here. A blob with no token field at
+            // all is a shape this app does not understand. A blob whose token
+            // field is there and empty is a shape it understands perfectly:
+            // Claude Code signed out, leaving `accessToken: ""` in place.
+            // Observed on 2026-09-02 - the keychain item read fine, the panel
+            // said "could not obtain an access token", and `claude auth
+            // status` said `loggedIn: false`. The second must not be reported
+            // in the words of the first.
+            if holdsBlankToken(json: obj, field: a.keyJSONField) {
+                return .failure(Fail(message: L.t("e.blanktoken"), blank: true))
+            }
             return .failure(Fail(message: L.t("e.notoken")))
         }
         return .success(found)
+    }
+
+    /// True when the narrowed blob carries a token field whose value is the
+    /// empty string. Pure, so the shape Claude Code leaves behind on sign-out
+    /// can be pinned by test without a keychain.
+    static func holdsBlankToken(json obj: Any, field: String?) -> Bool {
+        guard let d = container(obj, field: field) as? [String: Any] else { return false }
+        let wanted = Set(tokenFields.map { $0.lowercased().replacingOccurrences(of: "_", with: "") })
+        return d.contains { k, v in
+            wanted.contains(k.lowercased().replacingOccurrences(of: "_", with: ""))
+                && (v as? String)?.isEmpty == true
+        }
     }
 
     /// The stored blob for an account, cached, before anything is pulled out of

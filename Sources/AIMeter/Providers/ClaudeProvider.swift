@@ -56,10 +56,25 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         // all, so a rotation is still picked up on the very next refresh and
         // an unrotated item is not touched. See `Keychain.modified`.
 
+        // A person pressing the button is the one thing allowed to re-ask a
+        // question the keychain panel was told "no" to. Only the refusal is
+        // forgotten; a token read successfully stays cached, so a manual check
+        // on a healthy row costs no panel at all.
+        if manual, !retryingAfter401, !afterCLI {
+            Credential.forgetRefusal(account)
+        }
+
         let token: String
         switch Credential.read(account) {
         case .success(let t): token = t
         case .failure(let e):
+            if e.blank, ClaudeCLI.ownsCLICredential(account) {
+                // The item read fine and holds no token: this Mac is signed
+                // out of the CLI. `.failure` is right here - it is a real
+                // sign-out, not a stale token - and the message has to say
+                // what to do, which "could not obtain a token" did not.
+                return .failed(id, title, account.name, L.t("c.signedout.blank"))
+            }
             guard e.denied else { return .failed(id, title, account.name, e.message) }
             // Not a lost sign-in, and not this app malfunctioning: macOS threw
             // away the grant when Claude Code last rewrote its own stored

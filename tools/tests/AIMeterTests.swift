@@ -630,6 +630,100 @@ func testCredentialCacheFollowsTheItemRatherThanTheProcess() {
     T.eq("a rewritten item is picked up without invalidate()", rotated, "token-two")
 }
 
+// MARK: - A signed-out CLI is reported as signed out, not as a read failure
+
+/// Observed 2026-09-02: Claude Code's keychain item read perfectly well and
+/// held `accessToken: ""`, `expiresAt: 0` beside the usual account metadata -
+/// the shape the CLI leaves behind when it is signed out (`claude auth status`
+/// said `loggedIn: false`). The row said "could not obtain an access token",
+/// which reads as this app failing, and offered nothing to do about it.
+func testCredentialReportsABlankTokenAsASignOutNotAsAMissingOne() {
+    // The pure predicate, on the shapes it has to tell apart.
+    T.check("a blank subscription token is recognised",
+            Credential.holdsBlankToken(json: claudeBlob(access: ""), field: nil))
+    T.check("a real subscription token is not",
+            !Credential.holdsBlankToken(json: claudeBlob(), field: nil))
+    T.check("a blob with no token field at all is not",
+            !Credential.holdsBlankToken(json: ["claudeAiOauth": ["subscriptionType": "max"]],
+                                        field: nil))
+    T.check("an MCP entry's blank token does not count as the subscription's",
+            !Credential.holdsBlankToken(json: ["claudeAiOauth": ["accessToken": "ok"],
+                                               "mcpOAuth": ["x": ["accessToken": ""]]],
+                                        field: nil))
+    T.check("keyJSONField narrows before the check, like everywhere else",
+            Credential.holdsBlankToken(json: ["deepseek": ["api_key": ""], "other": ["api_key": "k"]],
+                                       field: "deepseek"))
+
+    // Through the real read path, on an item this app owns, so no panel.
+    let svc = "AIMeter · tests · \(UUID().uuidString)"
+    let acct = AccountSpec(name: "t", keychainService: svc)
+    defer { Credential.delete(service: svc) }
+    func json(_ o: [String: Any]) -> String {
+        String(data: try! JSONSerialization.data(withJSONObject: o), encoding: .utf8)!
+    }
+    T.check("blank blob stored", Credential.store(json(claudeBlob(access: "")), service: svc))
+    switch Credential.read(acct) {
+    case .success(let s):
+        T.check("a blank token is not handed out as a credential (got \(s))", false)
+    case .failure(let e):
+        T.check("the failure is marked blank", e.blank)
+        T.eq("and worded as a blank credential, not a read failure",
+             e.message, L.t("e.blanktoken"))
+        T.check("and is not a denial", !e.denied)
+    }
+
+    // The item's own modification date moves on rewrite, so the cache lets
+    // the sign-in back through without anyone calling invalidate().
+    Thread.sleep(forTimeInterval: 1.2)
+    T.check("real blob stored", Credential.store(json(claudeBlob()), service: svc))
+    guard case .success(let token) = Credential.read(acct) else {
+        return T.check("signing back in is picked up on the next read", false)
+    }
+    T.eq("signing back in is picked up on the next read", token, "sk-ant-oat-REAL")
+}
+
+// MARK: - "Check now" can put a refused panel back; a timer still cannot
+
+/// v1.0.21 remembered a refusal against the item's modification stamp, so one
+/// dismissed panel stopped being a panel a minute. Its row then told the user
+/// to press "Check now" and choose "Always Allow" - and nothing on the manual
+/// path forgot the refusal, so the button re-read the memory and did nothing
+/// until Claude Code next rewrote the item. This pins the door that was missing.
+func testCheckNowForgetsARefusalButKeepsTheToken() {
+    let svc = "AIMeter · tests · \(UUID().uuidString)"
+    let acct = AccountSpec(name: "t", keychainService: svc)
+    defer { Credential.delete(service: svc) }
+    T.check("token stored", Credential.store("token-one", service: svc))
+    guard let stamp = Keychain.modified(service: svc) else {
+        return T.check("the item has a modification stamp", false)
+    }
+
+    // Plant the refusal a timer tick would have left behind.
+    TokenCache.shared.clear(svc)
+    TokenCache.shared.refuse(svc, stamp: stamp)
+    switch Credential.read(acct) {
+    case .success: T.check("a remembered refusal is honoured without a read", false)
+    case .failure(let e):
+        T.check("a remembered refusal is honoured without a read", e.denied)
+        T.eq("in the words that promise the button will fix it", e.message, L.t("k.denied"))
+    }
+
+    // The button's door.
+    Credential.forgetRefusal(acct)
+    T.check("the refusal is forgotten", !TokenCache.shared.refused(svc, stamp: stamp))
+    guard case .success(let got) = Credential.read(acct) else {
+        return T.check("after forgetting, the item is read again", false)
+    }
+    T.eq("after forgetting, the item is read again", got, "token-one")
+
+    // Forgetting a refusal must not throw away a token that was never refused:
+    // a manual check on a healthy row would otherwise cost a fresh read, and
+    // on the CLI's item a fresh read is a fresh panel.
+    Credential.forgetRefusal(acct)
+    T.eq("a cached token survives forgetRefusal",
+         TokenCache.shared.value(svc, stamp: stamp), "token-one")
+}
+
 func testClaudeProviderSeparatesAStaleTokenFromARealSignOut() {
     // The CLI-refresh offer adds a line whose presence depends on whether a
     // claude binary happens to be installed on the machine running the tests.
@@ -1278,6 +1372,8 @@ struct Runner {
         testCredentialKeyFileHonoursJSONFieldThroughTheSameNarrowing()
         testKeychainModificationDateIsReadableAndAbsentWhenTheItemIs()
         testCredentialCacheFollowsTheItemRatherThanTheProcess()
+        testCredentialReportsABlankTokenAsASignOutNotAsAMissingOne()
+        testCheckNowForgetsARefusalButKeepsTheToken()
         testClaudeProviderSeparatesAStaleTokenFromARealSignOut()
         testClaudeCLIBinaryWhitelist()
         testClaudeCLIOnlyClaimsTheCLIsOwnCredential()
