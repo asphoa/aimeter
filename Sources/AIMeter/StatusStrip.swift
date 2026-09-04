@@ -15,14 +15,17 @@ enum GaugeKind: String, Codable, Sendable {
 }
 
 enum BarColourScheme: String, Codable, Sendable, CaseIterable {
-    /// Hue identifies the service; red is held back and means "nearly spent".
     case provider
-    /// Hue identifies the window: red = 5-hour, blue = weekly, teal = single.
-    case window
-    /// Computes a maximally separated palette for the currently visible rows.
-    /// It is deliberately live rather than a saved set of swatches: changing
-    /// the rows cannot leave an old, now-colliding palette behind.
-    case adaptive
+
+    init(from decoder: Decoder) throws {
+        _ = try? decoder.singleValueContainer().decode(String.self)
+        self = .provider
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(Self.provider.rawValue)
+    }
 }
 
 /// One line of the strip: one service, split into a 5-hour half above and a
@@ -70,7 +73,7 @@ enum StatusStrip {
 
     private static func gapHeight(_ count: Int) -> CGFloat { count <= 3 ? 1 : 0.5 }
 
-    static func image(lines input: [StripLine], scheme: BarColourScheme) -> NSImage {
+    static func image(lines input: [StripLine]) -> NSImage {
         let lines = Array(input.prefix(maxLines))
         let img = NSImage(size: NSSize(width: width, height: height), flipped: true) { _ in
             guard !lines.isEmpty else { return true }
@@ -80,8 +83,8 @@ enum StatusStrip {
             let total = CGFloat(lines.count) * pair + CGFloat(lines.count - 1) * gap
             var y = ((height - total) / 2 * 2).rounded() / 2
 
-            for (i, line) in lines.enumerated() {
-                draw(line, index: i, count: lines.count, at: y, half: half, scheme: scheme)
+            for line in lines {
+                draw(line, at: y, half: half)
                 y += pair + gap
             }
             return true
@@ -90,8 +93,7 @@ enum StatusStrip {
         return img
     }
 
-    private static func draw(_ line: StripLine, index: Int, count: Int, at y: CGFloat,
-                             half: CGFloat, scheme: BarColourScheme) {
+    private static func draw(_ line: StripLine, at y: CGFloat, half: CGFloat) {
         let pair = half * 2
         // Dots mean "nothing to draw", and `hasData` is the whole of that
         // question. `state` used to be consulted here as well, which quietly
@@ -107,18 +109,18 @@ enum StatusStrip {
         }
         if let merged = line.merged {
             bar(merged, x: y, height: pair,
-                colour: colour(line, index, count, line.mergedKind, merged, scheme), critical: merged >= 90)
+                colour: colour(line, line.mergedKind), critical: merged >= 90)
             return
         }
         if let top = line.top {
             bar(top, x: y, height: half,
-                colour: colour(line, index, count, .shortWindow, top, scheme), critical: top >= 90)
+                colour: colour(line, .shortWindow), critical: top >= 90)
         } else {
             dim(y, half)
         }
         if let bottom = line.bottom {
             bar(bottom, x: y + half, height: half,
-                colour: colour(line, index, count, .longWindow, bottom, scheme), critical: bottom >= 90)
+                colour: colour(line, .longWindow), critical: bottom >= 90)
         } else {
             dim(y + half, half)
         }
@@ -153,7 +155,7 @@ enum StatusStrip {
     /// Half of a pair whose window this service does not have. Drawn as a bare
     /// track so the line keeps its shape without claiming a measurement.
     private static func dim(_ y: CGFloat, _ height: CGFloat) {
-        Palette.colour(Palette.track).withAlphaComponent(0.15).setFill()
+        Palette.colour(Palette.track).setFill()
         NSBezierPath(roundedRect: NSRect(x: 0, y: y, width: width, height: height),
                      xRadius: radius, yRadius: radius).fill()
     }
@@ -171,65 +173,18 @@ enum StatusStrip {
 
     // MARK: - colour
 
-    /// Hues live in Palette so the user can change them; the defaults are on the
-    /// cool side of the wheel, leaving red and orange free to mean one thing.
-    /// The menu bar takes its appearance from the wallpaper tint rather than the
-    /// system light/dark setting — measured, not assumed — so they have to hold
-    /// up against a mid-luminance coloured bar as well as white and black.
-
-    private static func colour(_ line: StripLine, _ index: Int, _ count: Int, _ kind: GaugeKind,
-                               _ pct: Double, _ scheme: BarColourScheme) -> NSColor {
-        var c: NSColor
-        switch scheme {
-        case .window:
-            // systemBlue disappears into both a blue wallpaper and the open-menu
-            // highlight, so the weekly half uses a lighter sky blue.
-            switch kind {
-            case .shortWindow: c = NSColor(srgbRed: 1.0, green: 0.361, blue: 0.310, alpha: 1)
-            case .longWindow, .modelWindow: c = NSColor(srgbRed: 0.271, green: 0.761, blue: 1.0, alpha: 1)
-            case .other:       c = NSColor(srgbRed: 0.231, green: 0.784, blue: 0.745, alpha: 1)
-            }
-        case .provider:
-            // The alert belongs in `bar`'s trailing cap, just as it does in
-            // adaptive mode.  Replacing both halves with alarm red made a
-            // near-limit 5-hour/weekly pair indistinguishable precisely when
-            // the reader most needs to know which reset is approaching.
-            c = Palette.colour(Palette.service(line.provider, kind))
-        case .adaptive:
-            c = adaptiveColour(index: index, count: count, kind: kind, critical: pct >= 90)
+    static func serviceWindowColour(provider: String, kind: GaugeKind) -> NSColor {
+        let base = Palette.serviceColour(provider)
+        switch kind {
+        case .longWindow, .modelWindow:
+            return Palette.blend(base, toward: Palette.ground, 0.35)
+        case .shortWindow, .other:
+            return base
         }
-        if line.stale { c = c.withAlphaComponent(0.55) }
-        return c
     }
 
-    /// The objective is maximin perceptual separation among visible *lines*.
-    /// On the OKLCH hue circle the solution for N interchangeable lines is N
-    /// equal arcs (360/N), so this is an exact optimum for the hue term rather
-    /// than an RGB-distance heuristic.  Lightness encodes window type in every
-    /// row; urgency darkens/saturates the same hue, while `bar` adds its red
-    /// cap.  That gives three independent, glanceable signals in 1.5pt bars.
-    static func adaptiveColour(index: Int, count: Int, kind: GaugeKind,
-                               critical: Bool) -> NSColor {
-        let n = max(1, count)
-        let hue = fmod(Palette.adaptiveHueOffset + Double(index) * 360 / Double(n), 360)
-        let lightness: Double
-        let chroma: Double
-        let long = kind == .longWindow || kind == .modelWindow
-        if critical {
-            lightness = long ? 0.60 : (kind == .shortWindow ? 0.47 : 0.53)
-            chroma = 0.18
-        } else {
-            lightness = long ? 0.78 : (kind == .shortWindow ? 0.62 : 0.70)
-            chroma = long ? 0.13 : 0.16
-        }
-        return Palette.oklch(lightness, chroma, hue)
-    }
-
-    private static func blend(_ a: NSColor, with b: NSColor, _ t: CGFloat) -> NSColor {
-        guard let x = a.usingColorSpace(.sRGB), let y = b.usingColorSpace(.sRGB) else { return a }
-        return NSColor(srgbRed: x.redComponent * (1 - t) + y.redComponent * t,
-                       green: x.greenComponent * (1 - t) + y.greenComponent * t,
-                       blue: x.blueComponent * (1 - t) + y.blueComponent * t,
-                       alpha: 1)
+    private static func colour(_ line: StripLine, _ kind: GaugeKind) -> NSColor {
+        let colour = serviceWindowColour(provider: line.provider, kind: kind)
+        return line.stale ? colour.withAlphaComponent(0.55) : colour
     }
 }

@@ -53,10 +53,10 @@ click outside, Esc, clicking the icon again, or the app losing focus.
   the old dropdown had, now with a brief highlight flash instead of its own
   menu row. **Hover** lifts a card slightly and shows the exact reset time as
   a tooltip.
-- **Footer** — five icon buttons (refresh ⌘R, usage history, accounts,
-  settings, quit ⌘Q) and a **…** menu for everything else the old dropdown's
-  bottom half held: language, refresh interval, start at login, debug folder,
-  about. Esc closes the panel from anywhere.
+- **Footer** — four icon buttons (refresh ⌘R, usage history, settings,
+  quit ⌘Q) and a **…** menu for the remaining quick actions. The gear opens
+  Settings at the same 372pt width; each page pushes over the current one.
+  Esc goes back one page first, then closes the panel from the usage page.
 
 Prefer the old `NSMenu` dropdown? Set `"panel": "menu"` under `menuBar` in
 `config.json` (there is no Settings toggle for it) — every card above becomes
@@ -139,8 +139,14 @@ missed the bug too.
 
 ```bash
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --once            # every reading, as text
-./dist/AIMeter.app/Contents/MacOS/AIMeter --icon out        # ring, 4x: out-light.png, out-dark.png, out-states.png
-./dist/AIMeter.app/Contents/MacOS/AIMeter --panel out.png   # the card panel: out.png (light), out-dark.png
+./dist/AIMeter.app/Contents/MacOS/AIMeter --icon out        # ring on light, dark, blue, selected backgrounds + states
+./dist/AIMeter.app/Contents/MacOS/AIMeter --panel out.png --page usage
+./dist/AIMeter.app/Contents/MacOS/AIMeter --panel settings.png --page settings
+./dist/AIMeter.app/Contents/MacOS/AIMeter --panel services.png --page services
+./dist/AIMeter.app/Contents/MacOS/AIMeter --panel catalogue.png --page catalogue
+./dist/AIMeter.app/Contents/MacOS/AIMeter --panel menubar.png --page menubar
+./dist/AIMeter.app/Contents/MacOS/AIMeter --panel general.png --page general
+./dist/AIMeter.app/Contents/MacOS/AIMeter --panel history.png --page history
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --menushot out.png # the real translucent NSMenu — "menu" style only
 ```
 
@@ -195,7 +201,7 @@ This is the part worth reading before you trust it with your credentials.
   your own subscription window. The row says so before you press it, and
   `claudeRefreshViaCLI: false` switches it off. See below for why it has to be a
   real request.
-- **Keys you paste** into the Accounts window are stored in your login keychain
+- **Keys you paste** on the panel's **Services** page are stored in your login keychain
   under `AIMeter · <service> · <account>`, never in the settings file.
 - **The settings file and debug dumps are written 0600 in a 0700 directory**.
   The manual-only Antigravity screen capture has the account address removed
@@ -410,12 +416,11 @@ print-mode path (falling back to the manual TUI screen-scrape on a press of
 
 ## Adding accounts
 
-Everything is done in **Accounts…** — the panel footer's person-icon button, or
-the **…** menu. Nothing requires editing a file.
+Everything is done under the panel's single **Settings** gear: **Services**
+lists configured accounts, and **Add** opens the built-in service catalogue.
+Nothing requires editing a file.
 
-- **Detect automatically** finds what is already on this Mac and tests each find
-  immediately, so a key file holding a credential that was revoked months ago
-  shows up as a failure right away instead of as a silently wrong number.
+- **Detect services on this Mac again** finds what is already on this Mac.
 - **Add account** takes a pasted key (stored in the keychain), a key file, or —
   for Codex and Antigravity — the folder that acts as that account's home.
 - **Test** runs one account through its real provider and shows the result,
@@ -426,7 +431,7 @@ the **…** menu. Nothing requires editing a file.
 
 ### How often each source is checked
 
-The same window sets a check interval per source, including **only when I ask**.
+The **Services** page sets a check interval per source, including **only when I ask**.
 A source set to manual is skipped by the timer and by **Refresh now**; it updates
 when you press **Check now** under its own heading in the panel.
 
@@ -436,39 +441,24 @@ request per refresh.
 
 ### Choosing what the ring shows
 
-The same window has a **Menu bar** section: a **Primary service** picker
+The **Menu bar** settings page has a **Primary service** picker
 (Claude Code or Codex — whichever has windows), a **Ring** / **Ring + number**
 choice, and two toggles — the alert dot, and the sweep/breathe animation —
 with a live preview of the exact icon that will be drawn.
 
 ### Colours
 
-Three schemes, switchable in the same place:
+Colour has one grammar throughout the app:
 
-- **By service** (default) — each service has its own hue, so the strip is not a
-  wall of one colour. The 5-hour and weekly halves retain their separately
-  chosen shades even near the limit; a short red cap at the end is the alarm.
-- **By window** — red for the 5-hour half, blue for the weekly half, teal for a
-  single-window service. A red end cap still marks a nearly spent window.
-- **Adaptive** — assigns evenly spaced OKLCH hues to the visible services,
-  uses lightness within each hue for 5-hour versus weekly, and preserves that
-  identity at the limit with the same red end cap. **Optimize colours for
-  visible lines** rerolls the starting hue and updates the preview immediately.
+- **Ink / amber / red means urgency** — below 70%, 70–89%, and 90% or more.
+- **Green is only the normal-status lamp**; it never fills a usage bar.
+- **One colour identifies each service** only in Services, the catalogue,
+  history legends, and the legacy `bars` fallback. In that fallback the weekly
+  half is the same service colour blended 35% toward the current background.
 
-Every colour is yours to change, in the **Colours** section of the same window:
-the text, the bar background, the nearly-spent alarm, the stable 5-hour and
-weekly panel colours, and — per service — one colour for each strip half.
-
-The panel uses its large bar primarily for stable window identity: purple is
-the 5-hour window and cyan is the weekly window by default. A 7pt amber cap at
-70–89% or a 12pt red cap at 90%+ carries urgency without changing the rest of
-the bar into a different window. Untyped percentage gauges keep the ordinary
-green/amber/red traffic light because they have no 5-hour/weekly identity to
-preserve.
-
-A colour you set is a fixed value and will not follow light and dark mode; the
-defaults are semantic colours that do. Leave a role alone to keep the adaptive
-default, or press **Reset all colours** to go back.
+There is no colour settings UI. Advanced fixed overrides remain tolerated in
+`config.json` as `"ink"`, `"track"`, `"warn"`, `"alarm"`, `"ok"`, or
+`"service.<id>"`; unspecified roles continue to follow light and dark mode.
 
 ## Adding a language
 

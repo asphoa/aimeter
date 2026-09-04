@@ -96,7 +96,12 @@ struct PanelModel: Equatable {
 /// directly with no actor hop.
 enum PanelModelBuilder {
     static func title(for id: String) -> String {
-        ProviderKind.find(id)?.title ?? (id == "local" ? L.t("p.local") : id)
+        if let kind = ProviderKind.find(id) { return kind.title }
+        switch id {
+        case "local": return L.t("p.local")
+        case "cursor": return L.t("p.cursor")
+        default: return id
+        }
     }
 
     /// The fixed secondary order this release specifies: Codex, OpenRouter,

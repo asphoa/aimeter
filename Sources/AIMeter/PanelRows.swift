@@ -39,15 +39,6 @@ enum Panel {
     }
 }
 
-/// A panel bar spends its main colour on the thing that stays true from one
-/// refresh to the next: which window it measures.  Urgency is a short cap at
-/// the end of an already-filled bar, not a replacement for that identity.
-///
-/// Unlike the status strip, the panel has a 90pt bar, so a 7–12pt cap is large
-/// enough to read as an alarm while leaving the larger part of the mark to say
-/// "5-hour" or "weekly".  A percentage with no recognised time window keeps
-/// the old traffic-light treatment because there is no competing identity to
-/// preserve.
 struct PanelGaugeStyle {
     var fill: NSColor
     var alert: NSColor?
@@ -56,26 +47,8 @@ struct PanelGaugeStyle {
 
 func panelGaugeStyle(kind: GaugeKind, percent: Double?) -> PanelGaugeStyle {
     let pct = percent ?? 0
-    let identity: NSColor?
-    switch kind {
-    case .shortWindow: identity = Palette.colour(Palette.panelShortWindow)
-    case .longWindow, .modelWindow: identity = Palette.colour(Palette.panelLongWindow)
-    case .other:       identity = nil
-    }
-
-    guard let identity else {
-        // A money balance or another untyped percentage has no time-window
-        // identity to communicate, so retain the established traffic light.
-        let fill = Palette.colour(pct >= 90 ? Palette.alarm : (pct >= 70 ? Palette.warn : Palette.ok))
-        return PanelGaugeStyle(fill: fill, alert: nil, alertWidth: 0)
-    }
-    if pct >= 90 {
-        return PanelGaugeStyle(fill: identity, alert: Palette.colour(Palette.alarm), alertWidth: 12)
-    }
-    if pct >= 70 {
-        return PanelGaugeStyle(fill: identity, alert: Palette.colour(Palette.warn), alertWidth: 7)
-    }
-    return PanelGaugeStyle(fill: identity, alert: nil, alertWidth: 0)
+    let role = pct >= 90 ? Palette.alarm : (pct >= 70 ? Palette.warn : Palette.ink)
+    return PanelGaugeStyle(fill: Palette.colour(role), alert: nil, alertWidth: 0)
 }
 
 /// Builds the panel's rows once, for both the live menu and the offscreen
@@ -120,10 +93,10 @@ func buildPanelRows(_ providers: [Provider],
 
 func stateColour(_ s: ReadingState) -> NSColor {
     switch s {
-    case .ok: return .systemGreen
-    case .warn, .nearLimit: return .systemOrange
-    case .failure: return .systemRed
-    case .off: return .tertiaryLabelColor
+    case .ok: return Palette.colour(Palette.ok)
+    case .warn, .nearLimit: return Palette.colour(Palette.warn)
+    case .failure: return Palette.colour(Palette.alarm)
+    case .off: return Palette.text(0.42)
     }
 }
 
@@ -145,7 +118,7 @@ private func drawText(_ s: String, at x: CGFloat, in bounds: NSRect,
 }
 
 private final class HeaderRowView: NSView {
-    var dotColour: NSColor = .systemGreen
+    var dotColour: NSColor = Palette.colour(Palette.ok)
     var title = ""
     var trailing: String?
 
@@ -170,7 +143,7 @@ private final class GaugeRowView: NSView {
     var percent: Double?
     var value = ""
     var trailing: String?
-    var style = PanelGaugeStyle(fill: .systemGreen, alert: nil, alertWidth: 0)
+    var style = PanelGaugeStyle(fill: Palette.colour(Palette.ink), alert: nil, alertWidth: 0)
     var expired = false
 
     private let barX: CGFloat = 148

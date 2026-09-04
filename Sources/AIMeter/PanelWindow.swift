@@ -1,28 +1,33 @@
 import AppKit
 import SwiftUI
 
-/// The floating card panel that replaces the NSMenu dropdown for
-/// `menuBar.panel == "cards"` (the default, v1.0.27). This file owns only the
-/// window mechanics - anchoring, materials, dismissal; the content is
-/// `PanelView`, driven by the `PanelState` this controller publishes.
 @MainActor
 final class CardPanelController: NSObject, NSWindowDelegate {
     let state = PanelState()
     private var panel: FloatingCardPanel?
     private var globalMonitor: Any?
     private var localMonitor: Any?
+    private var anchorFrame: NSRect?
+    var dismissalSuspended = false
 
     var isVisible: Bool { panel?.isVisible ?? false }
+
+    override init() {
+        super.init()
+        state.onContentHeight = { [weak self] height in
+            self?.setContentHeight(height, animated: self?.isVisible == true)
+        }
+        state.onDismissalSuspended = { [weak self] suspended in
+            self?.dismissalSuspended = suspended
+        }
+    }
 
     func toggle(from button: NSStatusBarButton) {
         if isVisible { close() } else { show(from: button) }
     }
 
-    /// Anchored under the status item's own button frame, right-aligned to
-    /// it, 8pt below the menu bar. 372pt wide; height from content, capped at
-    /// 720 by `PanelView`'s own `.frame(maxHeight:)` - past that it scrolls
-    /// internally, so this only ever asks for what SwiftUI already fitted.
     func show(from button: NSStatusBarButton) {
+        state.nav.reset()
         let width: CGFloat = 372
         let hosting = NSHostingView(rootView: PanelView(state: state, requestClose: { [weak self] in
             self?.close()
@@ -32,30 +37,48 @@ final class CardPanelController: NSObject, NSWindowDelegate {
         let p = panel ?? makePanel()
         p.contentView?.subviews.forEach { $0.removeFromSuperview() }
         p.contentView?.addSubview(hosting)
-        if let cv = p.contentView {
+        if let content = p.contentView {
             NSLayoutConstraint.activate([
-                hosting.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
-                hosting.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
-                hosting.topAnchor.constraint(equalTo: cv.topAnchor),
-                hosting.bottomAnchor.constraint(equalTo: cv.bottomAnchor)
+                hosting.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+                hosting.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                hosting.topAnchor.constraint(equalTo: content.topAnchor),
+                hosting.bottomAnchor.constraint(equalTo: content.bottomAnchor)
             ])
         }
         panel = p
-
-        let fitted = hosting.fittingSize
-        let height = max(80, min(fitted.height, 720))
-        let buttonFrame = button.window?.convertToScreen(button.convert(button.bounds, to: nil))
+        anchorFrame = button.window?.convertToScreen(button.convert(button.bounds, to: nil))
             ?? NSRect(x: 0, y: NSScreen.main?.frame.maxY ?? 800, width: 0, height: 0)
-        let x = buttonFrame.maxX - width
-        let y = buttonFrame.minY - 8 - height
-        p.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        let fitted = hosting.fittingSize
+        let screenLimit = maxHeight(for: p)
+        let height = max(80, min(fitted.height, screenLimit))
+        position(width: width, height: height, display: true, animated: false)
         p.makeKeyAndOrderFront(nil)
         installMonitors(button: button)
     }
 
+    func setContentHeight(_ height: CGFloat, animated: Bool) {
+        guard let p = panel, p.isVisible else { return }
+        let target = max(80, min(height, maxHeight(for: p)))
+        guard abs(p.frame.height - target) > 0.5 else { return }
+        position(width: p.frame.width, height: target, display: true, animated: animated)
+    }
+
     func close() {
         panel?.orderOut(nil)
+        dismissalSuspended = false
         removeMonitors()
+    }
+
+    private func maxHeight(for panel: NSPanel) -> CGFloat {
+        let screen = panel.screen ?? NSScreen.main
+        return min(720, (screen?.visibleFrame.height ?? 736) - 16)
+    }
+
+    private func position(width: CGFloat, height: CGFloat, display: Bool, animated: Bool) {
+        guard let p = panel, let anchor = anchorFrame else { return }
+        let frame = NSRect(x: anchor.maxX - width, y: anchor.minY - 8 - height,
+                           width: width, height: height)
+        p.setFrame(frame, display: display, animate: animated)
     }
 
     private func makePanel() -> FloatingCardPanel {
@@ -63,6 +86,7 @@ final class CardPanelController: NSObject, NSWindowDelegate {
                                   styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
                                   backing: .buffered, defer: false)
         p.isFloatingPanel = true
+        p.becomesKeyOnlyIfNeeded = false
         p.level = .popUpMenu
         p.hidesOnDeactivate = false
         p.collectionBehavior = [.canJoinAllSpaces, .transient]
@@ -70,10 +94,8 @@ final class CardPanelController: NSObject, NSWindowDelegate {
         p.isOpaque = false
         p.backgroundColor = .clear
         p.delegate = self
-        p.onCancel = { [weak self] in self?.close() }
+        p.onEscape = { [weak self] in self?.handleEscape() }
 
-        // The vibrancy material behind the SwiftUI content; a 1pt hairline
-        // border keeps the card legible against a similarly-toned desktop.
         let effect = NSVisualEffectView()
         effect.material = .popover
         effect.blendingMode = .behindWindow
@@ -87,20 +109,27 @@ final class CardPanelController: NSObject, NSWindowDelegate {
         return p
     }
 
-    /// Closes on: clicking outside (global monitor for other apps, local
-    /// monitor for this one), Esc (`FloatingCardPanel.cancelOperation`), the
-    /// status item again (left to the button's own click action - the local
-    /// monitor explicitly lets that click through untouched), or the app
-    /// resigning active.
+    private func handleEscape() {
+        switch escapeAction(stackDepth: state.nav.stack.count) {
+        case .pop: state.nav.pop()
+        case .close: close()
+        }
+    }
+
     private func installMonitors(button: NSStatusBarButton) {
         removeMonitors()
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor in self?.close() }
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
+            [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.dismissalSuspended else { return }
+                self.close()
+            }
         }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            guard let self, let panel = self.panel, panel.isVisible else { return event }
-            if event.window === panel { return event }
-            if event.window === button.window { return event }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
+            [weak self] event in
+            guard let self, !self.dismissalSuspended,
+                  let panel = self.panel, panel.isVisible else { return event }
+            if event.window === panel || event.window === button.window { return event }
             self.close()
             return event
         }
@@ -109,22 +138,25 @@ final class CardPanelController: NSObject, NSWindowDelegate {
     }
 
     private func removeMonitors() {
-        if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
-        if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
-        NotificationCenter.default.removeObserver(self, name: NSApplication.didResignActiveNotification, object: nil)
+        if let monitor = globalMonitor { NSEvent.removeMonitor(monitor); globalMonitor = nil }
+        if let monitor = localMonitor { NSEvent.removeMonitor(monitor); localMonitor = nil }
+        NotificationCenter.default.removeObserver(self, name: NSApplication.didResignActiveNotification,
+                                                  object: nil)
     }
 
-    @objc private func appResignedActive() { close() }
+    @objc private func appResignedActive() {
+        guard !dismissalSuspended else { return }
+        close()
+    }
 
-    func windowDidResignKey(_ notification: Notification) { close() }
+    func windowDidResignKey(_ notification: Notification) {
+        guard !dismissalSuspended else { return }
+        close()
+    }
 }
 
-/// A borderless, non-activating panel that still answers Esc: AppKit routes
-/// an unclaimed Escape key press to `cancelOperation(_:)` up the responder
-/// chain, which NSWindow does not implement by default, so this override is
-/// what makes Esc close the panel with no default/cancel button in sight.
 final class FloatingCardPanel: NSPanel {
-    var onCancel: (() -> Void)?
+    var onEscape: (() -> Void)?
     override var canBecomeKey: Bool { true }
-    override func cancelOperation(_ sender: Any?) { onCancel?() }
+    override func cancelOperation(_ sender: Any?) { onEscape?() }
 }

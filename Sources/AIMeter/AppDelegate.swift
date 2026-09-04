@@ -100,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// default, v1.0.27). Left nil for the "menu" fallback, which keeps using
     /// `statusItem.menu` exactly as before.
     private var cardPanel: CardPanelController?
+    private var settingsPanel: CardPanelController?
     private lazy var ringAnimator = RingAnimator { [weak self] img in
         self?.statusItem?.button?.image = img
         self?.statusItem?.button?.imagePosition = .imageOnly
@@ -112,13 +113,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         providers = buildProviders(cfg)
         History.applyRetention(months: cfg.history.retentionMonths)
         NotificationCenter.default.addObserver(
-            forName: AccountsStore.changed, object: nil, queue: .main) { [weak self] _ in
+            forName: SettingsStore.changed, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.reload() }
             }
         // Appearance changes redraw what is already known; they must not send
         // the app back out to every provider.
         NotificationCenter.default.addObserver(
-            forName: AccountsStore.restyled, object: nil, queue: .main) { [weak self] _ in
+            forName: SettingsStore.restyled, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
                     guard let self else { return }
                     self.cfg = Config.load()
@@ -160,9 +161,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func wirePanelActions(_ state: PanelState) {
         state.onRefreshAll = { [weak self] in self?.doRefresh() }
         state.onRefreshProvider = { [weak self] pid in self?.checkProviderByID(pid) }
-        state.onOpenHistory = { [weak self] in self?.openHistory() }
-        state.onOpenAccounts = { [weak self] in self?.openAccounts() }
-        state.onOpenSettings = { [weak self] in self?.openAccounts() }
+        state.onOpenHistory = { [weak state] in state?.nav.push(.history) }
+        state.onOpenSettings = { [weak state] in state?.nav.push(.root) }
         state.onQuit = { [weak self] in self?.quit() }
         state.onPickLanguage = { [weak self] l in self?.setLanguage(l) }
         state.onPickInterval = { [weak self] s in self?.setInterval(s) }
@@ -170,6 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.onOpenDebug = { [weak self] in self?.openDebug() }
         state.onOpenAbout = { [weak self] in self?.openAbout() }
         state.onCursorOpen = { [weak self] in self?.openCursorUsage() }
+        state.onOpenReport = { [weak self] in self?.openHistory() }
     }
 
     @objc private func statusItemClicked() {
@@ -301,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ringAnimator.stop()
             statusItem.length = NSStatusItem.variableLength
             let lines = cfg.menuBar.lines.map { resolveStripLine($0, readings, cfg) }
-            button.image = StatusStrip.image(lines: lines, scheme: cfg.menuBar.colourScheme)
+            button.image = StatusStrip.image(lines: lines)
             button.imagePosition = .imageOnly
             button.attributedTitle = NSAttributedString(string: "")
             button.image?.accessibilityDescription = zip(cfg.menuBar.lines, lines).map { line, s in
@@ -364,7 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
-        add(menu, L.t("m.accounts"), #selector(openAccounts), key: ",")
+        add(menu, L.t("pn.settings"), #selector(openSettings), key: ",")
         menu.addItem(languageMenu())
         menu.addItem(intervalMenu())
         add(menu, L.t("m.history"), #selector(openHistory))
@@ -487,8 +488,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         checkProviderByID(pid)
     }
 
-    @objc func openAccounts() {
-        AccountsWindowController.shared.show()
+    @objc func openSettings() {
+        guard let button = statusItem.button else { return }
+        let controller = settingsPanel ?? CardPanelController()
+        if settingsPanel == nil {
+            wirePanelActions(controller.state)
+            settingsPanel = controller
+        }
+        controller.state.language = cfg.language
+        controller.state.refreshIntervalSeconds = cfg.refreshSeconds
+        controller.state.loginEnabled = SMAppService.mainApp.status == .enabled
+        controller.show(from: button)
+        controller.state.nav.push(.root)
     }
 
     @objc func openDebug() {
@@ -508,5 +519,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AboutWindowController.shared.show()
     }
 
-    @objc func quit() { ringAnimator.stop(); cardPanel?.close(); NSApp.terminate(nil) }
+    @objc func quit() {
+        ringAnimator.stop()
+        cardPanel?.close()
+        settingsPanel?.close()
+        NSApp.terminate(nil)
+    }
 }

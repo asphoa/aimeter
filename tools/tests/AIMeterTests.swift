@@ -510,9 +510,6 @@ func testConfigIgnoresUnknownFieldsAndFillsMissingOnes() {
 }
 
 func testConfigMigratesLegacyPerServiceColourKey() {
-    // Before per-window colours, a service had one colour key. The migration
-    // in Config.init(from:) must move it to the 5-hour role rather than
-    // dropping a colour the user had deliberately set.
     let json = """
     {"colours": {"service.claude": "#FF0000FF", "text": "#00FF00FF"}}
     """
@@ -520,36 +517,119 @@ func testConfigMigratesLegacyPerServiceColourKey() {
         T.check("config with legacy colour key decodes", false)
         return
     }
-    T.eq("legacy key migrated to 5h role", cfg.colours["service.claude.5h"] ?? "", "#FF0000FF")
-    T.isNil("legacy key removed after migration", cfg.colours["service.claude"])
-    T.eq("non-service key untouched", cfg.colours["text"] ?? "", "#00FF00FF")
+    T.eq("one-colour service key remains canonical", cfg.colours["service.claude"] ?? "", "#FF0000FF")
+    T.isNil("old text role is renamed", cfg.colours["text"])
+    T.eq("old text role becomes ink", cfg.colours[Palette.ink] ?? "", "#00FF00FF")
 }
 
-func testConfigDefaultsAndRoundTripsAdaptiveHueOffset() {
-    // An old settings file predating the "Optimize colours" reroll button
-    // has no adaptiveHueOffset at all - it must fall back to the same
-    // default StatusStrip's adaptive scheme has always used, not to 0
-    // (which would silently change everyone's existing adaptive palette on
-    // upgrade even though nobody clicked anything).
-    let old = """
-    {"menuBar": {"lines": [{"provider": "claude", "account": "*", "gauge": "*"}]}}
-    """
-    guard let cfg = try? JSONDecoder().decode(Config.self, from: Data(old.utf8)) else {
-        T.check("config without adaptiveHueOffset decodes", false)
-        return
-    }
-    T.eq("missing offset defaults to the original constant", cfg.menuBar.adaptiveHueOffset, 218)
+@MainActor
+func testPanelNavPushPopReset() {
+    let nav = PanelNav()
+    nav.push(.root)
+    nav.push(.services)
+    nav.push(.catalogue)
+    T.eq("panel nav pushes three levels", nav.stack.count, 3)
+    nav.pop()
+    T.eq("panel nav pops one level", nav.stack, [.root, .services])
+    nav.reset()
+    T.check("panel nav reset clears the stack", nav.stack.isEmpty)
+}
 
-    // A stored reroll must survive a save/load cycle exactly - this is the
-    // one field the whole button exists to persist.
-    var rerolled = cfg
-    rerolled.menuBar.adaptiveHueOffset = 47.5
-    guard let data = try? JSONEncoder().encode(rerolled),
-          let reloaded = try? JSONDecoder().decode(Config.self, from: data) else {
-        T.check("config with a rerolled offset round-trips", false)
+func testEscapePopsBeforeClosing() {
+    T.eq("escape pops a settings page", escapeAction(stackDepth: 2), .pop)
+    T.eq("escape closes from usage", escapeAction(stackDepth: 0), .close)
+}
+
+func testConfigDecodesLegacyColourSchemeToProvider() {
+    let json = "{\"menuBar\":{\"colourScheme\":\"adaptive\"}}"
+    guard let cfg = try? JSONDecoder().decode(Config.self, from: Data(json.utf8)) else {
+        T.check("legacy colour scheme config decodes", false)
         return
     }
-    T.eq("rerolled offset survives encode/decode", reloaded.menuBar.adaptiveHueOffset, 47.5)
+    T.eq("adaptive colour scheme becomes provider", cfg.menuBar.colourScheme, .provider)
+}
+
+func testConfigMigratesTwoColourServiceKeysToOne() {
+    let json = """
+    {"colours":{"service.claude.5h":"#112233FF","service.claude.week":"#445566FF",
+                "panel.5h":"#778899FF"}}
+    """
+    guard let cfg = try? JSONDecoder().decode(Config.self, from: Data(json.utf8)) else {
+        T.check("two-colour config decodes", false)
+        return
+    }
+    T.eq("5h service colour becomes the one service colour",
+         cfg.colours["service.claude"] ?? "", "#112233FF")
+    T.isNil("weekly service colour is discarded", cfg.colours["service.claude.week"])
+    T.isNil("panel colour is discarded", cfg.colours["panel.5h"])
+}
+
+func testConfigIgnoresAdaptiveHueOffset() {
+    let json = "{\"menuBar\":{\"adaptiveHueOffset\":47.5}}"
+    guard let cfg = try? JSONDecoder().decode(Config.self, from: Data(json.utf8)),
+          let encoded = try? JSONEncoder().encode(cfg),
+          let output = String(data: encoded, encoding: .utf8) else {
+        T.check("config with adaptiveHueOffset round-trips", false)
+        return
+    }
+    T.check("adaptiveHueOffset is not written back", !output.contains("adaptiveHueOffset"))
+}
+
+func testPaletteWarnAlarmAreDistinctPerAppearance() {
+    var lightWarn = "", lightAlarm = "", lightLabel = ""
+    var darkWarn = "", darkAlarm = "", darkLabel = ""
+    NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
+        lightWarn = Palette.defaultColour(Palette.warn).hexString
+        lightAlarm = Palette.defaultColour(Palette.alarm).hexString
+        lightLabel = NSColor.labelColor.hexString
+    }
+    NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+        darkWarn = Palette.defaultColour(Palette.warn).hexString
+        darkAlarm = Palette.defaultColour(Palette.alarm).hexString
+        darkLabel = NSColor.labelColor.hexString
+    }
+    T.check("light warn and alarm are distinct", lightWarn != lightAlarm)
+    T.check("dark warn and alarm are distinct", darkWarn != darkAlarm)
+    T.check("warn changes with appearance", lightWarn != darkWarn)
+    T.check("alarm changes with appearance", lightAlarm != darkAlarm)
+    T.check("light urgency colours are not labelColor",
+            lightWarn != lightLabel && lightAlarm != lightLabel)
+    T.check("dark urgency colours are not labelColor",
+            darkWarn != darkLabel && darkAlarm != darkLabel)
+}
+
+func testPaletteServiceColourFallback() {
+    T.eq("unknown service uses neutral fallback", Palette.serviceColour("unknown").hexString,
+         NSColor(hex: "#8A8A8F")!.hexString)
+}
+
+func testStatusStripWeekHalfDerivesFromServiceColour() {
+    let short = StatusStrip.serviceWindowColour(provider: "claude", kind: .shortWindow)
+    let week = StatusStrip.serviceWindowColour(provider: "claude", kind: .longWindow)
+    T.check("weekly half differs from 5-hour half", week.hexString != short.hexString)
+    T.check("weekly half is not pure white", week.hexString != NSColor.white.hexString)
+}
+
+func testRingIconTrackAlphaConstant() {
+    T.eq("ring track alpha stays at 0.22", RingIcon.trackAlpha, CGFloat(0.22))
+}
+
+func testSettingsSubtitlesUseRealCounts() {
+    let old = L.current
+    L.current = .en
+    defer { L.current = old }
+    var cfg = Config()
+    cfg.enabled["agy"] = false
+    cfg.enabled["cursor"] = false
+    T.eq("services subtitle uses real total and hidden counts",
+         SettingsSubtitle.services(cfg), "7 services · 2 hidden")
+    cfg.language = .en
+    cfg.refreshSeconds = 0
+    T.eq("manual general subtitle does not say every",
+         SettingsSubtitle.general(cfg), "English · manual")
+    cfg.refreshSeconds = 900
+    T.eq("scheduled general subtitle says every",
+         SettingsSubtitle.general(cfg), "English · every 15 minutes")
 }
 
 func testConfigMigratesLegacyRowsToMenuLines() {
@@ -1638,15 +1718,15 @@ func testStripDrawsNoBarForAWindowThatHasEnded() {
     T.check("the row is still flagged stale", line.stale)
 }
 
-// MARK: - distinct failures, quota warnings, and adaptive colour
+// MARK: - distinct failures, quota warnings, and token colours
 
 func testNearLimitIsNotAFetchFailure() {
     let gauges = [Gauge(label: "quota", percent: 95, text: "95%", resetsAt: nil)]
     T.eq("90% is a near-limit state, not a fetch failure", worstState(gauges), .nearLimit)
     T.eq("near-limit uses the warning dot", stateColour(.nearLimit).hexString,
-         NSColor.systemOrange.hexString)
+         NSColor(hex: "#E8B04A")!.hexString)
     T.eq("a failed read alone uses the failure dot", stateColour(.failure).hexString,
-         NSColor.systemRed.hexString)
+         NSColor(hex: "#F0705F")!.hexString)
 }
 
 func testCodexQuotaWireStatusesNeverReachTheUI() {
@@ -1687,31 +1767,6 @@ func testCodexSkipsAWindowlessRateLimitsEntry() {
     let noPercentField: [String: Any] = ["primary": ["window_minutes": 300, "resets_at": 0]]
     T.check("a window object without used_percent is not usable",
             !CodexProvider.hasUsableWindow(noPercentField))
-}
-
-func testAdaptivePaletteSeparatesLinesAndWindows() {
-    let a = StatusStrip.adaptiveColour(index: 0, count: 5, kind: .shortWindow, critical: true)
-    let b = StatusStrip.adaptiveColour(index: 1, count: 5, kind: .shortWindow, critical: true)
-    let weekly = StatusStrip.adaptiveColour(index: 0, count: 5, kind: .longWindow, critical: true)
-    let comfortable = StatusStrip.adaptiveColour(index: 0, count: 5, kind: .shortWindow, critical: false)
-    T.check("critical lines keep distinct identities", a.hexString != b.hexString)
-    T.check("weekly half differs from 5-hour half", a.hexString != weekly.hexString)
-    T.check("critical differs from comfortable", a.hexString != comfortable.hexString)
-}
-
-func testPanelGaugeColoursKeepWindowIdentityAndSignalUrgency() {
-    let shortLow = panelGaugeStyle(kind: .shortWindow, percent: 19)
-    let shortHigh = panelGaugeStyle(kind: .shortWindow, percent: 97)
-    let weeklyLow = panelGaugeStyle(kind: .longWindow, percent: 19)
-    let weeklyHigh = panelGaugeStyle(kind: .longWindow, percent: 97)
-    T.eq("5-hour identity does not change at the limit", shortLow.fill.hexString, shortHigh.fill.hexString)
-    T.check("5-hour and weekly have stable distinct colours", shortLow.fill.hexString != weeklyLow.fill.hexString)
-    T.eq("comfortable window has no urgency cap", Int(shortLow.alertWidth), 0)
-    T.eq("near-limit window has a visible alarm cap", Int(weeklyHigh.alertWidth), 12)
-    T.eq("near-limit cap uses the alarm colour", weeklyHigh.alert?.hexString ?? "", Palette.colour(Palette.alarm).hexString)
-    T.eq("warning window has a smaller amber cap", Int(panelGaugeStyle(kind: .longWindow, percent: 70).alertWidth), 7)
-    T.eq("untyped percentage preserves traffic-light urgency", panelGaugeStyle(kind: .other, percent: 97).fill.hexString,
-         Palette.colour(Palette.alarm).hexString)
 }
 
 func testTimeoutDoesNotWaitForAnUncooperativeOperation() {
@@ -1932,6 +1987,14 @@ func testResolveStripLineYieldsNoStripLineForAGaugelessCursorReading() {
 }
 
 // MARK: - PanelModel: the card panel's pure builder (v1.0.27)
+
+func testPanelModelBuilderLocalizesCursorAndLocalTitles() {
+    let old = L.current
+    L.current = .en
+    defer { L.current = old }
+    T.eq("cursor title is localized", PanelModelBuilder.title(for: "cursor"), L.t("p.cursor"))
+    T.eq("local title is localized", PanelModelBuilder.title(for: "local"), L.t("p.local"))
+}
 
 func testPanelModelPrimaryPicksConfiguredProvider() {
     var codex = Reading(id: "codex", title: "Codex")
@@ -2161,7 +2224,16 @@ struct Runner {
         testRingImageSanityAndNoCrashOnNilValues()
         testConfigIgnoresUnknownFieldsAndFillsMissingOnes()
         testConfigMigratesLegacyPerServiceColourKey()
-        testConfigDefaultsAndRoundTripsAdaptiveHueOffset()
+        MainActor.assumeIsolated { testPanelNavPushPopReset() }
+        testEscapePopsBeforeClosing()
+        testConfigDecodesLegacyColourSchemeToProvider()
+        testConfigMigratesTwoColourServiceKeysToOne()
+        testConfigIgnoresAdaptiveHueOffset()
+        testPaletteWarnAlarmAreDistinctPerAppearance()
+        testPaletteServiceColourFallback()
+        testStatusStripWeekHalfDerivesFromServiceColour()
+        testRingIconTrackAlphaConstant()
+        testSettingsSubtitlesUseRealCounts()
         testConfigMigratesLegacyRowsToMenuLines()
         testResolveStripLineSplitsTwoWindowsIntoTopAndBottom()
         testResolveStripLineMergesASingleWindowService()
@@ -2208,8 +2280,6 @@ struct Runner {
         testNearLimitIsNotAFetchFailure()
         testCodexQuotaWireStatusesNeverReachTheUI()
         testCodexSkipsAWindowlessRateLimitsEntry()
-        testAdaptivePaletteSeparatesLinesAndWindows()
-        testPanelGaugeColoursKeepWindowIdentityAndSignalUrgency()
         testTimeoutDoesNotWaitForAnUncooperativeOperation()
         testEveryLocalizationCallSiteHasATableRow()
         testHistoryLineShapeForAGaugeAndAFailure()
@@ -2218,6 +2288,7 @@ struct Runner {
         testHistoryReportExportProducesHTMLAndCSVWithNoSecrets()
         testCursorProviderHasNoGaugesAndTheLinkLine()
         testResolveStripLineYieldsNoStripLineForAGaugelessCursorReading()
+        testPanelModelBuilderLocalizesCursorAndLocalTitles()
         testPanelModelPrimaryPicksConfiguredProvider()
         testPanelModelHeroUsesShortWindowGauge()
         testPanelModelChipOrderIsLongThenModelSortedThenOther()

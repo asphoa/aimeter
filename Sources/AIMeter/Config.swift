@@ -74,8 +74,8 @@ struct MenuLine: Codable, Hashable, Sendable {
 struct MenuBarConfig: Codable {
     /// Three by default. The strip is a glance, not a dashboard: at three lines
     /// each half is 2.5 pt and readable, and the smaller services are one click
-    /// away in the panel. Anything up to five can be chosen in the Accounts
-    /// window, with the bars thinning accordingly.
+    /// away in the panel. Anything up to five can be selected in config.json,
+    /// with the bars thinning accordingly.
     var lines: [MenuLine] = [
         MenuLine(provider: "claude"),
         MenuLine(provider: "codex"),
@@ -84,11 +84,6 @@ struct MenuBarConfig: Codable {
     /// A snapshot older than this is drawn dimmed.
     var staleAfterMinutes: Int = 360
     var colourScheme: BarColourScheme = .provider
-    /// Where the adaptive scheme's hue circle starts. Fixed until "Optimize
-    /// colours for visible lines" rerolls it - the button's whole purpose is
-    /// letting someone click until a rotation reads well to them, which needs
-    /// a stored choice, not a value recomputed the same way every time.
-    var adaptiveHueOffset: Double = 218
     /// "ring" (default), "ringNumeral", or "bars" (the legacy strip — kept
     /// selectable only via config.json, not offered in Settings).
     var style: String = "ring"
@@ -111,8 +106,7 @@ struct MenuBarConfig: Codable {
         let c = try d.container(keyedBy: CodingKeys.self)
         let def = MenuBarConfig()
         staleAfterMinutes = (try? c.decode(Int.self, forKey: .staleAfterMinutes)) ?? def.staleAfterMinutes
-        colourScheme = (try? c.decode(BarColourScheme.self, forKey: .colourScheme)) ?? def.colourScheme
-        adaptiveHueOffset = (try? c.decode(Double.self, forKey: .adaptiveHueOffset)) ?? def.adaptiveHueOffset
+        colourScheme = (try? c.decode(BarColourScheme.self, forKey: .colourScheme)) ?? .provider
         style = (try? c.decode(String.self, forKey: .style)) ?? def.style
         primary = (try? c.decode(String.self, forKey: .primary)) ?? def.primary
         alertDot = (try? c.decode(Bool.self, forKey: .alertDot)) ?? def.alertDot
@@ -134,7 +128,7 @@ struct MenuBarConfig: Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case lines, staleAfterMinutes, colourScheme, rows, adaptiveHueOffset
+        case lines, staleAfterMinutes, colourScheme, rows
         case style, primary, alertDot, animate, panel
     }
 
@@ -143,7 +137,6 @@ struct MenuBarConfig: Codable {
         try c.encode(lines, forKey: .lines)
         try c.encode(staleAfterMinutes, forKey: .staleAfterMinutes)
         try c.encode(colourScheme, forKey: .colourScheme)
-        try c.encode(adaptiveHueOffset, forKey: .adaptiveHueOffset)
         try c.encode(style, forKey: .style)
         try c.encode(primary, forKey: .primary)
         try c.encode(alertDot, forKey: .alertDot)
@@ -187,8 +180,8 @@ struct Config: Codable {
     var agyQuotaViaTUI: Bool = true
     /// Path to the agy binary; empty means look in the usual places.
     var agyBinary: String = ""
-    /// Colour-role overrides as "#RRGGBBAA". An absent role keeps the adaptive
-    /// default. See Palette.
+    /// Colour-role overrides as "#RRGGBBAA". An absent role keeps the dynamic
+    /// default. There is deliberately no colour settings UI. See Palette.
     var colours: [String: String] = [:]
     /// Per-provider check interval in seconds. 0 means "only when I ask".
     /// A missing entry falls back to `refreshSeconds`.
@@ -250,14 +243,8 @@ struct Config: Codable {
         agyQuotaViaPrint = (try? c.decode(Bool.self, forKey: .agyQuotaViaPrint)) ?? def.agyQuotaViaPrint
         agyQuotaViaTUI = (try? c.decode(Bool.self, forKey: .agyQuotaViaTUI)) ?? def.agyQuotaViaTUI
         agyBinary = (try? c.decode(String.self, forKey: .agyBinary)) ?? def.agyBinary
-        colours = (try? c.decode([String: String].self, forKey: .colours)) ?? def.colours
-        // Each service used to have one colour; it now has one per window.
-        // An old key becomes the 5-hour colour rather than silently vanishing.
-        for (key, value) in colours where key.hasPrefix("service.")
-            && !key.hasSuffix(".5h") && !key.hasSuffix(".week") {
-            colours[key + ".5h"] = value
-            colours.removeValue(forKey: key)
-        }
+        let decodedColours = (try? c.decode([String: String].self, forKey: .colours)) ?? def.colours
+        colours = Self.migratedColours(decodedColours)
         claudeProbeModel = (try? c.decode(String.self, forKey: .claudeProbeModel)) ?? def.claudeProbeModel
         claudeRefreshViaCLI = (try? c.decode(Bool.self, forKey: .claudeRefreshViaCLI))
             ?? def.claudeRefreshViaCLI
@@ -288,8 +275,21 @@ struct Config: Codable {
         // Applied here rather than at each call site: one of those call sites
         // was missed, and the only symptom was colours silently not applying.
         Palette.overrides = cfg.colours
-        Palette.adaptiveHueOffset = cfg.menuBar.adaptiveHueOffset
         return cfg
+    }
+
+    static func migratedColours(_ input: [String: String]) -> [String: String] {
+        var output: [String: String] = [:]
+        for (key, value) in input {
+            if key.hasPrefix("panel.") || key.hasSuffix(".week") { continue }
+            if key.hasPrefix("service."), key.hasSuffix(".5h") {
+                let destination = String(key.dropLast(3))
+                if input[destination] == nil { output[destination] = value }
+                continue
+            }
+            output[key == "text" ? Palette.ink : key] = value
+        }
+        return output
     }
 
     /// The one-time "agy" interval migration (2026-09-04): a settings file

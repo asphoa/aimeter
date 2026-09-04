@@ -7,6 +7,8 @@ import SwiftUI
 /// itself has no notion of how its actions are actually carried out.
 @MainActor
 final class PanelState: ObservableObject {
+    let nav = PanelNav()
+    let store: SettingsStore
     @Published var model: PanelModel = .empty(primaryId: "claude")
     @Published var sparkline: [(Date, Double)] = []
     @Published var lastRefresh: Date?
@@ -14,11 +16,16 @@ final class PanelState: ObservableObject {
     @Published var language: Lang = .system
     @Published var loginEnabled: Bool = false
     @Published var animate: Bool = true
+    @Published var draft: AddDraft?
+
+    init(store: SettingsStore? = nil) {
+        self.store = store ?? SettingsStore()
+        self.draft = nil
+    }
 
     var onRefreshAll: () -> Void = {}
     var onRefreshProvider: (String) -> Void = { _ in }
     var onOpenHistory: () -> Void = {}
-    var onOpenAccounts: () -> Void = {}
     var onOpenSettings: () -> Void = {}
     var onQuit: () -> Void = {}
     var onPickLanguage: (Lang) -> Void = { _ in }
@@ -27,6 +34,16 @@ final class PanelState: ObservableObject {
     var onOpenDebug: () -> Void = {}
     var onOpenAbout: () -> Void = {}
     var onCursorOpen: () -> Void = {}
+    var onOpenReport: () -> Void = {}
+    var onDismissalSuspended: (Bool) -> Void = { _ in }
+    var onContentHeight: (CGFloat) -> Void = { _ in }
+}
+
+struct PanelHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
 }
 
 private var panelAppVersion: String {
@@ -44,6 +61,7 @@ private func intervalLabel(_ secs: Int) -> String {
 /// and the offscreen `--panel` renderer in main.swift.
 struct PanelView: View {
     @ObservedObject var state: PanelState
+    @ObservedObject private var nav: PanelNav
     var requestClose: () -> Void = {}
     /// True only for the offscreen `--panel` renderer. The live panel gets its
     /// translucent ground from the NSPanel's own `NSVisualEffectView`
@@ -53,11 +71,37 @@ struct PanelView: View {
     /// mid-grey a materialless capture would otherwise show.
     var opaqueBackground: Bool = false
 
+    init(state: PanelState, requestClose: @escaping () -> Void = {},
+         opaqueBackground: Bool = false) {
+        self.state = state
+        self._nav = ObservedObject(wrappedValue: state.nav)
+        self.requestClose = requestClose
+        self.opaqueBackground = opaqueBackground
+    }
+
     private var animated: Bool {
         state.animate && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
     var body: some View {
+        Group {
+            if let page = nav.stack.last { settingsPage(page) }
+            else { usagePage }
+        }
+        .frame(width: 372)
+        .frame(maxHeight: 720)
+        .background(GeometryReader { geometry in
+            Color.clear.preference(key: PanelHeightKey.self,
+                                   value: panelPreferredHeight(for: nav.stack.last)
+                                        ?? geometry.size.height)
+        })
+        .background(opaqueBackground ? Color(nsColor: .windowBackgroundColor) : Color.clear)
+        .background(shortcuts)
+        .onPreferenceChange(PanelHeightKey.self) { state.onContentHeight($0) }
+        .onExitCommand(perform: handleEscape)
+    }
+
+    private var usagePage: some View {
         VStack(spacing: 0) {
             header
             ScrollView {
@@ -75,11 +119,33 @@ struct PanelView: View {
             }
             footer
         }
-        .frame(width: 372)
-        .frame(maxHeight: 720)
-        .background(opaqueBackground ? Color(nsColor: .windowBackgroundColor) : Color.clear)
-        .background(shortcuts)
-        .onExitCommand(perform: requestClose)
+    }
+
+    @ViewBuilder
+    private func settingsPage(_ page: SettingsPage) -> some View {
+        switch page {
+        case .root:
+            SettingsRootView(state: state, store: state.store)
+        case .services:
+            ServicesView(state: state, store: state.store)
+        case .catalogue, .custom:
+            CatalogueView(state: state, store: state.store)
+        case .add(let kind):
+            AddBuiltinView(providerID: kind, state: state, store: state.store)
+        case .menuBar:
+            MenuBarPageView(state: state, store: state.store)
+        case .general:
+            GeneralPageView(state: state, store: state.store)
+        case .history:
+            HistoryPageView(state: state, store: state.store)
+        }
+    }
+
+    private func handleEscape() {
+        switch escapeAction(stackDepth: nav.stack.count) {
+        case .pop: nav.pop()
+        case .close: requestClose()
+        }
     }
 
     /// Zero-size, invisible buttons purely so ⌘R/⌘Q work while the panel is
@@ -101,7 +167,7 @@ struct PanelView: View {
             Spacer()
             Text(PanelFormat.updatedLine(time: state.lastRefresh, intervalSeconds: state.refreshIntervalSeconds))
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color(nsColor: Palette.text(0.62)))
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -113,7 +179,6 @@ struct PanelView: View {
             HStack(spacing: 2) {
                 FooterIconButton(systemName: "arrow.clockwise", help: L.t("m.refresh")) { state.onRefreshAll() }
                 FooterIconButton(systemName: "chart.xyaxis.line", help: L.t("m.history")) { state.onOpenHistory() }
-                FooterIconButton(systemName: "person.crop.circle", help: L.t("m.accounts")) { state.onOpenAccounts() }
                 FooterIconButton(systemName: "gearshape", help: L.t("pn.settings")) { state.onOpenSettings() }
                 FooterIconButton(systemName: "power", help: L.t("m.quit")) { state.onQuit() }
                 Spacer()
@@ -123,7 +188,7 @@ struct PanelView: View {
             .padding(.horizontal, 8)
             Text("v\(panelAppVersion)")
                 .font(.system(size: 9))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color(nsColor: Palette.text(0.42)))
         }
         .padding(.bottom, 8)
     }
@@ -201,7 +266,7 @@ private struct PrimaryCardView: View {
                 Text(primary.title).font(.system(size: 13, weight: .semibold))
                 Spacer()
                 if let ageText = primary.ageText {
-                    Text(ageText).font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(ageText).font(.system(size: 11)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                 }
             }
 
@@ -209,7 +274,7 @@ private struct PrimaryCardView: View {
                 Text(msg).font(.system(size: 12))
                     .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
             } else if !primary.hasData {
-                Text(L.t("m.loading")).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(L.t("m.loading")).font(.system(size: 12)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
             } else {
                 HStack(alignment: .center, spacing: 14) {
                     RingGauge(percent: primary.heroPercent, animated: animated)
@@ -218,17 +283,17 @@ private struct PrimaryCardView: View {
                             Text(heroNumber)
                                 .font(.system(size: 34, weight: .bold)).monospacedDigit()
                             if primary.heroPercent != nil {
-                                Text("%").font(.system(size: 14)).foregroundStyle(.secondary)
+                                Text("%").font(.system(size: 14)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                             }
                         }
-                        Text(windowLine).font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text(windowLine).font(.system(size: 11)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                     }
                     Spacer(minLength: 0)
                 }
                 if !primary.chips.isEmpty {
                     ChipsFlow(chips: primary.chips)
                 }
-                SparklineView(samples: sparkline, ink: Color(nsColor: .labelColor))
+                SparklineView(samples: sparkline, ink: Color(nsColor: Palette.colour(Palette.ink)))
             }
         }
         .padding(12)
@@ -236,7 +301,7 @@ private struct PrimaryCardView: View {
         .background(CardBackground())
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .labelColor).opacity(flashing ? 0.08 : 0))
+                .fill(Color(nsColor: Palette.colour(Palette.ink)).opacity(flashing ? 0.08 : 0))
         )
         .offset(y: hovering ? -1 : 0)
         .shadow(color: .black.opacity(hovering ? 0.20 : 0), radius: hovering ? 6 : 0, y: hovering ? 2 : 0)
@@ -334,11 +399,11 @@ private struct ChipView: View {
         HStack(spacing: 5) {
             MiniRing(percent: chip.percent)
             HStack(spacing: 3) {
-                Text(chip.label).font(.system(size: 10)).foregroundStyle(.secondary)
-                Text("·").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text(chip.label).font(.system(size: 10)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                Text("·").font(.system(size: 10)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                 Text(chip.value).font(.system(size: 11, weight: .semibold)).monospacedDigit()
                 if let r = chip.resetText {
-                    Text(r).font(.system(size: 9)).foregroundStyle(.secondary)
+                    Text(r).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.42)))
                 }
             }
         }
@@ -352,9 +417,9 @@ private struct MiniRing: View {
     var percent: Double?
 
     private var colour: Color {
-        guard let percent else { return Color(nsColor: .labelColor).opacity(0.3) }
+        guard let percent else { return Color(nsColor: Palette.text(0.42)) }
         switch RingIcon.colourBand(percent) {
-        case .ink: return Color(nsColor: .labelColor)
+        case .ink: return Color(nsColor: Palette.colour(Palette.ink))
         case .warn: return Color(nsColor: Palette.colour(Palette.warn))
         case .alarm: return Color(nsColor: Palette.colour(Palette.alarm))
         }
@@ -362,7 +427,7 @@ private struct MiniRing: View {
 
     var body: some View {
         ZStack {
-            Circle().stroke(Color(nsColor: .labelColor).opacity(0.14), lineWidth: 2)
+            Circle().stroke(Color(nsColor: Palette.colour(Palette.track)), lineWidth: 2)
             Circle()
                 .trim(from: 0, to: CGFloat(max(0, min(100, percent ?? 0)) / 100))
                 .stroke(AngularGradient(colors: [colour.opacity(0.4), colour], center: .center),
@@ -386,7 +451,7 @@ private struct RingGauge: View {
 
     var body: some View {
         ZStack {
-            Circle().stroke(Color(nsColor: .labelColor).opacity(0.12), lineWidth: 6)
+            Circle().stroke(Color(nsColor: Palette.colour(Palette.track)), lineWidth: 6)
             Circle()
                 .trim(from: 0, to: CGFloat(max(0, min(100, shown)) / 100))
                 .stroke(colour, style: StrokeStyle(lineWidth: 6, lineCap: .round))
@@ -398,9 +463,9 @@ private struct RingGauge: View {
     }
 
     private var colour: Color {
-        guard let percent else { return Color(nsColor: .labelColor).opacity(0.3) }
+        guard let percent else { return Color(nsColor: Palette.text(0.42)) }
         switch RingIcon.colourBand(percent) {
-        case .ink: return Color(nsColor: .labelColor)
+        case .ink: return Color(nsColor: Palette.colour(Palette.ink))
         case .warn: return Color(nsColor: Palette.colour(Palette.warn))
         case .alarm: return Color(nsColor: Palette.colour(Palette.alarm))
         }
@@ -431,7 +496,7 @@ private struct SecondaryCardView: View {
                 Text(card.title).font(.system(size: 12, weight: .semibold))
                 Spacer()
                 if let badge = card.badge {
-                    Text(badge).font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text(badge).font(.system(size: 10)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                 }
             }
             if let msg = card.failureMessage, card.state == .failure {
@@ -440,9 +505,10 @@ private struct SecondaryCardView: View {
             } else if card.linkOnly {
                 HStack {
                     Text(card.failureMessage ?? L.t("x.cursor.link"))
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .font(.system(size: 11)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                     Spacer()
-                    Image(systemName: "arrow.up.right.square").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Image(systemName: "arrow.up.right.square").font(.system(size: 11))
+                        .foregroundStyle(Color(nsColor: Palette.text(0.62)))
                 }
                 .onTapGesture { onCursorOpen() }
             } else {
@@ -455,7 +521,8 @@ private struct SecondaryCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .opacity(card.opacity)
         .background(CardBackground(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .labelColor).opacity(flashing ? 0.08 : 0)))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .fill(Color(nsColor: Palette.colour(Palette.ink)).opacity(flashing ? 0.08 : 0)))
         .offset(y: hovering ? -1 : 0)
         .shadow(color: .black.opacity(hovering ? 0.16 : 0), radius: hovering ? 5 : 0, y: hovering ? 1 : 0)
         .onHover { hovering = $0 }
@@ -478,10 +545,10 @@ private struct RowView: View {
         if row.label.isEmpty && row.percent == nil {
             // An informational line (DeepSeek's peak/off-peak note, Local AI's
             // memory line, ...): text only, no meter.
-            Text(row.value).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(row.value).font(.system(size: 10)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
         } else {
             HStack(spacing: 6) {
-                Text(row.label).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(row.label).font(.system(size: 11)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                     .lineLimit(1).frame(maxWidth: 110, alignment: .leading)
                 if let pct = row.percent {
                     Meter(percent: pct)
@@ -491,7 +558,7 @@ private struct RowView: View {
                     Text(row.value).font(.system(size: 11)).monospacedDigit()
                 }
                 if let r = row.resetText {
-                    Text(r).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(r).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.42))).lineLimit(1)
                 }
             }
         }
@@ -510,7 +577,7 @@ private struct Meter: View {
 
     private var fill: NSColor {
         switch RingIcon.colourBand(percent) {
-        case .ink: return .labelColor
+        case .ink: return Palette.colour(Palette.ink)
         case .warn: return Palette.colour(Palette.warn)
         case .alarm: return Palette.colour(Palette.alarm)
         }

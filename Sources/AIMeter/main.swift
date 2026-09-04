@@ -8,7 +8,6 @@ import SwiftUI
 func highUsageDemo(_ cfg: inout Config) -> [String: [Reading]] {
     let ids = ["claude", "codex", "agy", "openrouter", "deepseek"]
     cfg.menuBar.lines = ids.map { MenuLine(provider: $0) }
-    cfg.menuBar.colourScheme = .adaptive
     return Dictionary(uniqueKeysWithValues: ids.map { id in
         let title = ProviderKind.find(id)?.title ?? id
         var r = Reading(id: id, title: title)
@@ -26,7 +25,6 @@ func highUsageDemo(_ cfg: inout Config) -> [String: [Reading]] {
 /// It is also credential-free and is solely for visual regression checks.
 func contrastUsageDemo(_ cfg: inout Config) -> [String: [Reading]] {
     cfg.menuBar.lines = [MenuLine(provider: "claude")]
-    cfg.menuBar.colourScheme = .adaptive
     var reading = Reading(id: "claude", title: ProviderKind.find("claude")?.title ?? "Claude")
     reading.gauges = [
         Gauge(label: L.t("g.5h"), percent: 19, text: "19%", resetsAt: Date().addingTimeInterval(3600), kind: .shortWindow),
@@ -44,7 +42,6 @@ func contrastUsageDemo(_ cfg: inout Config) -> [String: [Reading]] {
 /// a particular real reset time.
 func expiredWindowDemo(_ cfg: inout Config) -> [String: [Reading]] {
     cfg.menuBar.lines = [MenuLine(provider: "codex")]
-    cfg.menuBar.colourScheme = .window
     var reading = Reading(id: "codex", title: ProviderKind.find("codex")?.title ?? "Codex")
     reading.snapshotAt = Date().addingTimeInterval(-7_200)
     reading.gauges = [
@@ -163,6 +160,12 @@ func renderIcon(to path: String) async {
     let dark = NSAppearance(named: .darkAqua)
     writePNG(ring, scale: 4, background: NSColor.white, appearance: light, to: base + "-light.png")
     writePNG(ring, scale: 4, background: NSColor.black, appearance: dark, to: base + "-dark.png")
+    writePNG(ring, scale: 4,
+             background: NSColor(srgbRed: 0.12, green: 0.42, blue: 0.86, alpha: 1),
+             appearance: light, to: base + "-blue.png")
+    writePNG(ring, scale: 4,
+             background: NSColor(srgbRed: 0.04, green: 0.36, blue: 0.82, alpha: 1),
+             appearance: dark, to: base + "-selected.png")
 
     // Six named states, credential-free, laid out left to right on one canvas.
     func gauge(_ pct: Double, kind: GaugeKind) -> Gauge {
@@ -220,12 +223,13 @@ func renderIcon(to path: String) async {
 private func renderPanelState(_ state: PanelState, to path: String) {
     let hosting = NSHostingView(rootView: PanelView(state: state, opaqueBackground: true))
     hosting.translatesAutoresizingMaskIntoConstraints = false
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 372, height: 720),
+    let initialHeight = panelPreferredHeight(for: state.nav.stack.last) ?? 720
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 372, height: initialHeight),
                           styleMask: [.borderless], backing: .buffered, defer: false)
     window.contentView = hosting
     hosting.layoutSubtreeIfNeeded()
     // One turn of the runloop so SwiftUI completes its first layout pass -
-    // the same technique --settings/--about already rely on.
+    // the same technique the --about renderer relies on.
     RunLoop.main.run(until: Date().addingTimeInterval(0.4))
     hosting.layoutSubtreeIfNeeded()
     let fitted = hosting.fittingSize
@@ -251,7 +255,7 @@ private func renderPanelState(_ state: PanelState, to path: String) {
 }
 
 @MainActor
-private func renderPanelDemo(to path: String) {
+private func renderPanelDemo(to path: String, page: SettingsPage? = nil) {
     var cfg = Config.load()
     L.current = cfg.language
     Palette.overrides = cfg.colours
@@ -265,16 +269,26 @@ private func renderPanelDemo(to path: String) {
     state.refreshIntervalSeconds = cfg.interval(cfg.menuBar.primary)
     state.language = cfg.language
     state.animate = false
+    setPanelPage(page, on: state)
     renderPanelState(state, to: path)
 }
 
 @MainActor
-func renderPanel(to path: String) async {
+func renderPanel(to path: String, page: SettingsPage? = nil) async {
     var cfg = Config.load()
     L.current = cfg.language
     Palette.overrides = cfg.colours
+    if page != nil {
+        let state = PanelState(store: SettingsStore(config: cfg))
+        state.language = cfg.language
+        state.refreshIntervalSeconds = cfg.refreshSeconds
+        state.animate = false
+        setPanelPage(page, on: state)
+        renderPanelState(state, to: path)
+        return
+    }
     if diagnosticDemo(&cfg) != nil {
-        renderPanelDemo(to: path)
+        renderPanelDemo(to: path, page: page)
         return
     }
     let providers = buildProviders(cfg)
@@ -288,7 +302,25 @@ func renderPanel(to path: String) async {
     state.refreshIntervalSeconds = cfg.interval(cfg.menuBar.primary)
     state.language = cfg.language
     state.animate = false   // a still image has nothing to sweep from
+    setPanelPage(page, on: state)
     renderPanelState(state, to: path)
+}
+
+@MainActor
+private func setPanelPage(_ page: SettingsPage?, on state: PanelState) {
+    guard let page else { return }
+    switch page {
+    case .root: state.nav.stack = [.root]
+    case .services: state.nav.stack = [.root, .services]
+    case .catalogue: state.nav.stack = [.root, .services, .catalogue]
+    case .add(let kind):
+        state.draft = AddDraft(providerID: kind)
+        state.nav.stack = [.root, .services, .catalogue, .add(kind: kind)]
+    case .custom: state.nav.stack = [.root, .services, .catalogue, .custom]
+    case .menuBar: state.nav.stack = [.root, .menuBar]
+    case .general: state.nav.stack = [.root, .general]
+    case .history: state.nav.stack = [.root, .history]
+    }
 }
 
 /// `AIMeter --menushot out.png` opens the real dropdown — a genuine `NSMenu`,
@@ -384,35 +416,9 @@ func renderMenuShots(to path: String) async {
     CGWarpMouseCursorPosition(CGPoint(x: restore.x, y: screenH - restore.y))
 }
 
-/// `AIMeter --settings out.png` renders the Accounts window offscreen, so its
-/// layout can be checked here rather than by asking someone to go and look.
-@MainActor
-func renderSettings(to path: String, height: CGFloat) {
-    let store = AccountsStore()
-    let host = NSHostingController(rootView: AccountsView(store: store))
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: height),
-                          styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-    window.contentViewController = host
-    window.setContentSize(NSSize(width: 760, height: height))
-    let view = host.view
-    view.layoutSubtreeIfNeeded()
-    // One turn of the runloop so SwiftUI completes its first layout pass.
-    RunLoop.main.run(until: Date().addingTimeInterval(0.6))
-    view.layoutSubtreeIfNeeded()
-    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
-    view.cacheDisplay(in: view.bounds, to: rep)
-    let png = rep.representation(using: NSBitmapImageRep.FileType.png, properties: [:])
-    try? png?.write(to: URL(fileURLWithPath: path))
-    print("wrote \(path)  (\(Int(view.bounds.width))x\(Int(view.bounds.height)) pt)")
-}
-
-if let idx = CommandLine.arguments.firstIndex(of: "--settings"),
-   CommandLine.arguments.count > idx + 1 {
-    let path = CommandLine.arguments[idx + 1]
-    let h = CommandLine.arguments.count > idx + 2 ? (Double(CommandLine.arguments[idx + 2]) ?? 720) : 720
-    NSApplication.shared.setActivationPolicy(.accessory)
-    MainActor.assumeIsolated { renderSettings(to: path, height: CGFloat(h)) }
-    exit(0)
+if CommandLine.arguments.contains("--settings") {
+    fputs("--settings was removed; use --panel --page settings\n", stderr)
+    exit(2)
 }
 
 /// `AIMeter --about out.png` renders the About window offscreen.
@@ -456,23 +462,41 @@ if let idx = CommandLine.arguments.firstIndex(of: "--about"),
 if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
    CommandLine.arguments.count > idx + 1 {
     let path = CommandLine.arguments[idx + 1]
+    let page: SettingsPage? = {
+        guard let pageIndex = CommandLine.arguments.firstIndex(of: "--page"),
+              CommandLine.arguments.count > pageIndex + 1 else { return nil }
+        switch CommandLine.arguments[pageIndex + 1] {
+        case "usage": return nil
+        case "settings": return .root
+        case "services": return .services
+        case "catalogue": return .catalogue
+        case "add": return .add(kind: "openrouter")
+        case "custom": return .custom
+        case "menubar": return .menuBar
+        case "general": return .general
+        case "history": return .history
+        default:
+            fputs("unknown --page; use usage|settings|services|catalogue|add|menubar|general|history\n", stderr)
+            exit(2)
+        }
+    }()
     // A hosted SwiftUI view can draw only after AppKit has an
     // application/appearance. In a headless diagnostic invocation that is not
     // created by the normal app startup path, so make it explicit just as
-    // --settings and --menushot do - needed for the demo fixtures too now
+    // --about and --menushot do - needed for the demo fixtures too now
     // that they render the real `PanelView`, not a bare NSView.
     NSApplication.shared.setActivationPolicy(.accessory)
     if CommandLine.arguments.contains("--demo-high") || CommandLine.arguments.contains("--demo-contrast") ||
        CommandLine.arguments.contains("--demo-expired") {
         // No fetch is involved in a fixture.  Calling it synchronously avoids
         // depending on an application run loop merely to render an NSBitmap.
-        MainActor.assumeIsolated { renderPanelDemo(to: path) }
+        MainActor.assumeIsolated { renderPanelDemo(to: path, page: page) }
         exit(0)
     }
     var done = false
     // A semaphore would deadlock here: renderPanel needs the main actor, and
     // the main thread is what would be blocked waiting for it.
-    Task { @MainActor in await renderPanel(to: path); done = true }
+    Task { @MainActor in await renderPanel(to: path, page: page); done = true }
     while !done { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
     exit(0)
 }

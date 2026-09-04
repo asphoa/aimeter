@@ -21,6 +21,7 @@ enum RingIcon {
     static let dotCentre = CGPoint(x: 15.6, y: 2.6)
     static let numeralGap: CGFloat = 5
     static let numeralWidth: CGFloat = 34   // room for "100%" at 12pt semibold
+    static let trackAlpha: CGFloat = 0.22
 
     enum Band: Equatable { case ink, warn, alarm }
 
@@ -79,7 +80,7 @@ enum RingIcon {
 
     private static func arcColour(_ band: Band) -> NSColor {
         switch band {
-        case .ink:   return .labelColor
+        case .ink:   return Palette.colour(Palette.ink)
         case .warn:  return Palette.colour(Palette.warn)
         case .alarm: return Palette.colour(Palette.alarm)
         }
@@ -128,7 +129,7 @@ enum RingIcon {
             if let numeral = model.numeral {
                 let attrs: [NSAttributedString.Key: Any] = [
                     .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-                    .foregroundColor: NSColor.labelColor
+                    .foregroundColor: Palette.colour(Palette.ink)
                 ]
                 let str = NSAttributedString(string: numeral, attributes: attrs)
                 let sz = str.size()
@@ -145,7 +146,7 @@ enum RingIcon {
         let path = NSBezierPath(ovalIn: NSRect(x: centre.x - radius, y: canvas - centre.y - radius,
                                                width: radius * 2, height: radius * 2))
         path.lineWidth = stroke
-        NSColor.labelColor.withAlphaComponent(0.14).setStroke()
+        Palette.colour(Palette.ink).withAlphaComponent(trackAlpha).setStroke()
         path.stroke()
     }
 
