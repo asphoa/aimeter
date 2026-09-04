@@ -104,6 +104,28 @@ func runOnce(manual: Bool = false, record: Bool = false) async {
     }
 }
 
+func runRecipeTest(_ id: String) async {
+    setbuf(stdout, nil)
+    let cfg = Config.load(); L.current = cfg.language
+    guard let recipe = cfg.recipes.first(where: { $0.id == id }) else {
+        print("ERR  \(L.t("rc.not.found", id))"); return
+    }
+    let account = cfg.accounts(recipe.id, fallback: []).first ?? AccountSpec(name: recipe.name)
+    guard let pin = recipe.fetch.method == "none" ? RecipePin.Pin() : RecipePin.read(recipe.id) else {
+        print("ERR  \(L.t("rc.reapprove"))"); return
+    }
+    switch await RecipeFetch.test(recipe, account: account, pin: pin) {
+    case .failure(let fail): print("ERR  \(fail.message)")
+    case .success(let result):
+        print(result.meta.request)
+        print("status \(result.meta.status.map(String.init) ?? "—") · \(result.meta.bytes) bytes · "
+              + String(format: "%.0f ms", result.meta.elapsed * 1000))
+        for gauge in result.reading.gauges { print("\(gauge.label): \(gauge.text)") }
+        for line in result.reading.lines { print(line) }
+        print(result.rawPreview)
+    }
+}
+
 /// Renders one NSImage into a PNG at `scale`, optionally forcing a light or
 /// dark `NSAppearance` around the draw (`--icon`'s light/dark backgrounds) and
 /// a solid background colour behind it.
@@ -314,9 +336,24 @@ private func setPanelPage(_ page: SettingsPage?, on state: PanelState) {
     case .services: state.nav.stack = [.root, .services]
     case .catalogue: state.nav.stack = [.root, .services, .catalogue]
     case .add(let kind):
-        state.draft = AddDraft(providerID: kind)
+        state.builtinDraft = AddDraft(providerID: kind)
         state.nav.stack = [.root, .services, .catalogue, .add(kind: kind)]
-    case .custom: state.nav.stack = [.root, .services, .catalogue, .custom]
+    case .custom:
+        if state.draft == nil { state.draft = RecipeDraft() }
+        if CommandLine.arguments.contains("--demo-tested") {
+            var draft = state.draft!
+            draft.id = "typhoon"; draft.name = "Typhoon"; draft.baseURL = "https://api.opentyphoon.ai"
+            var reading = Reading(id: "typhoon", title: "Typhoon")
+            reading.gauges = [Gauge(label: "Balance", percent: nil, text: "$12.40", resetsAt: nil)]
+            draft.tested = RecipeTestResult(reading: reading,
+                meta: RecipeFetchMeta(request: "GET https://api.opentyphoon.ai/v1/credits",
+                                      status: 200, bytes: 84, elapsed: 0.184,
+                                      contentType: "application/json", snapshotAt: nil),
+                rawPreview: #"{"credits":12.4,"renews_at":"2026-09-06T00:00:00Z"}"#,
+                suggestions: ["renews_at"])
+            state.draft = draft
+        }
+        state.nav.stack = [.root, .services, .catalogue, .custom]
     case .menuBar: state.nav.stack = [.root, .menuBar]
     case .general: state.nav.stack = [.root, .general]
     case .history: state.nav.stack = [.root, .history]
@@ -476,7 +513,7 @@ if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
         case "general": return .general
         case "history": return .history
         default:
-            fputs("unknown --page; use usage|settings|services|catalogue|add|menubar|general|history\n", stderr)
+            fputs("unknown --page; use usage|settings|services|catalogue|add|custom|menubar|general|history\n", stderr)
             exit(2)
         }
     }()
@@ -518,6 +555,14 @@ if let idx = CommandLine.arguments.firstIndex(of: "--icon"),
     Task { await renderIcon(to: path); sem.signal() }
     sem.wait()
     exit(0)
+}
+
+if let idx = CommandLine.arguments.firstIndex(of: "--recipe-test"),
+   CommandLine.arguments.count > idx + 1 {
+    let id = CommandLine.arguments[idx + 1]
+    let sem = DispatchSemaphore(value: 0)
+    Task { await runRecipeTest(id); sem.signal() }
+    sem.wait(); exit(0)
 }
 
 if let idx = CommandLine.arguments.firstIndex(of: "--export-history") {

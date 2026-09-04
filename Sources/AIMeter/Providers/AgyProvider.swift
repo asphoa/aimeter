@@ -38,9 +38,10 @@ final class AgyProvider: Provider, @unchecked Sendable {
         // manual-only. A paused account is skipped by the timer (that is
         // what "paused" means) but never by a manual click: "Check now" is
         // exactly the escape hatch a pause exists to wait for.
-        let skipForConcurrency = !manual && AgyProvider.agyAlreadyRunning()
+        let approvedBinary = AgyTUI.binary(cfg.agyBinary.isEmpty ? nil : cfg.agyBinary)
+        let skipForConcurrency = !manual && approvedBinary.map(CommandRun.isRunning(binary:)) == true
         if cfg.agyQuotaViaPrint, manual || !paused, !skipForConcurrency,
-           let bin = AgyTUI.binary(cfg.agyBinary.isEmpty ? nil : cfg.agyBinary),
+           let bin = approvedBinary,
            let home = trustedHome(a.home ?? "~", marker: ".gemini/antigravity-cli") {
             if let reading = await printQuota(binary: bin, home: home, account: a.name) {
                 AgyProvider.clearPause(a.name)
@@ -157,23 +158,6 @@ final class AgyProvider: Provider, @unchecked Sendable {
 
     private static func clearPause(_ account: String) {
         try? FileManager.default.removeItem(atPath: pauseMarkerPath(account))
-    }
-
-    /// Concurrency between two agy processes sharing a HOME is untested -
-    /// print mode may bind the same local port the TUI does. A scheduled
-    /// refresh backs off rather than find out; a person pressing "Check now"
-    /// is deciding that risk for themselves, same as AgyTUI already lets
-    /// them.
-    private static func agyAlreadyRunning() -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        p.arguments = ["-x", "agy"]
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        p.standardInput = FileHandle.nullDevice
-        do { try p.run() } catch { return false }
-        p.waitUntilExit()
-        return p.terminationStatus == 0
     }
 
     // MARK: - manual-only fallback: the pty screen-scrape

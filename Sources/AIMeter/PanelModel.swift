@@ -115,13 +115,14 @@ enum PanelModelBuilder {
     }
 
     private static func buildPrimary(id: String, readings: [String: [Reading]], now: Date) -> PanelModel.Primary {
-        let title = title(for: id)
+        let fallbackTitle = title(for: id)
         guard let raw = readings[id], !raw.isEmpty else {
-            return PanelModel.Primary(providerId: id, title: title, hasData: false, state: .off,
+            return PanelModel.Primary(providerId: id, title: fallbackTitle, hasData: false, state: .off,
                                       ageText: nil, heroPercent: nil, heroText: "—", windowLabel: "",
                                       resetText: nil, resetsAt: nil, failureMessage: nil, chips: [])
         }
         let rows = Reading.asOfNow(raw)
+        let title = rows.first?.title ?? fallbackTitle
         let state = rows.map(\.state).max() ?? .off
         if let failed = rows.first(where: { $0.state == .failure }) {
             return PanelModel.Primary(providerId: id, title: title, hasData: true, state: .failure,
@@ -177,7 +178,7 @@ enum PanelModelBuilder {
                                            now: Date) -> PanelModel.SecondaryCard? {
         guard let raw = readings[id], !raw.isEmpty else { return nil }
         let rows = Reading.asOfNow(raw)
-        let title = title(for: id)
+        let title = rows.first?.title ?? title(for: id)
         let state = rows.map(\.state).max() ?? .off
 
         if let failed = rows.first(where: { $0.state == .failure }) {

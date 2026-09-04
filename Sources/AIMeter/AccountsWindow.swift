@@ -85,6 +85,48 @@ final class SettingsStore: ObservableObject {
         persist()
     }
 
+    func removeRecipe(_ id: String) {
+        for spec in cfg.accounts[id] ?? [] {
+            if let service = spec.keychainService, service.hasPrefix("AIMeter · ") {
+                Credential.delete(service: service)
+            }
+        }
+        RecipePin.delete(id)
+        cfg.accounts[id] = nil
+        cfg.recipes.removeAll { $0.id == id }
+        cfg.enabled[id] = nil; cfg.intervals[id] = nil
+        persist()
+    }
+
+    func addRecipe(_ recipe: Recipe, account: AccountSpec) {
+        cfg.recipes.append(recipe)
+        cfg.accounts[recipe.id] = [account]
+        cfg.enabled[recipe.id] = true
+        cfg.intervals[recipe.id] = recipe.interval
+        persist()
+    }
+
+    func convertLegacy(_ index: Int) -> Bool {
+        guard var old = cfg.accounts["generic"], old.indices.contains(index) else { return false }
+        let account = old[index]
+        guard let base = Credential.approvedBase(account) else { return false }
+        let baseID = account.name.lowercased().replacingOccurrences(
+            of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        var id = Recipe.validID(baseID) && !Recipe.reservedIDs.contains(baseID) ? baseID : "recipe"
+        var n = 2
+        while cfg.recipes.contains(where: { $0.id == id }) || Recipe.reservedIDs.contains(id) {
+            id = "\(baseID.isEmpty ? "recipe" : baseID)-\(n)"; n += 1
+        }
+        var recipe = Recipe.legacy(account)
+        recipe.id = id; recipe.name = account.name; recipe.legacy = false; recipe.fetch.baseURL = base
+        guard RecipePin.write(recipe) else { return false }
+        old.remove(at: index); cfg.accounts["generic"] = old
+        cfg.recipes.append(recipe); cfg.accounts[id] = [account]
+        persist()
+        return true
+    }
+
     func rename(_ provider: String, _ index: Int, to newName: String) {
         guard var list = cfg.accounts[provider], list.indices.contains(index) else { return }
         let trimmed = newName.trimmingCharacters(in: .whitespaces)
@@ -132,16 +174,21 @@ final class SettingsStore: ObservableObject {
         let k = Self.key(provider, spec.name)
         busy.insert(k)
         results[k] = nil
+        let recipes = cfg.recipes
         Task { @MainActor in
-            let reading = await Self.probe(provider: provider, spec: spec)
+            let reading = await Self.probe(provider: provider, spec: spec, recipes: recipes)
             busy.remove(k)
             results[k] = Self.summarise(reading)
         }
     }
 
-    nonisolated static func probe(provider: String, spec: AccountSpec) async -> Reading? {
+    // Recipes must ride along: a recipe-backed provider only exists when
+    // `cfg.recipes` names it, so probing with a bare Config() finds nothing.
+    nonisolated static func probe(provider: String, spec: AccountSpec,
+                                  recipes: [Recipe] = []) async -> Reading? {
         var one = Config()
         one.accounts = [provider: [spec]]
+        one.recipes = recipes
         return await buildProviders(one).first { $0.id == provider }?.fetchAll(manual: true).first
     }
 

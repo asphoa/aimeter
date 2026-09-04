@@ -146,20 +146,39 @@ struct ServicesView: View {
     @ObservedObject var store: SettingsStore
 
     private var IDs: [String] {
-        let custom = store.cfg.accounts.keys.filter { !SettingsSubtitle.serviceIDs.contains($0) }.sorted()
-        return SettingsSubtitle.serviceIDs + custom
+        var ids = SettingsSubtitle.serviceIDs
+        if !(store.cfg.accounts["generic"] ?? []).isEmpty { ids.append("generic") }
+        ids.append(contentsOf: store.cfg.recipes.map(\.id).sorted())
+        return ids
     }
 
     var body: some View {
         SettingsPageFrame(title: L.t("s.services"), back: { state.nav.pop() }) {
             VStack(spacing: 9) {
-                if let draft = state.draft {
+                ForEach(store.cfg.loadWarnings, id: \.self) { warning in
+                    Text(warning).font(.system(size: 10))
+                        .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8).background(RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(nsColor: .controlBackgroundColor)))
+                }
+                if state.draft != nil {
+                    HStack {
+                        Text(L.t("rc.draft"))
+                            .font(.system(size: 10)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                        Spacer()
+                        Button(L.t("s.resume")) { state.nav.push(.custom) }
+                        Button(L.t("s.discard")) { state.draft = nil }
+                    }.padding(8).background(RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor)))
+                }
+                if let draft = state.builtinDraft {
                     HStack {
                         Text(L.t("s.draft", PanelModelBuilder.title(for: draft.providerID)))
                             .font(.system(size: 10)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                         Spacer()
                         Button(L.t("s.resume")) { state.nav.push(.add(kind: draft.providerID)) }
-                        Button(L.t("s.discard")) { state.draft = nil }
+                        Button(L.t("s.discard")) { state.builtinDraft = nil }
                     }
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 8)
@@ -184,7 +203,11 @@ struct ServiceCardView: View {
     @ObservedObject var store: SettingsStore
     @State private var expanded = false
 
-    private var title: String { PanelModelBuilder.title(for: providerID) }
+    private var recipe: Recipe? { store.cfg.recipes.first { $0.id == providerID } }
+    private var title: String {
+        if providerID == "generic" { return L.t("rc.legacy.title") }
+        return recipe?.name ?? PanelModelBuilder.title(for: providerID)
+    }
     private var accounts: [AccountSpec] { store.accounts(providerID) }
 
     var body: some View {
@@ -192,7 +215,8 @@ struct ServiceCardView: View {
             Button { expanded.toggle() } label: {
                 HStack(spacing: 9) {
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(Color(nsColor: Palette.serviceColour(providerID)))
+                        .fill(Color(nsColor: recipe.flatMap { NSColor(hex: $0.colour) }
+                            ?? Palette.serviceColour(providerID)))
                         .frame(width: 8, height: 30)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(title).font(.system(size: 12, weight: .semibold))
@@ -223,12 +247,21 @@ struct ServiceCardView: View {
                 ForEach(Array(accounts.enumerated()), id: \.offset) { index, account in
                     AccountSettingsRow(providerID: providerID, index: index, account: account,
                                        store: store)
+                    if providerID == "generic" {
+                        Button(L.t("rc.convert")) { _ = store.convertLegacy(index) }
+                            .font(.system(size: 10))
+                    }
                 }
 
                 if let kind = ProviderKind.find(providerID), providerID != "claude" {
                     Button(accounts.isEmpty ? L.t("s.add") : L.t("s.addaccount")) {
-                        state.draft = AddDraft(providerID: kind.id)
+                        state.builtinDraft = AddDraft(providerID: kind.id)
                         state.nav.push(.add(kind: kind.id))
+                    }
+                }
+                if recipe != nil {
+                    Button(L.t("rc.remove.recipe"), role: .destructive) {
+                        store.removeRecipe(providerID)
                     }
                 }
             }
@@ -240,6 +273,10 @@ struct ServiceCardView: View {
     }
 
     private var sourceSummary: String {
+        if providerID == "generic" { return L.t("rc.legacy.source") }
+        if let recipe {
+            return L.t("rc.source.\(recipe.credential.source)")
+        }
         if providerID == "codex" { return L.t("s.src.codex") }
         if providerID == "agy" { return L.t("s.src.agy", L.t("s.hourly")) }
         if providerID == "local" { return L.t("s.src.local") }
@@ -328,6 +365,14 @@ struct CatalogueView: View {
                 }
                 simpleCatalogueRow("local", source: L.t("s.src.local"))
                 simpleCatalogueRow("cursor", source: L.t("s.src.cursor"))
+                Divider().padding(.vertical, 3)
+                Text(L.t("rc.templates")).font(.system(size: 11, weight: .semibold))
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                    templateCard(L.t("rc.template.http"), icon: "network", method: "http")
+                    templateCard(L.t("rc.template.cli"), icon: "terminal", method: "cli")
+                    templateCard(L.t("rc.template.file"), icon: "doc.text", method: "file")
+                    templateCard(L.t("rc.template.custom"), icon: "slider.horizontal.3", method: "http")
+                }
             }
         }
     }
@@ -346,7 +391,7 @@ struct CatalogueView: View {
             Spacer()
             if count == 0 || !oneOnly {
                 Button(count == 0 ? L.t("s.add") : L.t("s.addanother")) {
-                    state.draft = AddDraft(providerID: kind.id)
+                    state.builtinDraft = AddDraft(providerID: kind.id)
                     state.nav.push(.add(kind: kind.id))
                 }
             }
@@ -385,6 +430,270 @@ struct CatalogueView: View {
         .padding(9)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
     }
+
+    private func templateCard(_ title: String, icon: String, method: String) -> some View {
+        Button {
+            var draft = RecipeDraft(); draft.method = method
+            if method == "cli" { draft.credentialSource = "none"; draft.gaugePath = "$.usage" }
+            if method == "file" { draft.credentialSource = "none"; draft.gaugePath = "$.rate_limits" }
+            state.draft = draft; state.nav.push(.custom)
+        } label: {
+            VStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 16))
+                Text(title).font(.system(size: 10, weight: .medium))
+            }.frame(maxWidth: .infinity).padding(.vertical, 10)
+                .background(RoundedRectangle(cornerRadius: 9)
+                    .fill(Color(nsColor: .controlBackgroundColor)))
+        }.buttonStyle(.plain)
+    }
+}
+
+struct CustomRecipeView: View {
+    @ObservedObject var state: PanelState
+    @ObservedObject var store: SettingsStore
+    @State private var problem = ""
+    @State private var testing = false
+
+    var body: some View {
+        SettingsPageFrame(title: L.t("rc.custom.title"), back: { state.nav.pop() }) {
+            if let draft = binding {
+                VStack(alignment: .leading, spacing: 10) {
+                    Group {
+                        Text(L.t("rc.identity")).font(.system(size: 11, weight: .semibold))
+                        TextField(L.t("rc.id"), text: draft.id, prompt: Text("typhoon"))
+                        TextField(L.t("w.name"), text: draft.name, prompt: Text("Typhoon"))
+                        HStack {
+                            TextField(L.t("rc.colour"), text: draft.colour)
+                            TextField(L.t("rc.symbol"), text: draft.symbol)
+                        }
+                    }
+                    Divider()
+                    Group {
+                        Text(L.t("rc.credential")).font(.system(size: 11, weight: .semibold))
+                        Picker(L.t("rc.credential"), selection: draft.credentialSource) {
+                            Text(L.t("rc.source.keychain")).tag("keychain")
+                            Text(L.t("rc.source.keyFile")).tag("keyFile")
+                            Text(L.t("rc.source.env")).tag("env")
+                            Text(L.t("rc.source.appKeychain")).tag("appKeychain")
+                            Text(L.t("rc.source.none")).tag("none")
+                        }
+                        credentialFields(draft)
+                    }
+                    Divider()
+                    Group {
+                        Text(L.t("rc.fetch")).font(.system(size: 11, weight: .semibold))
+                        Picker(L.t("rc.method"), selection: draft.method) {
+                            Text("HTTP").tag("http"); Text(L.t("rc.command")).tag("cli")
+                            Text(L.t("rc.file")).tag("file"); Text(L.t("rc.none")).tag("none")
+                        }.pickerStyle(.segmented)
+                        fetchFields(draft)
+                    }
+                    Divider()
+                    Group {
+                        Text(L.t("rc.mapping")).font(.system(size: 11, weight: .semibold))
+                        TextField(L.t("rc.gauge.label"), text: draft.gaugeLabel)
+                        Picker(L.t("rc.map.mode"), selection: draft.mapMode) {
+                            Text(L.t("rc.map.value")).tag("value")
+                            Text(L.t("rc.map.usedlimit")).tag("usedLimit")
+                            Text(L.t("rc.map.remaininglimit")).tag("remainingLimit")
+                            Text(L.t("rc.map.remaining")).tag("remaining")
+                        }
+                        mapFields(draft)
+                        HStack {
+                            Picker(L.t("rc.unit"), selection: draft.unit) {
+                                ForEach(["percent", "fraction", "usd", "cny", "thb", "tokens", "bytes", "text"], id: \.self) { Text($0).tag($0) }
+                            }
+                            Picker(L.t("rc.window"), selection: draft.window) {
+                                Text("5h").tag("5h"); Text(L.t("rc.weekly")).tag("weekly")
+                                Text(L.t("rc.model")).tag("model"); Text(L.t("rc.other")).tag("other")
+                            }
+                        }
+                        TextField(L.t("rc.resets"), text: draft.resetsAt, prompt: Text("$.renews_at"))
+                        HStack {
+                            TextField(L.t("rc.line.path"), text: draft.linePath, prompt: Text("$.plan"))
+                            TextField(L.t("rc.line.prefix"), text: draft.linePrefix, prompt: Text("Plan: "))
+                        }
+                    }
+                    if !problem.isEmpty {
+                        Text(problem).font(.system(size: 10))
+                            .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
+                    }
+                    if testing { ProgressView().controlSize(.small) }
+                    if let result = draft.wrappedValue.tested {
+                        TestResultView(result: result) { key in state.draft?.resetsAt = "$.\(key)" }
+                    }
+                    HStack {
+                        Button(L.t("s.discard")) { state.draft = nil; state.nav.pop() }
+                        Spacer()
+                        Button(L.t("w.test")) { test(draft.wrappedValue) }.disabled(testing)
+                        Button(L.t("w.save")) { save(draft.wrappedValue) }.buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+        }.onAppear { if state.draft == nil { state.draft = RecipeDraft() } }
+    }
+
+    private var binding: Binding<RecipeDraft>? {
+        guard state.draft != nil else { return nil }
+        return Binding(get: { state.draft! }, set: { state.draft = $0 })
+    }
+
+    @ViewBuilder private func credentialFields(_ draft: Binding<RecipeDraft>) -> some View {
+        switch draft.wrappedValue.credentialSource {
+        case "keychain":
+            SecureField(L.t("rc.paste.key"), text: draft.credential)
+            Text(L.t("rc.saved.keychain")).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+        case "keyFile": pathPicker(L.t("rc.choose.keyfile"), path: draft.credentialPath, directory: false)
+        case "env": TextField(L.t("rc.env.name"), text: draft.credentialName, prompt: Text("TYPHOON_API_KEY"))
+        case "appKeychain":
+            TextField(L.t("rc.app.item"), text: draft.appKeychainService)
+            TextField(L.t("rc.json.field"), text: draft.jsonField)
+        default: Text(L.t("rc.no.credential")).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+        }
+    }
+
+    @ViewBuilder private func fetchFields(_ draft: Binding<RecipeDraft>) -> some View {
+        switch draft.wrappedValue.method {
+        case "http":
+            TextField(L.t("rc.host"), text: draft.baseURL, prompt: Text("https://api.example.com"))
+            HStack {
+                Picker(L.t("rc.verb"), selection: draft.verb) { Text("GET").tag("GET"); Text("POST").tag("POST") }
+                TextField(L.t("rc.path"), text: draft.path, prompt: Text("/v1/credits"))
+            }
+            Picker(L.t("rc.auth"), selection: draft.auth) {
+                Text("Bearer").tag("bearer"); Text(L.t("rc.header")).tag("header")
+                Text(L.t("rc.query")).tag("query"); Text(L.t("rc.none")).tag("none")
+            }
+            if draft.wrappedValue.auth == "header" || draft.wrappedValue.auth == "query" {
+                TextField(L.t("rc.auth.name"), text: draft.authName)
+            }
+            if draft.wrappedValue.verb == "POST" {
+                TextField(L.t("rc.body"), text: draft.bodyJSON, prompt: Text("{}"))
+            }
+        case "cli":
+            pathPicker(L.t("rc.choose.command"), path: draft.binary, directory: false)
+            TextField(L.t("rc.args"), text: draft.args)
+        case "file":
+            pathPicker(L.t("rc.choose.folder"), path: draft.folder, directory: true)
+            TextField(L.t("rc.glob"), text: draft.glob)
+        default: Text(L.t("rc.no.request")).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+        }
+    }
+
+    @ViewBuilder private func mapFields(_ draft: Binding<RecipeDraft>) -> some View {
+        switch draft.wrappedValue.mapMode {
+        case "usedLimit":
+            TextField(L.t("rc.used.path"), text: draft.usedPath)
+            TextField(L.t("rc.limit.path"), text: draft.limitPath)
+        case "remainingLimit":
+            TextField(L.t("rc.remaining.path"), text: draft.remainingPath)
+            TextField(L.t("rc.limit.path"), text: draft.limitPath)
+        case "remaining": TextField(L.t("rc.remaining.path"), text: draft.remainingPath)
+        default: TextField(L.t("rc.value.path"), text: draft.gaugePath)
+        }
+    }
+
+    private func pathPicker(_ label: String, path: Binding<String>, directory: Bool) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(label).font(.system(size: 10))
+                Text(path.wrappedValue.isEmpty ? "—" : (path.wrappedValue as NSString).lastPathComponent)
+                    .font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+            }
+            Spacer(); Button(L.t("w.choose")) {
+                state.onDismissalSuspended(true); defer { state.onDismissalSuspended(false) }
+                let panel = NSOpenPanel(); panel.canChooseFiles = !directory
+                panel.canChooseDirectories = directory; panel.allowsMultipleSelection = false
+                panel.showsHiddenFiles = true
+                if panel.runModal() == .OK, let url = panel.url { path.wrappedValue = url.path }
+            }
+        }
+    }
+
+    private func validation(_ draft: RecipeDraft) -> (Recipe, RecipePin.Pin)? {
+        let recipe = draft.recipe()
+        guard !recipe.name.trimmingCharacters(in: .whitespaces).isEmpty else { problem = L.t("w.needname"); return nil }
+        guard Recipe.validID(recipe.id), !Recipe.reservedIDs.contains(recipe.id) else { problem = L.t("rc.invalid.id"); return nil }
+        guard !store.cfg.recipes.contains(where: { $0.id == recipe.id }) else { problem = L.t("w.dup"); return nil }
+        guard let pin = RecipePin.proposed(recipe) else { problem = L.t("rc.invalid.destination"); return nil }
+        if recipe.fetch.method == "file", !RecipeFetch.fileGlobIsSafe(recipe.fetch.glob ?? "") {
+            problem = L.t("rc.invalid.glob"); return nil
+        }
+        return (recipe, pin)
+    }
+
+    private func account(_ draft: RecipeDraft, recipe: Recipe, service: String? = nil) -> AccountSpec {
+        var account = AccountSpec(name: draft.name)
+        switch draft.credentialSource {
+        case "keychain": account.keychainService = service ?? RecipePin.service(recipe.id) + " · credential"
+        case "keyFile": account.keyFile = draft.credentialPath; account.keyJSONField = draft.jsonField.isEmpty ? nil : draft.jsonField
+        default: break
+        }
+        if recipe.fetch.homeFromAccount { account.home = expand("~") }
+        return account
+    }
+
+    private func test(_ draft: RecipeDraft) {
+        guard let (recipe, pin) = validation(draft) else { return }
+        problem = ""; testing = true
+        let temporary = "AIMeter · recipe-test · \(UUID().uuidString)"
+        let useTemporary = draft.credentialSource == "keychain"
+        if useTemporary, !draft.credential.isEmpty { _ = Credential.store(draft.credential, service: temporary) }
+        let spec = account(draft, recipe: recipe, service: useTemporary ? temporary : nil)
+        Task { @MainActor in
+            defer { if useTemporary { Credential.delete(service: temporary) }; testing = false }
+            switch await RecipeFetch.test(recipe, account: spec, pin: pin) {
+            case .success(let result): state.draft?.tested = result; problem = ""
+            case .failure(let fail): problem = fail.message
+            }
+        }
+    }
+
+    private func save(_ draft: RecipeDraft) {
+        guard let (recipe, _) = validation(draft) else { return }
+        state.onDismissalSuspended(true); defer { state.onDismissalSuspended(false) }
+        guard RecipePin.write(recipe) else { problem = L.t("k.denied"); return }
+        let spec = account(draft, recipe: recipe)
+        if draft.credentialSource == "keychain", !draft.credential.isEmpty,
+           let service = spec.keychainService,
+           !Credential.store(draft.credential, service: service) {
+            RecipePin.delete(recipe.id); problem = L.t("k.denied"); return
+        }
+        store.addRecipe(recipe, account: spec)
+        store.test(recipe.id, spec)
+        state.draft = nil; state.nav.stack = [.root, .services]
+    }
+}
+
+struct TestResultView: View {
+    let result: RecipeTestResult
+    let onSuggestion: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Circle().fill(Color(nsColor: stateColour(result.reading.state))).frame(width: 8, height: 8)
+                Text(result.meta.request).font(.system(size: 10, weight: .medium)).lineLimit(2)
+            }
+            Text(L.t("rc.meta", result.meta.status.map(String.init) ?? "—", result.meta.bytes,
+                     Int(result.meta.elapsed * 1000), result.meta.contentType ?? "—"))
+                .font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+            ForEach(Array(result.reading.gauges.enumerated()), id: \.offset) { _, gauge in
+                Text("\(gauge.label): \(gauge.text)").font(.system(size: 10))
+            }
+            if !result.suggestions.isEmpty {
+                Text(L.t("rc.suggestions")).font(.system(size: 9, weight: .semibold))
+                FlowLayout(spacing: 5, lineSpacing: 4) {
+                    ForEach(result.suggestions, id: \.self) { key in
+                        Button(key) { onSuggestion(key) }.font(.system(size: 9))
+                    }
+                }
+            }
+            Text(result.rawPreview).font(.system(size: 9, design: .monospaced))
+                .textSelection(.enabled).lineLimit(8)
+        }.padding(8).background(RoundedRectangle(cornerRadius: 8)
+            .fill(Color(nsColor: .controlBackgroundColor)))
+    }
 }
 
 struct AddBuiltinView: View {
@@ -417,7 +726,7 @@ struct AddBuiltinView: View {
                             .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
                     }
                     HStack {
-                        Button(L.t("s.discard")) { state.draft = nil; state.nav.pop() }
+                        Button(L.t("s.discard")) { state.builtinDraft = nil; state.nav.pop() }
                         Spacer()
                         Button(L.t("w.save")) { save() }.buttonStyle(.borderedProminent)
                     }
@@ -425,13 +734,13 @@ struct AddBuiltinView: View {
             }
         }
         .onAppear {
-            if state.draft?.providerID != providerID { state.draft = AddDraft(providerID: providerID) }
+            if state.builtinDraft?.providerID != providerID { state.builtinDraft = AddDraft(providerID: providerID) }
         }
     }
 
     private var draftBinding: Binding<AddDraft>? {
-        guard state.draft != nil else { return nil }
-        return Binding(get: { state.draft! }, set: { state.draft = $0 })
+        guard state.builtinDraft != nil else { return nil }
+        return Binding(get: { state.builtinDraft! }, set: { state.builtinDraft = $0 })
     }
 
     @ViewBuilder
@@ -478,7 +787,7 @@ struct AddBuiltinView: View {
     }
 
     private func save() {
-        guard let draft = state.draft else { return }
+        guard let draft = state.builtinDraft else { return }
         let name = draft.name.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { problem = L.t("w.needname"); return }
         guard !store.exists(providerID, name) else { problem = L.t("w.dup"); return }
@@ -519,7 +828,7 @@ struct AddBuiltinView: View {
             account.balancePath = draft.balancePath
         }
         store.add(providerID, account)
-        state.draft = nil
+        state.builtinDraft = nil
         state.nav.pop()
     }
 }
@@ -529,8 +838,13 @@ struct MenuBarPageView: View {
     @ObservedObject var store: SettingsStore
 
     private var primaryOptions: [(String, String)] {
-        [("claude", L.t("p.claude")), ("codex", L.t("p.codex"))]
+        let builtins = [("claude", L.t("p.claude")), ("codex", L.t("p.codex"))]
             .filter { store.accounts($0.0).contains { $0.enabled } }
+        let recipes = store.cfg.recipes.filter { recipe in
+            recipe.map.gauges.contains { $0.window == "5h" || $0.window == "weekly" }
+                && store.accounts(recipe.id).contains { $0.enabled }
+        }.map { ($0.id, $0.name) }
+        return builtins + recipes
     }
 
     var body: some View {

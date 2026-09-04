@@ -2,16 +2,18 @@ import AppKit
 import ServiceManagement
 
 func buildProviders(_ cfg: Config) -> [Provider] {
-    let all: [Provider] = [
+    var all: [Provider] = [
         ClaudeProvider(cfg: cfg),
         CodexProvider(cfg: cfg),
         AgyProvider(cfg: cfg),
         OpenRouterProvider(cfg: cfg),
         DeepSeekProvider(cfg: cfg),
-        GenericProvider(cfg: cfg),
         LocalAIProvider(),
         CursorProvider(cfg: cfg)
     ]
+    all.append(contentsOf: cfg.recipes.map { RecipeProvider(recipe: $0, cfg: cfg) })
+    let legacy = cfg.accounts["generic"] ?? []
+    if !legacy.isEmpty { all.append(RecipeProvider(legacyAccounts: legacy, cfg: cfg)) }
     return all.filter { cfg.isEnabled($0.id) }
 }
 

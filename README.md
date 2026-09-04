@@ -111,12 +111,12 @@ nest inside some sandboxed environments. `tools/test.sh` compiles the app's
 source files (everything except `main.swift`, which has its own top-level
 code) together with `tools/tests/*.swift` and runs the result.
 
-It covers pure logic only — no network, no keychain, no subprocess launch —
-so it runs in well under a second. The heaviest coverage is the URL-safety
-guarantee in `GenericProvider` (`approvedHost`/`safeURL`): that a credential's
-destination cannot be redirected by anything in the settings file, including
-the exact attacker payloads found during the security review below. The rest
-covers parsing that has broken silently before — Antigravity's screen capture
+The recipe coverage is pure logic — no network, keychain contents, or vendor
+subprocess is needed — including the URL-safety guarantee now shared by custom
+recipes in `RecipeURL` (`approvedHost`/`safeURL`): a credential's destination
+cannot be redirected by anything in the settings file, including the exact
+attacker payloads found during the security review below. The rest covers
+parsing that has broken silently before — Antigravity's screen capture
 (mixed line endings, ANSI stripping) and its print-mode JSON (against a real
 captured fixture: two groups, four percentages, both reset-time formats), the
 settings file's tolerant decoding of older configs — plus the menu bar strip's
@@ -144,9 +144,11 @@ missed the bug too.
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --panel settings.png --page settings
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --panel services.png --page services
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --panel catalogue.png --page catalogue
+./dist/AIMeter.app/Contents/MacOS/AIMeter --panel custom.png --page custom --demo-tested
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --panel menubar.png --page menubar
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --panel general.png --page general
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --panel history.png --page history
+./dist/AIMeter.app/Contents/MacOS/AIMeter --recipe-test <recipe-id>
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --menushot out.png # the real translucent NSMenu — "menu" style only
 ```
 
@@ -209,10 +211,36 @@ This is the part worth reading before you trust it with your credentials.
   all, because that response carries no account, email, or credential in the
   first place — only percentages and reset times. These are the files most
   likely to be pasted somewhere while troubleshooting.
-- **The settings file is treated as untrusted input.** A custom "Other" service
-  can only use a key you pasted (kept in the keychain) over https — not an
-  arbitrary file path, which would otherwise make it a "read this file, post it
-  to my host" gadget for anyone who could edit that file. The Antigravity CLI —
+- **The settings file is treated as untrusted input.** A recipe can describe an
+  HTTP request, a fixed command invocation, or a read-only snapshot file, but
+  the part that decides *where* it can send or read is approved separately when
+  you press **Save** and stored in AIMeter's keychain under
+  `AIMeter · recipe · <id>`. HTTP recipes pin scheme + host, command recipes pin
+  the executable plus a SHA-256 of the fixed argument array, and file recipes
+  pin the folder. Editing `config.json` afterwards can change an HTTP path, but
+  it cannot change the host; changing a pinned command or folder makes the
+  recipe stop with **Re-approve this recipe**. Public HTTP destinations must be
+  HTTPS; plain HTTP is accepted only for `127.0.0.1` and `localhost`.
+- **Recipe credentials can come from a pasted key, a key file, an environment
+  variable, another app's keychain item, or nowhere at all.** A pasted key is
+  stored in AIMeter's own keychain item and never in `config.json`. A key file
+  or environment variable can be changed by someone who can edit your settings,
+  but its contents can only be sent to the host you already approved. Pinning
+  protects the destination; it does not claim that a mutable file path or
+  environment variable is itself trustworthy. An `appKeychain` source always
+  uses the normal in-process Keychain API, so macOS may show its authorization
+  panel. Recipes can never opt into the special `/usr/bin/security` silent-read
+  allowlist reserved in code for `Claude Code-credentials`.
+- **Recipes do not run a shell or interpolate strings.** HTTP supports GET or
+  POST with a fixed JSON body; the only credential-in-query form is the explicit
+  `auth: query` setting. Redirects are followed only when the destination host
+  is unchanged. Command recipes use `Process.executableURL` directly, a fresh
+  minimal environment, closed stdin, a 30-second ceiling and a 1 MB output
+  limit; executable paths are restricted to the documented install roots and
+  `/usr/bin/security` is explicitly excluded. File recipes are read-only, their
+  glob may not contain `..`, and the resolved file must remain under the pinned
+  folder. Recipes never write files.
+- The Antigravity CLI —
   print mode or the pty fallback — is only ever run from a known install
   location (`AgyTUI.allowedBinaries`), against a HOME that must already exist
   and already contain `.gemini/antigravity-cli` (`trustedHome`), and with a
@@ -271,6 +299,7 @@ the file, `history.html` can be copied anywhere and still renders correctly.
 | **DeepSeek** | `GET api.deepseek.com/user/balance`. This is money, not a percentage, so it has no bar. Also flags peak-hour pricing. | Live |
 | **Local AI** | Ollama on `127.0.0.1:11434`, LM Studio on `127.0.0.1:1234`, and an MLX server (`mlx_lm.server`/`mlx_vlm.server`) on `127.0.0.1:8081`; reports memory held by loaded models. | Live |
 | **Cursor** | Nothing — a link only. Cursor has no public usage API; see the Security section below for why the two undocumented routes were rejected. | — |
+| **Recipe** | A user-defined, pinned HTTP / command / file source mapped through the recipe's JSON fields. The service name, units and reset windows come from that saved recipe; missing fields are warnings, never invented zeroes. | Live for HTTP/command; **snapshot** for file recipes. |
 
 A snapshot ages at a rate that depends on the window, not on the snapshot, and
 one age label cannot speak for both. Fifteen hours off a weekly figure is a
@@ -425,6 +454,15 @@ Nothing requires editing a file.
   for Codex and Antigravity — the folder that acts as that account's home.
 - **Test** runs one account through its real provider and shows the result,
   marked ✓ or ✗ so a working account and a broken one do not look alike.
+- **Recipes** in the Add catalogue cover HTTP JSON, command JSON, latest-file
+  snapshots and a fully custom form. Test shows the actual request/command,
+  status, byte count, elapsed time, content type, mapped gauges, a 600-character
+  redacted response preview, and unmapped top-level fields. Save is allowed
+  before Test; Save pins the destination first, persists the recipe/account,
+  then automatically tests once. Removing a recipe removes its pin and any
+  AIMeter-owned pasted credential for that recipe. Existing `accounts.generic`
+  entries remain untouched and appear as **Other · legacy** until you choose
+  **Convert to recipe**.
 - Every service accepts more than one account. For Codex and Antigravity an
   account is a separate home directory; folders placed in
   `~/.config/aimeter/pools/<service>/` are picked up by auto-detect.
@@ -438,6 +476,47 @@ when you press **Check now** under its own heading in the panel.
 Reasonable settings differ by source: Codex reads local files and costs nothing,
 DeepSeek is a balance that moves slowly, and Claude is the one that spends a
 request per refresh.
+
+### Recipe configuration
+
+The panel writes recipes into `config.json`; the destination pin is deliberately
+not stored there. A compact HTTP example looks like this:
+
+```json
+{
+  "recipes": [{
+    "id": "typhoon",
+    "name": "Typhoon",
+    "colour": "#3A8DDE",
+    "symbol": "bolt",
+    "credential": { "source": "keychain" },
+    "fetch": {
+      "method": "http",
+      "verb": "GET",
+      "baseURL": "https://api.opentyphoon.ai",
+      "path": "/v1/credits",
+      "auth": "bearer",
+      "timeout": 30
+    },
+    "map": {
+      "format": "json",
+      "gauges": [{
+        "label": "Balance",
+        "value": "$.credits",
+        "unit": "usd",
+        "window": "other"
+      }],
+      "lines": []
+    },
+    "interval": 900
+  }]
+}
+```
+
+The path syntax is intentionally small: `$`, `.key`, `[n]`, or a bare key name
+for the existing depth-first lookup behavior. There are no filters, scripts,
+wildcards, or expression evaluation. Recipe IDs use lowercase letters, numbers
+and hyphens; built-in provider IDs are reserved.
 
 ### Choosing what the ring shows
 

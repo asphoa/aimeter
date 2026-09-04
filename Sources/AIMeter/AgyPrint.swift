@@ -24,13 +24,7 @@ enum AgyPrint {
     /// ordinary hiccup from a permission refusal, which is a decision about
     /// *this app's* pause state, not something this file should decide on
     /// its own.
-    struct Attempt {
-        /// nil means the process never completed - it could not be started,
-        /// or had to be killed after `timeout`.
-        var exitCode: Int32?
-        var stdout: Data
-        var stderr: String
-    }
+    typealias Attempt = CommandRun.Attempt
 
     /// Runs the command and returns its raw stdout, or nil if it could not be
     /// started, timed out, or exited non-zero. For the exit code and stderr
@@ -43,70 +37,17 @@ enum AgyPrint {
     /// Runs `agy -p "/usage" --output-format json` and reports what happened.
     /// Blocking; call off the main thread.
     static func attempt(binary: String, home: String, timeout: TimeInterval = 30) -> Attempt {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = ["-p", "/usage", "--output-format", "json"]
-        process.currentDirectoryURL = URL(fileURLWithPath: home)
-        // Built from nothing rather than inherited - same reasoning as
-        // AgyTUI.read and ClaudeCLI.environment: the parent environment can
-        // carry keys or config exported by whatever shell launched this app,
-        // which a quota read has no business seeing.
-        // AGY_CLI_DISABLE_AUTO_UPDATE=1 is what keeps an hourly scheduled
-        // call from ever quietly pulling down a new CLI build - the same
-        // property ClaudeCLI's DISABLE_AUTOUPDATER guards for that CLI.
-        process.environment = [
-            "HOME": home,
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
-            "LANG": ProcessInfo.processInfo.environment["LANG"] ?? "en_US.UTF-8",
-            "AGY_CLI_DISABLE_AUTO_UPDATE": "1"
-        ]
-        // No terminal, and stdin already at EOF: a print-mode command that
-        // somehow decided to ask a question gets an immediate answer rather
-        // than hanging until the timeout.
-        process.standardInput = FileHandle.nullDevice
-        let outPipe = Pipe(), errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-
-        do { try process.run() } catch {
-            return Attempt(exitCode: nil, stdout: Data(), stderr: "")
-        }
-
-        // Drained on other threads so a subprocess that fills either pipe
-        // cannot deadlock against a parent waiting for it to exit - same
-        // pattern as ClaudeCLI.execute.
-        let out = Box(), err = Box()
-        let drained = DispatchGroup()
-        for (pipe, box) in [(outPipe, out), (errPipe, err)] {
-            drained.enter()
-            DispatchQueue.global(qos: .utility).async {
-                box.data = pipe.fileHandleForReading.readDataToEndOfFile()
-                drained.leave()
-            }
-        }
-
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning, Date() < deadline { usleep(50_000) }
-        if process.isRunning {
-            process.terminate()
-            _ = drained.wait(timeout: .now() + 2)
-            // terminate() alone leaves a zombie until something calls
-            // wait() on it - nothing else here ever would. See the same fix
-            // just made to AgyTUI.read.
-            process.waitUntilExit()
-            return Attempt(exitCode: nil, stdout: out.data,
-                           stderr: String(decoding: err.data, as: UTF8.self))
-        }
-        process.waitUntilExit()
-        _ = drained.wait(timeout: .now() + 5)
-
-        let stderrText = String(decoding: err.data, as: UTF8.self)
+        let result = CommandRun.attempt(
+            binary: binary, args: ["-p", "/usage", "--output-format", "json"],
+            home: home, timeout: timeout,
+            environment: ["AGY_CLI_DISABLE_AUTO_UPDATE": "1"],
+            refuseIfRunning: false)
         // Nothing secret in this response - unlike the TUI capture, the
         // print-mode JSON carries no account address or email at all (see
         // the fixture in tools/tests) - so it can be dumped as-is for
         // debugging without redaction.
-        writePrivate(out.data, to: Config.dir + "/agy-print-last.json")
-        return Attempt(exitCode: process.terminationStatus, stdout: out.data, stderr: stderrText)
+        writePrivate(result.stdout, to: Config.dir + "/agy-print-last.json")
+        return result
     }
 
     // MARK: - parsing
@@ -174,11 +115,4 @@ enum AgyPrint {
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return fractional.date(from: s)
     }
-}
-
-/// Somewhere for the reading thread to put what it read - same shape as
-/// ClaudeCLI's private `Drain`, kept as its own type since that one is
-/// private to its own file.
-private final class Box: @unchecked Sendable {
-    var data = Data()
 }

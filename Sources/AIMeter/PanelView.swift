@@ -16,11 +16,13 @@ final class PanelState: ObservableObject {
     @Published var language: Lang = .system
     @Published var loginEnabled: Bool = false
     @Published var animate: Bool = true
-    @Published var draft: AddDraft?
+    @Published var draft: RecipeDraft?
+    @Published var builtinDraft: AddDraft?
 
     init(store: SettingsStore? = nil) {
         self.store = store ?? SettingsStore()
         self.draft = nil
+        self.builtinDraft = nil
     }
 
     var onRefreshAll: () -> Void = {}
@@ -128,8 +130,10 @@ struct PanelView: View {
             SettingsRootView(state: state, store: state.store)
         case .services:
             ServicesView(state: state, store: state.store)
-        case .catalogue, .custom:
+        case .catalogue:
             CatalogueView(state: state, store: state.store)
+        case .custom:
+            CustomRecipeView(state: state, store: state.store)
         case .add(let kind):
             AddBuiltinView(providerID: kind, state: state, store: state.store)
         case .menuBar:
@@ -356,7 +360,7 @@ private struct ChipsFlow: View {
 /// GeometryReader-plus-offset trick needed, and each child is measured at
 /// its own natural size rather than squeezed, which is what keeps a chip's
 /// line from breaking internally.
-private struct FlowLayout: Layout {
+struct FlowLayout: Layout {
     var spacing: CGFloat = 8
     var lineSpacing: CGFloat = 6
 

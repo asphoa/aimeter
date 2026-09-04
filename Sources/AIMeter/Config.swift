@@ -221,6 +221,10 @@ struct Config: Codable {
     var claudeBinary: String = ""
     /// providerId -> accounts. Empty means "autodiscover on next launch".
     var accounts: [String: [AccountSpec]] = [:]
+    /// User-defined providers. Invalid or colliding entries are rejected at
+    /// decode time and described in loadWarnings for the Services page.
+    var recipes: [Recipe] = []
+    var loadWarnings: [String] = []
 
     init() {}
 
@@ -250,6 +254,30 @@ struct Config: Codable {
             ?? def.claudeRefreshViaCLI
         claudeBinary = (try? c.decode(String.self, forKey: .claudeBinary)) ?? def.claudeBinary
         accounts = (try? c.decode([String: [AccountSpec]].self, forKey: .accounts)) ?? def.accounts
+        let decoded = (try? c.decode([Recipe].self, forKey: .recipes)) ?? []
+        var seen = Set<String>()
+        recipes = decoded.filter { recipe in
+            if !Recipe.validID(recipe.id) {
+                loadWarnings.append(L.t("rc.warning.id", recipe.id)); return false
+            }
+            if Recipe.reservedIDs.contains(recipe.id) {
+                loadWarnings.append(L.t("rc.warning.reserved", recipe.id)); return false
+            }
+            if !seen.insert(recipe.id).inserted {
+                loadWarnings.append(L.t("rc.warning.duplicate", recipe.id)); return false
+            }
+            if !["http", "cli", "file", "none"].contains(recipe.fetch.method) {
+                loadWarnings.append(L.t("rc.warning.method", recipe.id, recipe.fetch.method)); return false
+            }
+            return true
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case language, menuBar, history, refreshSeconds, enabled
+        case agyQuotaViaPrint, agyQuotaViaTUI, agyBinary, colours, intervals
+        case agyIntervalMigrated, claudeProbeModel, claudeRefreshViaCLI, claudeBinary
+        case accounts, recipes
     }
 
     static var dir: String { expand("~/.config/aimeter") }
@@ -315,7 +343,9 @@ struct Config: Codable {
     func isEnabled(_ id: String) -> Bool { enabled[id] ?? true }
 
     /// How often this provider is checked, in seconds. 0 = only on request.
-    func interval(_ providerID: String) -> Int { intervals[providerID] ?? refreshSeconds }
+    func interval(_ providerID: String) -> Int {
+        intervals[providerID] ?? recipes.first(where: { $0.id == providerID })?.interval ?? refreshSeconds
+    }
 
     func accounts(_ providerID: String, fallback: [AccountSpec]) -> [AccountSpec] {
         let list = accounts[providerID] ?? fallback

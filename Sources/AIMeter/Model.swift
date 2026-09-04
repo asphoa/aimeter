@@ -219,11 +219,32 @@ enum Fmt {
 }
 
 enum Net {
+    final class SameHostRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        let expectedHost: String?
+        init(expectedHost: String? = nil) { self.expectedHost = expectedHost }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            let original = expectedHost ?? task.originalRequest?.url?.host
+            completionHandler(Net.redirectTarget(originalHost: original, proposed: request))
+        }
+    }
+
+    /// Pure redirect decision shared by the live delegate and its attack-case
+    /// test. A response may move paths, never credentials to another host.
+    static func redirectTarget(originalHost: String?, proposed request: URLRequest) -> URLRequest? {
+        guard let originalHost, let host = request.url?.host,
+              host.caseInsensitiveCompare(originalHost) == .orderedSame else { return nil }
+        return request
+    }
+
     static let session: URLSession = {
         let c = URLSessionConfiguration.ephemeral
         c.timeoutIntervalForRequest = 20
         c.waitsForConnectivity = false
-        return URLSession(configuration: c)
+        return URLSession(configuration: c, delegate: SameHostRedirectDelegate(), delegateQueue: nil)
     }()
 
     static func json(_ req: URLRequest) async throws -> (Any, HTTPURLResponse) {

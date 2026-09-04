@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-// MARK: - GenericProvider: the security property fixed across v1.0.1–v1.0.3
+// MARK: - RecipeURL: the security property fixed across v1.0.1–v1.0.3
 //
 // This is the highest-value coverage in the suite. The bug took three rounds
 // to close (v1.0.1 constrained the credential's source and left its
@@ -11,11 +11,11 @@ import Foundation
 // the code, not by a test. These are the attack payloads from that audit,
 // pinned so a future edit cannot reopen the hole silently.
 
-func testGenericProviderURLSafety() {
+func testRecipeURLSafety() {
     // A legitimate base and path resolve, and the host is exactly the
     // approved one - this is the property everything else is checking for.
-    if let (comps, host) = GenericProvider.approvedHost(from: "https://api.opentyphoon.ai"),
-       let url = GenericProvider.safeURL(comps: comps, host: host, path: "/v1/credits") {
+    if let (comps, host) = RecipeURL.approvedHost(from: "https://api.opentyphoon.ai"),
+       let url = RecipeURL.safeURL(comps: comps, host: host, path: "/v1/credits") {
         T.eq("legit base+path: host", url.host, "api.opentyphoon.ai")
         T.eq("legit base+path: scheme", url.scheme, "https")
         T.eq("legit base+path: path", url.path, "/v1/credits")
@@ -24,8 +24,8 @@ func testGenericProviderURLSafety() {
     }
 
     // Query strings survive without disturbing the host.
-    if let (comps, host) = GenericProvider.approvedHost(from: "https://api.example.com"),
-       let url = GenericProvider.safeURL(comps: comps, host: host, path: "/v1/credits?scope=all") {
+    if let (comps, host) = RecipeURL.approvedHost(from: "https://api.example.com"),
+       let url = RecipeURL.safeURL(comps: comps, host: host, path: "/v1/credits?scope=all") {
         T.eq("query preserved: host", url.host, "api.example.com")
         T.eq("query preserved: query", url.query, "scope=all")
     } else {
@@ -33,18 +33,18 @@ func testGenericProviderURLSafety() {
     }
 
     // approvedHost: only https, only a real host.
-    T.isNil("http base rejected", GenericProvider.approvedHost(from: "http://api.example.com"))
-    T.isNil("scheme-less base rejected", GenericProvider.approvedHost(from: "api.example.com"))
-    T.isNil("empty base rejected", GenericProvider.approvedHost(from: ""))
-    T.isNil("ftp base rejected", GenericProvider.approvedHost(from: "ftp://api.example.com"))
+    T.isNil("http base rejected", RecipeURL.approvedHost(from: "http://api.example.com"))
+    T.isNil("scheme-less base rejected", RecipeURL.approvedHost(from: "api.example.com"))
+    T.isNil("empty base rejected", RecipeURL.approvedHost(from: ""))
+    T.isNil("ftp base rejected", RecipeURL.approvedHost(from: "ftp://api.example.com"))
 
     // The attacker payloads verified by hand during the audit. Each one must
     // fail to produce a URL - not merely produce one with the "wrong" host,
     // because a redirection that silently succeeds is exactly the bug.
-    let approved = GenericProvider.approvedHost(from: "https://api.opentyphoon.ai")!
+    let approved = RecipeURL.approvedHost(from: "https://api.opentyphoon.ai")!
 
     func attack(_ name: String, _ path: String) {
-        T.isNil(name, GenericProvider.safeURL(comps: approved.comps, host: approved.host, path: path))
+        T.isNil(name, RecipeURL.safeURL(comps: approved.comps, host: approved.host, path: path))
     }
     // userinfo rewrite: the classic "https://good.com@evil.com/" shape,
     // expressed as a path since the host itself is already fixed here.
@@ -66,10 +66,135 @@ func testGenericProviderURLSafety() {
     // top of the guards above, and cheap to keep.
     let benignPaths = ["/", "/v1", "/v1/credits", "/a/b/c?x=1&y=2", "/%20encoded"]
     for p in benignPaths {
-        if let url = GenericProvider.safeURL(comps: approved.comps, host: approved.host, path: p) {
+        if let url = RecipeURL.safeURL(comps: approved.comps, host: approved.host, path: p) {
             T.eq("host invariant holds for \(p)", url.host, approved.host)
         }
     }
+}
+
+func testRecipeDecodeTolerant() {
+    let good = #"{"id":"typhoon","name":"Typhoon","credential":{"source":"none"},"fetch":{"method":"http","baseURL":"https://api.example.com","path":"/v1"},"map":{"format":"json","gauges":[]},"future":true}"#
+    let recipe = try? JSONDecoder().decode(Recipe.self, from: Data(good.utf8))
+    T.notNil("recipe tolerates missing symbol and map.lines plus unknown field", recipe)
+    T.eq("missing map.lines is empty", recipe?.map.lines.count, 0)
+
+    let bad = #"{"recipes":[{"id":"future","name":"Future","fetch":{"method":"telepathy"},"map":{}}]}"#
+    let cfg = try? JSONDecoder().decode(Config.self, from: Data(bad.utf8))
+    T.eq("unknown fetch method drops recipe", cfg?.recipes.count, 0)
+    T.check("unknown fetch method records warning", cfg?.loadWarnings.isEmpty == false)
+}
+
+func testRecipeReservedIDRejected() {
+    let json = #"{"recipes":[{"id":"claude","name":"Counterfeit","fetch":{"method":"none"},"map":{}}]}"#
+    let cfg = try? JSONDecoder().decode(Config.self, from: Data(json.utf8))
+    T.eq("reserved recipe is dropped", cfg?.recipes.count, 0)
+    T.check("reserved recipe records warning", cfg?.loadWarnings.first?.contains("claude") == true)
+}
+
+func testRecipePinMatchHTTP() {
+    var recipe = Recipe(id: "typhoon", name: "Typhoon",
+        fetch: FetchSpec(method: "http", baseURL: "https://api.example.com", path: "/v1"))
+    let pin = RecipePin.proposed(recipe)!
+    T.check("matching HTTP host", RecipePin.matches(recipe, pin))
+    recipe.fetch.path = "/v2"
+    T.check("HTTP path is not pinned", RecipePin.matches(recipe, pin))
+    recipe.fetch.baseURL = "https://evil.example"
+    T.check("different HTTP host does not match", !RecipePin.matches(recipe, pin))
+}
+
+func testRecipePinMatchCLI() {
+    var recipe = Recipe(id: "command", name: "Command",
+        fetch: FetchSpec(method: "cli", binary: "/opt/homebrew/bin/agy", args: ["-p", "/usage"]))
+    let pin = RecipePin.proposed(recipe)!
+    T.check("matching CLI pin", RecipePin.matches(recipe, pin))
+    recipe.fetch.args[1] = "/quota"
+    T.check("changed CLI args do not match", !RecipePin.matches(recipe, pin))
+}
+
+func testRecipeCLIBinaryMustBeUnderAllowedRoots() {
+    T.isNil("tmp binary rejected", CommandRun.allowedBinary("/tmp/x"))
+    T.eq("Homebrew binary accepted", CommandRun.allowedBinary("/opt/homebrew/bin/agy"),
+         "/opt/homebrew/bin/agy")
+    T.isNil("parent traversal rejected", CommandRun.allowedBinary("/opt/homebrew/bin/../evil"))
+    T.isNil("security tool explicitly unavailable", CommandRun.allowedBinary("/usr/bin/security"))
+}
+
+func testRecipeFileGlobCannotEscapeFolder() {
+    T.check("ordinary recursive glob accepted", RecipeFetch.fileGlobIsSafe("**/*.jsonl"))
+    T.check("parent traversal glob rejected", !RecipeFetch.fileGlobIsSafe("../../.ssh/*"))
+}
+
+func testRecipeMapPathSubset() {
+    let obj: [String: Any] = ["data": ["limit": 25.0],
+        "buckets": [["remaining_fraction": 0.9], ["remaining_fraction": 0.25]],
+        "nested": ["credits": 12.0]]
+    T.eq("object JSONPath", RecipeMap.value(at: "$.data.limit", in: obj) as? Double, 25)
+    T.eq("array JSONPath", RecipeMap.value(at: "$.buckets[1].remaining_fraction", in: obj) as? Double, 0.25)
+    T.eq("bare key recursive search", RecipeMap.value(at: "credits", in: obj) as? Double, 12)
+    T.isNil("recursive descent rejected", RecipeMap.value(at: "$..x", in: obj))
+    T.isNil("filter expression rejected", RecipeMap.value(at: "$[?()]", in: obj))
+}
+
+func testRecipeMapUsedLimitToPercent() {
+    let map = MapSpec(gauges: [GaugeSpec(label: "Used", used: "$.used", limit: "$.limit")])
+    let reading = RecipeMap.apply(map, to: Data(#"{"used":25,"limit":100}"#.utf8))
+    T.near("used over limit becomes used percent", reading.gauges.first?.percent ?? -1, 25)
+}
+
+func testRecipeMapRemainingFraction() {
+    let map = MapSpec(gauges: [GaugeSpec(label: "Left", remaining: "$.left", unit: "fraction")])
+    let reading = RecipeMap.apply(map, to: Data(#"{"left":0.2}"#.utf8))
+    T.near("remaining fraction becomes used percent", reading.gauges.first?.percent ?? -1, 80)
+}
+
+func testRecipeMapValueMoney() {
+    let map = MapSpec(gauges: [GaugeSpec(label: "Balance", value: "$.credits", unit: "usd")])
+    let reading = RecipeMap.apply(map, to: Data(#"{"credits":12.5}"#.utf8))
+    T.isNil("money has no percentage", reading.gauges.first?.percent)
+    T.eq("money uses Fmt.money", reading.gauges.first?.text, "$12.50")
+}
+
+func testRecipeMapMissingIsWarnNotZero() {
+    let map = MapSpec(gauges: [GaugeSpec(label: "Missing", value: "$.missing", unit: "percent")])
+    let reading = RecipeMap.apply(map, to: Data(#"{"other":0}"#.utf8))
+    T.eq("missing mapping warns", reading.state, .warn)
+    T.eq("missing mapping emits no gauge", reading.gauges.count, 0)
+    T.check("missing mapping says unknown", reading.lines.contains(L.t("a.unknown")))
+}
+
+func testRecipeLegacyGenericEquivalence() {
+    let spec = AccountSpec(name: "Old", keychainService: "AIMeter · generic · Old",
+                           baseURL: "https://api.example.com", balancePath: "/credits")
+    let data = Data(#"{"data":{"credits":7.25}}"#.utf8)
+    let obj = try! JSONSerialization.jsonObject(with: data)
+    let old = findNumber(in: obj, names: ["balance", "total_balance", "credits",
+                                         "credit", "remaining", "amount"])
+    let reading = RecipeMap.apply(Recipe.legacy(spec).map, to: data)
+    T.eq("legacy recipe finds same number", reading.gauges.first?.text,
+         old.map { Fmt.money($0, "USD") })
+    T.eq("legacy recipe emits one balance", reading.gauges.count, 1)
+}
+
+func testRecipeMapWindowKinds() {
+    T.eq("5h window", RecipeMap.window("5h"), .shortWindow)
+    T.eq("weekly window", RecipeMap.window("weekly"), .longWindow)
+    T.eq("model window", RecipeMap.window("model"), .modelWindow)
+    T.eq("other window", RecipeMap.window("other"), .other)
+}
+
+func testRedactRawPreview() {
+    let key = "sk-secret"
+    let raw = Data(#"{"one":"sk-secret","two":"sk-secret"}"#.utf8)
+    let preview = RecipeFetch.redactRawPreview(raw, credential: key)
+    T.check("all credential substrings redacted", !preview.contains(key))
+    T.eq("both occurrences replaced", preview.components(separatedBy: "••••").count - 1, 2)
+}
+
+func testNetRefusesCrossHostRedirect() {
+    let same = URLRequest(url: URL(string: "https://api.example.com/next")!)
+    let other = URLRequest(url: URL(string: "https://evil.example/collect")!)
+    T.notNil("same-host redirect accepted", Net.redirectTarget(originalHost: "api.example.com", proposed: same))
+    T.isNil("cross-host redirect rejected", Net.redirectTarget(originalHost: "api.example.com", proposed: other))
 }
 
 // MARK: - AgyTUI: three bugs found only by driving the real client
@@ -2189,7 +2314,22 @@ func testSparklineSamplesDownsamplesToAtMostNinetySixAndStaysChronological() {
 struct Runner {
     static func main() {
         let start = Date()
-        testGenericProviderURLSafety()
+        testRecipeURLSafety()
+        testRecipeDecodeTolerant()
+        testRecipeReservedIDRejected()
+        testRecipePinMatchHTTP()
+        testRecipePinMatchCLI()
+        testRecipeCLIBinaryMustBeUnderAllowedRoots()
+        testRecipeFileGlobCannotEscapeFolder()
+        testRecipeMapPathSubset()
+        testRecipeMapUsedLimitToPercent()
+        testRecipeMapRemainingFraction()
+        testRecipeMapValueMoney()
+        testRecipeMapMissingIsWarnNotZero()
+        testRecipeLegacyGenericEquivalence()
+        testRecipeMapWindowKinds()
+        testRedactRawPreview()
+        testNetRefusesCrossHostRedirect()
         testAgyTUIStripRemovesEscapeSequences()
         testAgyTUIStripLeavesPlainTextUnchanged()
         testAgyTUIParseHandlesMixedLineEndings()
