@@ -69,11 +69,13 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         case .success(let t): token = t
         case .failure(let e):
             if e.blank, ClaudeCLI.ownsCLICredential(account) {
-                // The item read fine and holds no token: this Mac is signed
-                // out of the CLI. `.failure` is right here - it is a real
-                // sign-out, not a stale token - and the message has to say
-                // what to do, which "could not obtain a token" did not.
-                return .failed(id, title, account.name, L.t("c.signedout.blank"))
+                // The item read fine and holds no token right now. That is
+                // not necessarily a sign-out - see `Fail.blank`'s doc comment
+                // for the 2026-09-04 correction of an earlier claim here that
+                // it was - so the message says only what is true and what to
+                // do about it: press "Check now", which runs claude and
+                // re-reads, or run claude directly in a terminal.
+                return .failed(id, title, account.name, L.t("c.blank.cli"))
             }
             guard e.denied else { return .failed(id, title, account.name, e.message) }
             // Not a lost sign-in, and not this app malfunctioning: macOS threw

@@ -110,16 +110,26 @@ weekly Claude shape, without reading credentials or making a request.
 This is the part worth reading before you trust it with your credentials.
 
 - **Claude Code**: the OAuth token is read from the login keychain (item
-  `Claude Code-credentials`, written by Claude Code itself). macOS will ask your
-  permission the first time; choose **Always Allow**. The token is read once per
+  `Claude Code-credentials`, written by Claude Code itself) by running
+  `/usr/bin/security find-generic-password` — the same route the `claude` CLI
+  itself uses to read its own token back — which is why there is no keychain
+  permission panel for this item. That is a deliberate choice, not an
+  oversight: the CLI's own write path resets the item's access-control list on
+  every token refresh, so an ordinary in-process read kept re-triggering
+  macOS's password prompt no matter how many times it had been answered.
+  Routing around that prompt is scoped to this one item by an explicit
+  allowlist in `Keychain.securityToolServices` — nothing else this app might be
+  told to read (in particular nothing from `config.json`, which is untrusted
+  plain text) can be pointed at this code path. The token is read once per
   launch, kept in memory, and used for exactly one request per refresh:
   `POST api.anthropic.com/v1/messages` with `max_tokens: 1`. The usage figures
   come from that response's headers. The token goes nowhere else.
-  If the item is there but holds an empty token — which is what Claude Code
-  leaves behind when the CLI is signed out — the row says so and tells you to
-  sign in with `claude` in a terminal; nothing is read from anywhere else. In
-  particular `~/.claude/.credentials.json`, which a Claude Code session hosted
-  by the Claude desktop app writes for itself, is deliberately not consulted.
+  If the item is there but holds an empty token — which means only that no
+  token is stored in it right now, not necessarily that the CLI is signed out —
+  the row says so and tells you to press **Check now** or sign in with `claude`
+  in a terminal; nothing is read from anywhere else. In particular
+  `~/.claude/.credentials.json`, which a Claude Code session hosted by the
+  Claude desktop app writes for itself, is deliberately not consulted.
   One exception, and only ever on a button press: if you press **Check now** on
   a Claude row whose access token has gone stale, this app runs the real
   `claude` CLI, which sends a request of its own to refresh that token — a

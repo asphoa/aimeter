@@ -124,11 +124,14 @@ enum Credential {
             // Two different things arrive here. A blob with no token field at
             // all is a shape this app does not understand. A blob whose token
             // field is there and empty is a shape it understands perfectly:
-            // Claude Code signed out, leaving `accessToken: ""` in place.
-            // Observed on 2026-09-02 - the keychain item read fine, the panel
-            // said "could not obtain an access token", and `claude auth
-            // status` said `loggedIn: false`. The second must not be reported
-            // in the words of the first.
+            // the item holds no token right now. Observed on 2026-09-02 - the
+            // keychain item read fine, the panel said "could not obtain an
+            // access token", and this app's first read of `claude auth
+            // status` (run without `USER` set) said `loggedIn: false`, which
+            // was later found to be a false negative - see `Fail.blank`'s
+            // doc comment for the corrected account. The blank shape must not
+            // be reported in the words of "could not obtain a token" either
+            // way: it is a real thing to act on, worded as itself.
             if holdsBlankToken(json: obj, field: a.keyJSONField) {
                 return .failure(Fail(message: L.t("e.blanktoken"), blank: true))
             }
@@ -166,7 +169,7 @@ enum Credential {
             if TokenCache.shared.refused(svc, stamp: stamp) {
                 return .failure(Fail(message: L.t("k.denied"), denied: true))
             }
-            switch Keychain.genericPassword(service: svc) {
+            switch Keychain.read(service: svc) {
             case .success(let s):
                 TokenCache.shared.set(svc, s, stamp: stamp)
                 return .success(s)

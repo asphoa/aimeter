@@ -689,6 +689,75 @@ func testCredentialReportsABlankTokenAsASignOutNotAsAMissingOne() {
 /// to press "Check now" and choose "Always Allow" - and nothing on the manual
 /// path forgot the refusal, so the button re-read the memory and did nothing
 /// until Claude Code next rewrote the item. This pins the door that was missing.
+// MARK: - Reading the CLI's own item through /usr/bin/security, not SecItemCopyMatching
+
+/// The route through `/usr/bin/security` is scoped by an explicit allowlist,
+/// not by any pattern match on the service string - a poisoned config.json
+/// must not be able to widen it. Pure.
+func testKeychainSecurityToolRouteIsAnAllowlistNotAPrefix() {
+    T.check("the CLI's own item is on the list",
+            Keychain.readsViaSecurityTool("Claude Code-credentials"))
+    T.check("an AIMeter-owned item is not",
+            !Keychain.readsViaSecurityTool("AIMeter · claude · x"))
+    T.check("a service that merely starts with the CLI's name is not",
+            !Keychain.readsViaSecurityTool("Claude Code-credentials-evil"))
+    T.check("a service that is merely a prefix of the CLI's name is not",
+            !Keychain.readsViaSecurityTool("Claude Code-credential"))
+}
+
+/// `securityToolPassword` has to read an item written the way the CLI writes
+/// its own - through `security add-generic-password -U`, which leaves the
+/// item's partition list as `apple-tool:` alone. Creating the throwaway item
+/// with `SecItemAdd` instead (as `Credential.store` does, for AIMeter's own
+/// items) would not exercise the same ACL shape and would raise this app's
+/// usual in-process panel on read - the opposite of what this test needs to
+/// prove. So this one shells out to `security` directly for setup too.
+func testSecurityToolReadsAnItemWrittenTheWayTheCLIWritesIt() {
+    let svc = "AIMeter · tests · \(UUID().uuidString)"
+    // A space and a brace exercise both the newline-stripping path and the
+    // "looks like JSON" branch a caller further up the stack takes on the
+    // returned string - this call itself does no JSON parsing.
+    let dummy = "not a real token {with a space}"
+
+    let add = Process()
+    add.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    add.arguments = ["add-generic-password", "-a", "aimeter-tests", "-s", svc,
+                     "-w", dummy, "-U"]
+    add.standardOutput = Pipe()
+    add.standardError = Pipe()
+    guard (try? add.run()) != nil else {
+        return T.check("could run /usr/bin/security to set up the test item", false)
+    }
+    add.waitUntilExit()
+    guard add.terminationStatus == 0 else {
+        return T.check("test item created with the CLI's own write path (exit \(add.terminationStatus))", false)
+    }
+    defer {
+        let del = Process()
+        del.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        del.arguments = ["delete-generic-password", "-s", svc]
+        del.standardOutput = Pipe()
+        del.standardError = Pipe()
+        try? del.run()
+        del.waitUntilExit()
+    }
+
+    switch Keychain.securityToolPassword(service: svc) {
+    case .success(let s):
+        T.eq("reads back exactly what was stored, no trailing newline", s, dummy)
+    case .failure(let e):
+        T.check("security-tool read of an apple-tool:-partitioned item succeeds (\(e.message))", false)
+    }
+
+    let missingSvc = "AIMeter · tests · \(UUID().uuidString)"
+    switch Keychain.securityToolPassword(service: missingSvc) {
+    case .success: T.check("a never-created service should not be found", false)
+    case .failure(let e):
+        T.eq("a missing item is reported as k.missing",
+             e.message, L.t("k.missing", missingSvc))
+    }
+}
+
 func testCheckNowForgetsARefusalButKeepsTheToken() {
     let svc = "AIMeter · tests · \(UUID().uuidString)"
     let acct = AccountSpec(name: "t", keychainService: svc)
@@ -1371,6 +1440,8 @@ struct Runner {
         testCredentialExpiryReadsBothHalvesOfTheOAuthPair()
         testCredentialKeyFileHonoursJSONFieldThroughTheSameNarrowing()
         testKeychainModificationDateIsReadableAndAbsentWhenTheItemIs()
+        testKeychainSecurityToolRouteIsAnAllowlistNotAPrefix()
+        testSecurityToolReadsAnItemWrittenTheWayTheCLIWritesIt()
         testCredentialCacheFollowsTheItemRatherThanTheProcess()
         testCredentialReportsABlankTokenAsASignOutNotAsAMissingOne()
         testCheckNowForgetsARefusalButKeepsTheToken()

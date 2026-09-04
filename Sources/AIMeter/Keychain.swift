@@ -8,11 +8,22 @@ struct Fail: LocalizedError {
     /// must not be retried on a timer: each retry is another panel.
     var denied: Bool = false
     /// True when the credential was read fine and holds a token field that is
-    /// empty. That is what Claude Code leaves in its keychain item when the CLI
-    /// is signed out: the item stays, with `accessToken: ""`, `expiresAt: 0`,
-    /// and the account metadata around them. It is a different message from
-    /// "could not obtain a token" - the read worked; there is no sign-in behind
-    /// it - and it is the one the user can act on.
+    /// empty - `accessToken: ""`, `expiresAt: 0`, and the account metadata
+    /// still sitting around them. It is a different message from "could not
+    /// obtain a token" - the read worked; there is simply no token in the item
+    /// right now.
+    ///
+    /// Corrected 2026-09-04: an earlier version of this comment called that
+    /// shape "what Claude Code leaves behind when the CLI is signed out" and
+    /// cited `claude auth status --json` printing `"loggedIn": false` as
+    /// confirmation. That status call was run in a shell missing the `USER`
+    /// environment variable - the exact trap `ClaudeCLI.environment` exists to
+    /// avoid - and the same binary, run with `USER` set, reported
+    /// `"loggedIn": true` on the same machine. The tokens really were blank,
+    /// from 2026-09-01 17:46 local until a `claude -p` run refilled them at
+    /// 2026-09-04 09:41:30; the item's own `mdat` moved with them. So "blank"
+    /// means exactly what it says - the item holds no token right now - and
+    /// nothing more should be read into it about why.
     var blank: Bool = false
     var errorDescription: String? { message }
 }
@@ -50,6 +61,116 @@ enum Keychain {
         }
     }
 
+    /// Services read through `/usr/bin/security` instead of `SecItemCopyMatching`
+    /// - see `securityToolPassword(service:)` for why that route exists at all.
+    ///
+    /// An **allowlist**, deliberately not a prefix test against something like
+    /// "not one of ours": `keychainService` for a generic account comes out of
+    /// `config.json`, which this project already treats as untrusted plain text
+    /// (see `ClaudeCLI.allowedBinaries` for the same reasoning applied to a
+    /// binary path). Without this list, a poisoned setting could point this app
+    /// at *any* keychain item and have it read silently via `apple-tool:` -
+    /// where the in-process path at least raises a panel naming AIMeter as the
+    /// reader. The one entry here is the CLI's own item, which is the one this
+    /// app has independent reason to read the same way the CLI reads it.
+    ///
+    /// AIMeter's own items (`AIMeter · …`) stay on the in-process path: this app
+    /// created them with `SecItemAdd`, so it is already their owner and is never
+    /// prompted for them.
+    static let securityToolServices: Set<String> = [ClaudeCLI.credentialService]
+
+    /// Pure membership test - the property under test in
+    /// `testKeychainSecurityToolRouteIsAnAllowlistNotAPrefix`.
+    static func readsViaSecurityTool(_ service: String) -> Bool {
+        securityToolServices.contains(service)
+    }
+
+    /// Reads a generic-password item's secret by shelling out to
+    /// `/usr/bin/security find-generic-password -w`, instead of
+    /// `SecItemCopyMatching`.
+    ///
+    /// The reason this exists at all: the CLI stores `Claude Code-credentials`
+    /// by shelling out to `security add-generic-password -U`, and that write
+    /// path rebuilds the item's integrity ACL - the partition list - to hold
+    /// only `apple-tool:`, the partition `/usr/bin/security` itself runs in.
+    /// Every grant this app obtained by "Always Allow" is wiped by that rebuild,
+    /// at every token refresh, so an in-process `SecItemCopyMatching` read keeps
+    /// raising the panel no matter how many times it was answered. But
+    /// `/usr/bin/security` reads that same item silently, because it already
+    /// sits in the one partition the item's ACL still names - measured on this
+    /// machine 2026-09-04 09:47: securityd's log carries nothing for that read,
+    /// no `asking user about XARA partition`, no `displaying keychain prompt`.
+    /// This is also exactly how the `claude` CLI reads its own token back
+    /// (anthropics/claude-code#89985); the panel that never stops recurring is
+    /// anthropics/claude-code#87348.
+    ///
+    /// Run as a fixed absolute-path `Process` with an explicit `arguments`
+    /// array - never a shell - so `service` is passed as inert data and cannot
+    /// be interpreted. Stdin is `/dev/null`; a program asking a question here
+    /// gets an immediate EOF instead of hanging. Never logs or prints the
+    /// secret itself - only exit codes and the first stderr line reach a `Fail`.
+    static func securityToolPassword(service: String) -> Result<String, Fail> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
+        process.standardInput = FileHandle.nullDevice
+        let outPipe = Pipe(), errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+
+        do { try process.run() }
+        catch {
+            return .failure(Fail(message: L.t("k.error", "-1", error.localizedDescription)))
+        }
+
+        // Drained on background threads, same shape as ClaudeCLI.execute: a
+        // subprocess that fills a pipe must not be able to deadlock a parent
+        // waiting on it to exit.
+        let out = SecurityToolDrain(), err = SecurityToolDrain()
+        let drained = DispatchGroup()
+        for (pipe, box) in [(outPipe, out), (errPipe, err)] {
+            drained.enter()
+            DispatchQueue.global(qos: .utility).async {
+                box.data = pipe.fileHandleForReading.readDataToEndOfFile()
+                drained.leave()
+            }
+        }
+
+        let deadline = Date().addingTimeInterval(10)
+        while process.isRunning, Date() < deadline { usleep(50_000) }
+        if process.isRunning {
+            process.terminate()
+            _ = drained.wait(timeout: .now() + 2)
+            return .failure(Fail(message: L.t("k.error", "-2", "timed out")))
+        }
+        process.waitUntilExit()
+        _ = drained.wait(timeout: .now() + 5)
+
+        let code = process.terminationStatus
+        let errText = String(decoding: err.data, as: UTF8.self)
+        let errFirstLine = errText.split(whereSeparator: \.isNewline).first
+            .map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
+
+        if code == 44 || errText.contains("could not be found") {
+            return .failure(Fail(message: L.t("k.missing", service)))
+        }
+        guard code == 0 else {
+            return .failure(Fail(message: L.t("k.error", "\(code)", errFirstLine)))
+        }
+        guard var text = String(data: out.data, encoding: .utf8) else {
+            return .failure(Fail(message: L.t("k.nottext")))
+        }
+        if text.hasSuffix("\n") { text.removeLast() }
+        return .success(text)
+    }
+
+    /// Dispatches a generic-password read to whichever route `service` needs -
+    /// see `readsViaSecurityTool(_:)` for the allowlist that decides.
+    static func read(service: String) -> Result<String, Fail> {
+        readsViaSecurityTool(service) ? securityToolPassword(service: service)
+                                       : genericPassword(service: service)
+    }
+
     /// When the item was last written, asked for **without asking for the item**.
     ///
     /// This is the whole of this app's answer to a fault that is not its own to
@@ -75,14 +196,20 @@ enum Keychain {
     /// checked and passed (`kcacl: client is valid, proceeding`) immediately
     /// before the partition check refuses.
     ///
-    /// What *is* reachable is how often this app asks. An attribute-only query
-    /// decrypts nothing, so it needs no authorisation and passes both gates in
-    /// silence - verified by running an ad-hoc-signed probe whose cdhash was in
-    /// neither the item's ACL nor its partition list: `SecItemCopyMatching`
-    /// returned 0 with the modification date and no panel. So the modification
-    /// date can be polled for free, and the read that *can* raise a panel is
-    /// spent only when the item has actually changed since the last one that
-    /// succeeded.
+    /// Superseded 2026-09-04 for this specific item: the read itself is now
+    /// routed through `/usr/bin/security` (see `securityToolPassword(service:)`),
+    /// which sits in the `apple-tool:` partition the CLI's own writes leave in
+    /// the item's ACL and so reads it without ever raising the panel this
+    /// section was written to ration - measured 2026-09-04 09:47, nothing in
+    /// securityd's log for that read. The stamp mechanism below is kept for
+    /// exactly what it was always for regardless of which route the real read
+    /// takes: it is still what makes an *unchanged* item cost no read at all,
+    /// security-tool or in-process. For any other item still on the in-process
+    /// path, the original reasoning stands - an attribute-only query decrypts
+    /// nothing, so it needs no authorisation and passes both gates in silence,
+    /// verified by running an ad-hoc-signed probe whose cdhash was in neither
+    /// the item's ACL nor its partition list: `SecItemCopyMatching` returned 0
+    /// with the modification date and no panel.
     ///
     /// Nil where there is no such item, or where the attribute query itself
     /// fails - callers must then fall through to the real read rather than
@@ -142,6 +269,13 @@ func findNumber(in obj: Any, names: [String]) -> Double? {
         return nil
     }
     return walk(obj)
+}
+
+/// Somewhere for `securityToolPassword`'s reading threads to put what they
+/// read. Named apart from `ClaudeCLI`'s own `Drain` only because the two live
+/// in different files with no shared import between them.
+private final class SecurityToolDrain: @unchecked Sendable {
+    var data = Data()
 }
 
 private func norm(_ k: String) -> String {
