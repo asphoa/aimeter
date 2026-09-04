@@ -30,7 +30,9 @@ func contrastUsageDemo(_ cfg: inout Config) -> [String: [Reading]] {
     var reading = Reading(id: "claude", title: ProviderKind.find("claude")?.title ?? "Claude")
     reading.gauges = [
         Gauge(label: L.t("g.5h"), percent: 19, text: "19%", resetsAt: Date().addingTimeInterval(3600), kind: .shortWindow),
-        Gauge(label: L.t("g.week"), percent: 97, text: "97%", resetsAt: Date().addingTimeInterval(86_400), kind: .longWindow)
+        Gauge(label: L.t("g.week"), percent: 97, text: "97%", resetsAt: Date().addingTimeInterval(86_400), kind: .longWindow),
+        Gauge(label: L.t("g.week.model", "Fable"), percent: 9, text: "9%",
+              resetsAt: Date().addingTimeInterval(86_400), kind: .modelWindow)
     ]
     reading.state = .nearLimit
     return ["claude": [reading]]

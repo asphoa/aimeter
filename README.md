@@ -122,8 +122,16 @@ This is the part worth reading before you trust it with your credentials.
   told to read (in particular nothing from `config.json`, which is untrusted
   plain text) can be pointed at this code path. The token is read once per
   launch, kept in memory, and used for exactly one request per refresh:
-  `POST api.anthropic.com/v1/messages` with `max_tokens: 1`. The usage figures
-  come from that response's headers. The token goes nowhere else.
+  `GET api.anthropic.com/api/oauth/usage` — the CLI's own usage endpoint,
+  confirmed by a binary grep of Claude Code 2.1.260 as the only usage path it
+  calls. Nothing is charged to your subscription per refresh any more; the
+  earlier version of this app spent a real 1-token `POST v1/messages` request
+  every time solely to read rate-limit headers off the response, and that
+  request is gone. The row shows the 5-hour and weekly windows, any
+  per-model weekly entries the account reports (Claude reports these
+  per-model, not just per-account, so a row like "Fable weekly window" can
+  appear alongside the overall weekly figure), and extra (pay-as-you-go)
+  usage when it is enabled. The token goes nowhere else.
   If the item is there but holds an empty token — which means only that no
   token is stored in it right now, not necessarily that the CLI is signed out —
   the row says so and tells you to press **Check now** or sign in with `claude`
@@ -153,15 +161,16 @@ This is the part worth reading before you trust it with your credentials.
 - **Network**: only the vendor endpoints listed below, plus `127.0.0.1` for
   local model runtimes. There is no telemetry, no analytics, and no server
   belonging to this project.
-- Every `anthropic-ratelimit-*` header received is written to
-  `~/.config/aimeter/last-headers-<account>.json` so you can check the parsing
+- The parsed usage structure (kinds, percents, resets, extra_usage numbers —
+  never the request headers or the token) is written to
+  `~/.config/aimeter/last-usage-<account>.json` so you can check the parsing
   against reality.
 
 ## Where each number comes from
 
 | Row | Source | Live or snapshot |
 |---|---|---|
-| **Claude Code** | One 1-token request to `api.anthropic.com/v1/messages`; the figures are the `anthropic-ratelimit-unified-*` response headers. | Live |
+| **Claude Code** | One `GET api.anthropic.com/api/oauth/usage` request — the CLI's own usage endpoint; nothing is charged per refresh. | Live |
 | **Codex** | The `rate_limits` block Codex writes into its own session files under `~/.codex/sessions/`. No network call and no credential needed. | **Snapshot** — as of the last time Codex ran. Labelled with its age; dimmed once stale; a window that ended since is shown as `—` rather than as a number. |
 | **Antigravity** | The result of the CLI's own quota refresh, read out of `~/.gemini/antigravity-cli/cli.log`. | Snapshot |
 | **OpenRouter** | `GET openrouter.ai/api/v1/key`, once per key. | Live |

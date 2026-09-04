@@ -3,7 +3,16 @@ import AppKit
 /// What a gauge measures. The strip maps `.shortWindow` to a line's top half
 /// and `.longWindow` to its bottom half, so providers only have to tag their
 /// gauges correctly and the layout follows.
-enum GaugeKind: String, Codable, Sendable { case shortWindow, longWindow, other }
+enum GaugeKind: String, Codable, Sendable {
+    case shortWindow, longWindow, other
+    /// A weekly window scoped to one model (Claude's `weekly_scoped` entries).
+    /// Deliberately distinct from `.longWindow`: the strip's window
+    /// classification (`resolveStripLine`) must keep showing the unified
+    /// session + weekly pair and must not pick a per-model entry up as "the"
+    /// weekly window — see the v1.0.19 regression this guards against. Panel
+    /// colouring treats it the same as `.longWindow`.
+    case modelWindow
+}
 
 enum BarColourScheme: String, Codable, Sendable, CaseIterable {
     /// Hue identifies the service; red is held back and means "nearly spent".
@@ -177,7 +186,7 @@ enum StatusStrip {
             // highlight, so the weekly half uses a lighter sky blue.
             switch kind {
             case .shortWindow: c = NSColor(srgbRed: 1.0, green: 0.361, blue: 0.310, alpha: 1)
-            case .longWindow:  c = NSColor(srgbRed: 0.271, green: 0.761, blue: 1.0, alpha: 1)
+            case .longWindow, .modelWindow: c = NSColor(srgbRed: 0.271, green: 0.761, blue: 1.0, alpha: 1)
             case .other:       c = NSColor(srgbRed: 0.231, green: 0.784, blue: 0.745, alpha: 1)
             }
         case .provider:
@@ -205,12 +214,13 @@ enum StatusStrip {
         let hue = fmod(Palette.adaptiveHueOffset + Double(index) * 360 / Double(n), 360)
         let lightness: Double
         let chroma: Double
+        let long = kind == .longWindow || kind == .modelWindow
         if critical {
-            lightness = kind == .longWindow ? 0.60 : (kind == .shortWindow ? 0.47 : 0.53)
+            lightness = long ? 0.60 : (kind == .shortWindow ? 0.47 : 0.53)
             chroma = 0.18
         } else {
-            lightness = kind == .longWindow ? 0.78 : (kind == .shortWindow ? 0.62 : 0.70)
-            chroma = kind == .longWindow ? 0.13 : 0.16
+            lightness = long ? 0.78 : (kind == .shortWindow ? 0.62 : 0.70)
+            chroma = long ? 0.13 : 0.16
         }
         return Palette.oklch(lightness, chroma, hue)
     }

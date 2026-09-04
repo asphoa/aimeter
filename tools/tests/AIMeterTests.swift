@@ -1120,6 +1120,130 @@ func testClaudeProviderOffersTheRefreshOnlyWhenItCouldWork() {
     T.check("and the outcome itself is on the row", noted.lines.contains(L.t("c.refresh.stale")))
 }
 
+// MARK: - ClaudeProvider.readings(fromUsage:) — the /api/oauth/usage parser
+//
+// Fixture copied from the measured 2026-09-04 shape (CLI 2.1.260): session
+// 39%, weekly_all 8%, one weekly_scoped entry for "Fable" at 9%.
+
+private func usageFixture(limits: [[String: Any]] = [
+    ["kind": "session", "group": "session", "percent": 39, "severity": "normal",
+     "resets_at": "2026-09-04T15:00:00Z", "scope": NSNull(), "is_active": true],
+    ["kind": "weekly_all", "group": "weekly", "percent": 8, "severity": "normal",
+     "resets_at": "2026-09-08T00:00:00Z", "scope": NSNull(), "is_active": true],
+    ["kind": "weekly_scoped", "group": "weekly", "percent": 9, "severity": "normal",
+     "resets_at": "2026-09-08T00:00:00Z",
+     "scope": ["model": ["id": NSNull(), "display_name": "Fable"], "surface": NSNull()],
+     "is_active": true]
+], extra: [String: Any]? = nil, fiveHour: [String: Any]? = nil, sevenDay: [String: Any]? = nil) -> [String: Any] {
+    var obj: [String: Any] = ["limits": limits]
+    if let extra { obj["extra_usage"] = extra }
+    if let fiveHour { obj["five_hour"] = fiveHour }
+    if let sevenDay { obj["seven_day"] = sevenDay }
+    return obj
+}
+
+func testClaudeUsageParserReadsTheMeasuredThreeGaugeShape() {
+    let (gauges, lines, state) = ClaudeProvider.readings(fromUsage: usageFixture())
+    T.eq("three gauges", gauges.count, 3)
+    T.eq("session label", gauges[0].label, L.t("g.5h"))
+    T.eq("session kind", gauges[0].kind, .shortWindow)
+    T.near("session percent", gauges[0].percent ?? -1, 39)
+    T.notNil("session resets_at parsed", gauges[0].resetsAt)
+    T.eq("weekly_all label", gauges[1].label, L.t("g.week"))
+    T.eq("weekly_all kind", gauges[1].kind, .longWindow)
+    T.near("weekly_all percent", gauges[1].percent ?? -1, 8)
+    T.eq("weekly_scoped label carries the model name", gauges[2].label, L.t("g.week.model", "Fable"))
+    T.eq("weekly_scoped kind is modelWindow, not longWindow", gauges[2].kind, .modelWindow)
+    T.near("weekly_scoped percent", gauges[2].percent ?? -1, 9)
+    T.check("no lines for an all-normal fixture", lines.isEmpty)
+    T.eq("state stays ok", state, .ok)
+}
+
+func testClaudeUsageParserPreservesAnUnknownKindByItsRawName() {
+    let obj = usageFixture(limits: [
+        ["kind": "monthly_beta", "group": "monthly", "percent": 12, "severity": "normal",
+         "resets_at": "2026-10-01T00:00:00Z", "scope": NSNull(), "is_active": true]
+    ])
+    let (gauges, _, _) = ClaudeProvider.readings(fromUsage: obj)
+    T.eq("one gauge", gauges.count, 1)
+    T.eq("unknown kind is never dropped silently — the raw kind is the label",
+         gauges[0].label, "monthly_beta")
+    T.eq("unknown kind maps to .other", gauges[0].kind, .other)
+}
+
+func testClaudeUsageParserAcceptsPercentAsIntDoubleOrString() {
+    for (raw, name) in [(39 as Any, "Int"), (39.0 as Any, "Double"), ("39" as Any, "String")] {
+        let obj = usageFixture(limits: [
+            ["kind": "session", "group": "session", "percent": raw, "severity": "normal",
+             "resets_at": "2026-09-04T15:00:00Z", "scope": NSNull(), "is_active": true]
+        ])
+        let (gauges, _, _) = ClaudeProvider.readings(fromUsage: obj)
+        T.near("percent as \(name) parses", gauges.first?.percent ?? -1, 39)
+    }
+}
+
+func testClaudeUsageParserExtraUsageGaugeOnlyWhenEnabled() {
+    let enabled = usageFixture(extra: [
+        "is_enabled": true, "monthly_limit": 1000, "used_credits": 0,
+        "currency": "USD", "decimal_places": 2
+    ])
+    let (withExtra, _, _) = ClaudeProvider.readings(fromUsage: enabled)
+    guard let extraGauge = withExtra.first(where: { $0.label == L.t("g.extra") }) else {
+        T.check("extra_usage enabled produces a gauge", false); return
+    }
+    T.check("extra usage text is formatted as money",
+            extraGauge.text.contains("$0.00") && extraGauge.text.contains("$10.00"),
+            extraGauge.text)
+
+    let disabled = usageFixture(extra: ["is_enabled": false, "monthly_limit": 1000,
+                                        "used_credits": 0, "currency": "USD", "decimal_places": 2])
+    let (withoutExtra, _, _) = ClaudeProvider.readings(fromUsage: disabled)
+    T.check("extra_usage disabled adds no gauge",
+            !withoutExtra.contains { $0.label == L.t("g.extra") })
+}
+
+func testClaudeUsageParserFallsBackToUnifiedWindowsWhenLimitsIsEmpty() {
+    let obj = usageFixture(limits: [],
+                           fiveHour: ["utilization": 55.0, "resets_at": "2026-09-04T15:00:00Z"],
+                           sevenDay: ["utilization": 12.0, "resets_at": "2026-09-08T00:00:00Z"])
+    let (gauges, _, _) = ClaudeProvider.readings(fromUsage: obj)
+    T.eq("two gauges from the fallback", gauges.count, 2)
+    T.near("five_hour utilization", gauges[0].percent ?? -1, 55)
+    T.eq("five_hour kind", gauges[0].kind, .shortWindow)
+    T.near("seven_day utilization", gauges[1].percent ?? -1, 12)
+    T.eq("seven_day kind", gauges[1].kind, .longWindow)
+}
+
+func testClaudeUsageParserLockedReasonAddsALineAndNearLimitState() {
+    let obj = usageFixture(fiveHour: ["utilization": 10.0, "resets_at": "2026-09-04T15:00:00Z",
+                                      "locked_reason": "payment_failed"])
+    let (_, lines, state) = ClaudeProvider.readings(fromUsage: obj)
+    T.check("locked_reason produces a line",
+            lines.contains(L.t("c.locked", "payment_failed")))
+    T.eq("locked_reason escalates to nearLimit", state, .nearLimit)
+}
+
+// MARK: - strip classification regression: a scoped weekly must not become
+// "the" weekly window (the exact shape of the v1.0.19 bug)
+
+func testResolveStripLineIgnoresAModelScopedWeeklyEntry() {
+    let reading = Reading(id: "claude", title: "Claude", gauges: [
+        gauge(39, .shortWindow), gauge(8, .longWindow), gauge(9, .modelWindow, label: "Fable weekly window")
+    ])
+    let line = resolveStripLine(MenuLine(provider: "claude"), ["claude": [reading]], Config())
+    T.near("top is still the session window", line.top ?? -1, 39)
+    T.near("bottom is still the unscoped weekly window, not the scoped one", line.bottom ?? -1, 8)
+    T.isNil("no merged bar — this is still the two-window shape", line.merged)
+}
+
+func testClaudeUsagePanelShowsAllThreeGaugesEvenThoughTheStripIgnoresOne() {
+    // Regression pin for the panel side of the same fixture: the strip only
+    // draws two bars, but the panel (which just iterates every gauge on the
+    // reading) must still show all three.
+    let (gauges, _, _) = ClaudeProvider.readings(fromUsage: usageFixture())
+    T.eq("panel sees all three gauges", gauges.count, 3)
+}
+
 // MARK: - tailBytes: the half of the Codex complaint that was a real bug
 //
 // A byte-offset seek lands inside a character whenever the text there is not
@@ -1456,6 +1580,14 @@ struct Runner {
         testClaudeCLIOutcomeReadsTheReportNotJustTheExitCode()
         testClaudeCLIRedactsTheAccountFromTheDump()
         testClaudeProviderOffersTheRefreshOnlyWhenItCouldWork()
+        testClaudeUsageParserReadsTheMeasuredThreeGaugeShape()
+        testClaudeUsageParserPreservesAnUnknownKindByItsRawName()
+        testClaudeUsageParserAcceptsPercentAsIntDoubleOrString()
+        testClaudeUsageParserExtraUsageGaugeOnlyWhenEnabled()
+        testClaudeUsageParserFallsBackToUnifiedWindowsWhenLimitsIsEmpty()
+        testClaudeUsageParserLockedReasonAddsALineAndNearLimitState()
+        testResolveStripLineIgnoresAModelScopedWeeklyEntry()
+        testClaudeUsagePanelShowsAllThreeGaugesEvenThoughTheStripIgnoresOne()
         testFindStringVisitsKeysInAStableOrder()
         testTailBytesSurvivesACutInsideACharacter()
         testTailBytesReadsASmallFileWhole()

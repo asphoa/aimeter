@@ -59,7 +59,7 @@ func panelGaugeStyle(kind: GaugeKind, percent: Double?) -> PanelGaugeStyle {
     let identity: NSColor?
     switch kind {
     case .shortWindow: identity = Palette.colour(Palette.panelShortWindow)
-    case .longWindow:  identity = Palette.colour(Palette.panelLongWindow)
+    case .longWindow, .modelWindow: identity = Palette.colour(Palette.panelLongWindow)
     case .other:       identity = nil
     }
 

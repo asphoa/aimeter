@@ -2,11 +2,25 @@ import Foundation
 
 /// Claude Code subscription utilisation, one row per configured account.
 ///
-/// There is no "read my usage" endpoint, so we do what Clawdmeter does: send a
-/// deliberately minimal request (1 output token of the cheapest model) and read
-/// the rate-limit headers off the response. Every `anthropic-ratelimit-*` header
-/// received is dumped to ~/.config/aimeter/last-headers-<account>.json so the
-/// parsing can be checked against reality instead of assumed.
+/// There *is* a "read my usage" endpoint, and every earlier version of this
+/// file was wrong to say otherwise. Measured 2026-09-04 against Claude Code
+/// CLI 2.1.260: a plain `GET https://api.anthropic.com/api/oauth/usage`, with
+/// exactly the OAuth headers already sent below, returns HTTP 200 and a JSON
+/// body describing every window the CLI's own `/usage` screen shows -
+/// `limits[]` (session, weekly, and per-model-scoped weekly entries, each with
+/// a `percent` and `resets_at`), the unified `five_hour`/`seven_day` windows,
+/// and `extra_usage` (pay-as-you-go credits). A binary grep of the CLI found
+/// `api/oauth/usage` as the only usage path it calls - this is that endpoint,
+/// not a guess at one. Every refresh used to spend a real `POST v1/messages`
+/// probe (1 output token of the cheapest model) purely to read the
+/// rate-limit headers off its response; that request is gone. Nothing here
+/// speaks any part of Anthropic's authentication protocol beyond presenting
+/// the token already stored for this account, same as the old probe did.
+///
+/// The parsed structure - kinds, percents, resets, extra_usage numbers, never
+/// the request headers or the token - is dumped to
+/// ~/.config/aimeter/last-usage-<account>.json so the parsing can be checked
+/// against reality instead of assumed.
 final class ClaudeProvider: Provider, @unchecked Sendable {
     let id = "claude"
     var title: String { L.t("p.claude") }
@@ -100,30 +114,17 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
             return refused(account, expiry)
         }
 
-        var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
-        req.httpMethod = "POST"
+        var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
+        req.httpMethod = "GET"
         req.timeoutInterval = 20
         req.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
         req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        req.setValue("application/json", forHTTPHeaderField: "content-type")
         req.setValue("cli", forHTTPHeaderField: "x-app")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "model": cfg.claudeProbeModel,
-            "max_tokens": 1,
-            "messages": [["role": "user", "content": "."]]
-        ])
 
         let obj: Any, http: HTTPURLResponse
         do { (obj, http) = try await Net.json(req) }
         catch { return .failed(id, title, account.name, L.t("e.conn", error.localizedDescription)) }
-
-        var headers: [String: String] = [:]
-        for (k, v) in http.allHeaderFields {
-            guard let ks = k as? String, let vs = v as? String else { continue }
-            if ks.lowercased().hasPrefix("anthropic-ratelimit") { headers[ks.lowercased()] = vs }
-        }
-        dumpHeaders(headers, status: http.statusCode, account: account.name)
 
         if http.statusCode == 401 {
             // The cached token may simply have been rotated by Claude Code
@@ -136,36 +137,105 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
             }
             return refused(account, Credential.expiry(account))
         }
-        if headers.isEmpty {
+        if http.statusCode != 200 {
             let msg = findString(in: obj, names: ["message"]) ?? L.t("c.noheaders")
             return .failed(id, title, account.name, L.t("e.http2", "\(http.statusCode)", msg))
         }
 
+        dumpUsage(obj, account: account.name)
+
+        let (gauges, lines, parsedState) = ClaudeProvider.readings(fromUsage: obj)
         var r = Reading(id: id, title: title, account: account.name)
-        for (key, label, kind) in [("5h", L.t("g.5h"), GaugeKind.shortWindow),
-                                   ("7d", L.t("g.week"), GaugeKind.longWindow)] {
-            if var g = gauge(headers: headers, window: key, label: label) {
-                g.kind = kind
-                r.gauges.append(g)
+        r.gauges = gauges
+        r.lines = lines
+        r.state = max(parsedState, worstState(gauges))
+        return r
+    }
+
+    /// Pure, testable parse of the `/api/oauth/usage` body. Nothing here
+    /// touches the network or the keychain, so the whole shape can be pinned
+    /// with fixtures copied straight from a measured response.
+    static func readings(fromUsage obj: Any) -> (gauges: [Gauge], lines: [String], state: ReadingState) {
+        var gauges: [Gauge] = []
+        var lines: [String] = []
+        var state: ReadingState = .ok
+
+        func percent(_ raw: Any?) -> Double? {
+            if let n = raw as? Double { return n }
+            if let n = raw as? Int { return Double(n) }
+            if let s = raw as? String { return Double(s) }
+            return nil
+        }
+        func resetDate(_ raw: Any?) -> Date? {
+            guard let s = raw as? String else { return nil }
+            return ISO8601DateFormatter.withFractional.date(from: s)
+                ?? ISO8601DateFormatter().date(from: s)
+        }
+
+        let limits = (obj as? [String: Any])?["limits"] as? [[String: Any]] ?? []
+        for entry in limits {
+            let kind = entry["kind"] as? String ?? "?"
+            let label: String
+            var gk: GaugeKind = .other
+            switch kind {
+            case "session":
+                label = L.t("g.5h"); gk = .shortWindow
+            case "weekly_all":
+                label = L.t("g.week"); gk = .longWindow
+            case "weekly_scoped":
+                let model = (((entry["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String)
+                    ?? "?"
+                label = L.t("g.week.model", model); gk = .modelWindow
+            default:
+                // Never dropped silently, even for a shape not seen yet - the
+                // raw kind string is a better label than no row at all.
+                label = kind; gk = .other
+            }
+            guard let pct = percent(entry["percent"]) else { continue }
+            var g = Gauge(label: label, percent: pct, text: String(format: "%.0f%%", pct),
+                         resetsAt: resetDate(entry["resets_at"]))
+            g.kind = gk
+            gauges.append(g)
+            if let severity = entry["severity"] as? String, severity != "normal" {
+                state = max(state, .warn)
             }
         }
-        // Overage only matters once it is actually being used; showing a
-        // permanent 0% row would just be noise.
-        if let over = gauge(headers: headers, window: "overage", label: L.t("g.overage")),
-           (over.percent ?? 0) > 0 {
-            r.gauges.append(over)
+
+        if limits.isEmpty, let root = obj as? [String: Any] {
+            for (key, label, gk) in [("five_hour", L.t("g.5h"), GaugeKind.shortWindow),
+                                     ("seven_day", L.t("g.week"), GaugeKind.longWindow)] {
+                guard let win = root[key] as? [String: Any], let pct = percent(win["utilization"]) else { continue }
+                var g = Gauge(label: label, percent: pct, text: String(format: "%.0f%%", pct),
+                             resetsAt: resetDate(win["resets_at"]))
+                g.kind = gk
+                gauges.append(g)
+            }
         }
-        if r.gauges.isEmpty {
-            r.lines = headers.sorted { $0.key < $1.key }.map { "\($0.key) = \($0.value)" }
-            r.state = .warn
-            return r
+
+        if let root = obj as? [String: Any] {
+            for key in ["five_hour", "seven_day"] {
+                guard let win = root[key] as? [String: Any],
+                      let reason = win["locked_reason"] as? String else { continue }
+                lines.append(L.t("c.locked", reason))
+                state = max(state, .nearLimit)
+            }
+            if let extra = root["extra_usage"] as? [String: Any], (extra["is_enabled"] as? Bool) == true {
+                let used = percent(extra["used_credits"]) ?? 0
+                let limitAmt = percent(extra["monthly_limit"]) ?? 0
+                let places = (extra["decimal_places"] as? Int) ?? 2
+                let currency = (extra["currency"] as? String) ?? "USD"
+                let scale = pow(10.0, Double(places))
+                let usedMoney = used / scale
+                let limitMoney = limitAmt / scale
+                let pct = limitAmt > 0 ? (used / limitAmt) * 100 : 0
+                let text = "\(Fmt.money(usedMoney, currency)) of \(Fmt.money(limitMoney, currency))"
+                var g = Gauge(label: L.t("g.extra"), percent: pct, text: text)
+                g.kind = .other
+                gauges.append(g)
+            }
         }
-        if let status = headers.first(where: { $0.key.contains("status") })?.value, status != "allowed" {
-            r.lines.append(L.t("c.status", status))
-            r.state = .warn
-        }
-        r.state = max(r.state, worstState(r.gauges))
-        return r
+
+        return (gauges, lines, state)
     }
 
     /// Runs the vendor's own CLI, then reads the keychain again.
@@ -280,32 +350,34 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         return r
     }
 
-    private func gauge(headers: [String: String], window: String, label: String) -> Gauge? {
-        func value(_ needles: [String]) -> String? {
-            headers.first { h in h.key.contains(window) && needles.contains { h.key.contains($0) } }?.value
-        }
-        guard let raw = value(["utilization", "utilisation", "used"]), var pct = Double(raw) else { return nil }
-        // Confirmed 2026-08-23: Anthropic reports these as a 0...1 fraction
-        // ("0.54" = 54%). Anything at or below 1.0 is treated as a fraction -
-        // reading a real 100% as 1% would be the dangerous direction to be wrong in.
-        if pct <= 1.0 { pct *= 100 }
-        var resets: Date?
-        if let rs = value(["reset"]) {
-            resets = Double(rs).map { Date(timeIntervalSince1970: $0) } ?? ISO8601DateFormatter().date(from: rs)
-        }
-        return Gauge(label: label, percent: pct, text: String(format: "%.0f%%", pct), resetsAt: resets)
-    }
-
-    private func dumpHeaders(_ h: [String: String], status: Int, account: String) {
-        var payload: [String: Any] = h
-        payload["_http_status"] = status
-        payload["_fetched_at"] = ISO8601DateFormatter().string(from: Date())
+    /// Dumps the parsed usage *structure* only - kinds, percents, resets,
+    /// extra_usage numbers - never the request headers, which is where a
+    /// token would have lived on the old probe path. There are no tokens in
+    /// this response at all, but the rule is kept anyway: this file writes
+    /// what it parsed, not what it received.
+    private func dumpUsage(_ obj: Any, account: String) {
+        let (gauges, lines, state) = ClaudeProvider.readings(fromUsage: obj)
+        let payload: [String: Any] = [
+            "_fetched_at": ISO8601DateFormatter().string(from: Date()),
+            "_state": "\(state)",
+            "lines": lines,
+            "gauges": gauges.map { g -> [String: Any] in
+                [
+                    "label": g.label,
+                    "percent": g.percent as Any,
+                    "text": g.text,
+                    "kind": g.kind.rawValue,
+                    "resets_at": g.resetsAt.map { ISO8601DateFormatter().string(from: $0) } as Any
+                ]
+            }
+        ]
         let safe = account.replacingOccurrences(of: "/", with: "_")
         guard let data = try? JSONSerialization.data(withJSONObject: payload,
                                                      options: [.prettyPrinted, .sortedKeys]) else { return }
-        writePrivate(data, to: Config.dir + "/last-headers-\(safe).json")
+        writePrivate(data, to: Config.dir + "/last-usage-\(safe).json")
     }
 }
+
 
 func worstState(_ gauges: [Gauge]) -> ReadingState {
     var s = ReadingState.ok
