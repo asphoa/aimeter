@@ -96,6 +96,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastFetched: [String: Date] = [:]
     private var timer: Timer?
     private var refreshing = false
+    /// Owns the floating card panel when `menuBar.panel == "cards"` (the
+    /// default, v1.0.27). Left nil for the "menu" fallback, which keeps using
+    /// `statusItem.menu` exactly as before.
+    private var cardPanel: CardPanelController?
     private lazy var ringAnimator = RingAnimator { [weak self] img in
         self?.statusItem?.button?.image = img
         self?.statusItem?.button?.imagePosition = .imageOnly
@@ -119,30 +123,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     guard let self else { return }
                     self.cfg = Config.load()
                     Palette.overrides = self.cfg.colours
-                    self.rebuildMenu()
+                    self.refreshUI()
                     self.updateTitle()
                 }
             }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "AI …"
-        let menu = NSMenu()
-        menu.delegate = self
-        statusItem.menu = menu
-        rebuildMenu()
+        setUpStatusItemInteraction()
 
         refresh()
         restartTimer()
     }
 
+    /// Wires the status item to whichever front-end `menuBar.panel` selects.
+    /// "menu" keeps the historical NSMenu path (a click pops the menu itself,
+    /// no action needed); "cards" gives the button its own click action that
+    /// toggles the floating panel instead.
+    private func setUpStatusItemInteraction() {
+        if cfg.menuBar.panel == "menu" {
+            let menu = NSMenu()
+            menu.delegate = self
+            statusItem.menu = menu
+            rebuildMenu()
+        } else {
+            statusItem.menu = nil
+            statusItem.button?.target = self
+            statusItem.button?.action = #selector(statusItemClicked)
+            statusItem.button?.sendAction(on: [.leftMouseUp])
+            let panel = CardPanelController()
+            wirePanelActions(panel.state)
+            cardPanel = panel
+        }
+    }
+
+    private func wirePanelActions(_ state: PanelState) {
+        state.onRefreshAll = { [weak self] in self?.doRefresh() }
+        state.onRefreshProvider = { [weak self] pid in self?.checkProviderByID(pid) }
+        state.onOpenHistory = { [weak self] in self?.openHistory() }
+        state.onOpenAccounts = { [weak self] in self?.openAccounts() }
+        state.onOpenSettings = { [weak self] in self?.openAccounts() }
+        state.onQuit = { [weak self] in self?.quit() }
+        state.onPickLanguage = { [weak self] l in self?.setLanguage(l) }
+        state.onPickInterval = { [weak self] s in self?.setInterval(s) }
+        state.onToggleLogin = { [weak self] in self?.toggleLogin() }
+        state.onOpenDebug = { [weak self] in self?.openDebug() }
+        state.onOpenAbout = { [weak self] in self?.openAbout() }
+        state.onCursorOpen = { [weak self] in self?.openCursorUsage() }
+    }
+
+    @objc private func statusItemClicked() {
+        guard let button = statusItem.button, let panel = cardPanel else { return }
+        refreshDue()
+        panel.toggle(from: button)
+    }
+
     /// Re-reads the settings file after the Accounts window changed it, then
-    /// refetches so the menu reflects the new set immediately.
+    /// refetches so the panel/menu reflects the new set immediately.
     private func reload() {
+        let oldPanelStyle = cfg.menuBar.panel
         cfg = Config.load()
         L.current = cfg.language
         Palette.overrides = cfg.colours
         providers = buildProviders(cfg)
         readings = readings.filter { key, _ in providers.contains { $0.id == key } }
+        if cfg.menuBar.panel != oldPanelStyle {
+            cardPanel?.close()
+            cardPanel = nil
+            setUpStatusItemInteraction()
+        }
         restartTimer()
         lastRefresh = nil
         refresh()
@@ -193,9 +242,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ReadingsBox.shared.current = self.readings
             self.lastRefresh = Date()
             self.refreshing = false
-            self.rebuildMenu()
+            self.refreshUI()
             self.updateTitle()
         }
+    }
+
+    /// Rebuilds whichever front-end is live: the NSMenu for the "menu"
+    /// fallback, or the card panel's observable state for the default.
+    private func refreshUI() {
+        if let cardPanel {
+            cardPanel.state.model = PanelModelBuilder.build(readings: readings, cfg: cfg)
+            cardPanel.state.lastRefresh = lastRefresh
+            cardPanel.state.refreshIntervalSeconds = cfg.interval(cfg.menuBar.primary)
+            cardPanel.state.loginEnabled = SMAppService.mainApp.status == .enabled
+            cardPanel.state.language = cfg.language
+            cardPanel.state.animate = cfg.menuBar.animate
+            cardPanel.state.sparkline = loadSparklineSamples()
+        } else {
+            rebuildMenu()
+        }
+    }
+
+    /// The primary provider's short-window trend, refreshed once per fetch -
+    /// never on every redraw (see `Sparkline.samples`).
+    private func loadSparklineSamples() -> [(Date, Double)] {
+        Sparkline.recentSamples(historyDir: Config.dir + "/history", provider: cfg.menuBar.primary)
     }
 
     /// Refresh on open, but never more than once every 15s - the Claude row
@@ -314,7 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// One of the two paths a person can trigger, and therefore one of the two
     /// allowed to do what a timer must not: make a request, or launch another
     /// program. Both reach a provider as `manual: true`; nothing else does.
-    @objc private func doRefresh() {
+    @objc func doRefresh() {
         lastRefresh = nil
         lastFetched.removeAll()
         // "Only when I ask" means this button too: a source set to manual has
@@ -324,7 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh(scheduled, manual: true)
     }
 
-    @objc private func toggleLogin() {
+    @objc func toggleLogin() {
         do {
             if SMAppService.mainApp.status == .enabled {
                 try SMAppService.mainApp.unregister()
@@ -337,7 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             a.informativeText = error.localizedDescription
             a.runModal()
         }
-        rebuildMenu()
+        refreshUI()
     }
 
     private func languageMenu() -> NSMenuItem {
@@ -372,54 +443,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func pickLanguage(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let lang = Lang(rawValue: raw) else { return }
+        setLanguage(lang)
+    }
+
+    /// Also the panel's "…" language picker - `pickLanguage(_:)` is just the
+    /// NSMenuItem-shaped entry point onto this.
+    func setLanguage(_ lang: Lang) {
         cfg.language = lang
         cfg.save()
         L.current = lang
         lastRefresh = nil
         refresh()          // provider text is localised at fetch time
-        rebuildMenu()
+        refreshUI()
     }
 
     @objc private func pickInterval(_ sender: NSMenuItem) {
         guard let secs = sender.representedObject as? Int else { return }
+        setInterval(secs)
+    }
+
+    /// Also the panel's "…" interval picker.
+    func setInterval(_ secs: Int) {
         // The menu sets the default; per-provider overrides live in the
         // Accounts window and are left alone here.
         cfg.refreshSeconds = secs
         cfg.save()
         restartTimer()
-        rebuildMenu()
+        refreshUI()
+    }
+
+    /// The panel's per-card click: check one provider, on purpose.
+    func checkProviderByID(_ pid: String) {
+        guard let provider = providers.first(where: { $0.id == pid }) else { return }
+        lastFetched[pid] = nil
+        refresh([provider], manual: true)
     }
 
     /// Checking one source, on purpose. The other `manual: true` path - and the
     /// one the Claude row's CLI refresh and the Antigravity panel are really
     /// for, since both take seconds and start a vendor binary.
     @objc private func checkProvider(_ sender: NSMenuItem) {
-        guard let pid = sender.representedObject as? String,
-              let provider = providers.first(where: { $0.id == pid }) else { return }
-        lastFetched[pid] = nil
-        refresh([provider], manual: true)
+        guard let pid = sender.representedObject as? String else { return }
+        checkProviderByID(pid)
     }
 
-    @objc private func openAccounts() {
+    @objc func openAccounts() {
         AccountsWindowController.shared.show()
     }
 
-    @objc private func openDebug() {
+    @objc func openDebug() {
         NSWorkspace.shared.open(URL(fileURLWithPath: Config.dir))
     }
 
-    @objc private func openHistory() {
+    @objc func openHistory() {
         let (_, htmlPath) = HistoryReport.export()
         NSWorkspace.shared.open(URL(fileURLWithPath: htmlPath))
     }
 
-    @objc private func openCursorUsage() {
+    @objc func openCursorUsage() {
         NSWorkspace.shared.open(URL(string: "https://cursor.com/dashboard/spending")!)
     }
 
-    @objc private func openAbout() {
+    @objc func openAbout() {
         AboutWindowController.shared.show()
     }
 
-    @objc private func quit() { ringAnimator.stop(); NSApp.terminate(nil) }
+    @objc func quit() { ringAnimator.stop(); cardPanel?.close(); NSApp.terminate(nil) }
 }

@@ -1765,6 +1765,190 @@ func testResolveStripLineYieldsNoStripLineForAGaugelessCursorReading() {
     T.check("a gaugeless off reading yields no bar data", !line.hasData)
 }
 
+// MARK: - PanelModel: the card panel's pure builder (v1.0.27)
+
+func testPanelModelPrimaryPicksConfiguredProvider() {
+    var codex = Reading(id: "codex", title: "Codex")
+    codex.gauges = [Gauge(label: "5h", percent: 40, text: "40%", kind: .shortWindow)]
+    var cfg = Config()
+    cfg.menuBar.primary = "codex"
+    let model = PanelModelBuilder.build(readings: ["codex": [codex]], cfg: cfg)
+    T.eq("primary card is the configured provider", model.primary.providerId, "codex")
+    T.eq("primary hero comes from that provider's gauge", model.primary.heroPercent, 40)
+}
+
+func testPanelModelHeroUsesShortWindowGauge() {
+    var claude = Reading(id: "claude", title: "Claude")
+    claude.gauges = [
+        Gauge(label: "week", percent: 97, text: "97%", kind: .longWindow),
+        Gauge(label: "5h", percent: 19, text: "19%", kind: .shortWindow)
+    ]
+    let model = PanelModelBuilder.build(readings: ["claude": [claude]], cfg: Config())
+    T.eq("hero percent is the shortWindow gauge, not the first gauge", model.primary.heroPercent, 19)
+    T.eq("hero window label follows the shortWindow gauge", model.primary.windowLabel, "5h")
+}
+
+func testPanelModelChipOrderIsLongThenModelSortedThenOther() {
+    var claude = Reading(id: "claude", title: "Claude")
+    claude.gauges = [
+        Gauge(label: "5h", percent: 19, text: "19%", kind: .shortWindow),
+        Gauge(label: "Extra usage", percent: 5, text: "5%", kind: .other),
+        Gauge(label: "Zebra", percent: 3, text: "3%", kind: .modelWindow),
+        Gauge(label: "week", percent: 97, text: "97%", kind: .longWindow),
+        Gauge(label: "Alpha", percent: 9, text: "9%", kind: .modelWindow)
+    ]
+    let model = PanelModelBuilder.build(readings: ["claude": [claude]], cfg: Config())
+    T.eq("chip order: longWindow, modelWindows sorted, then other",
+         model.primary.chips.map(\.label), ["week", "Alpha", "Zebra", "Extra usage"])
+}
+
+func testPanelModelSecondaryOrderIsFixed() {
+    let ids = ["cursor", "local", "agy", "deepseek", "openrouter", "codex", "zzzgeneric"]
+    var readings: [String: [Reading]] = [:]
+    for id in ids {
+        var r = Reading(id: id, title: id)
+        r.gauges = [Gauge(label: "x", percent: 10, text: "10%", kind: .other)]
+        readings[id] = [r]
+    }
+    let model = PanelModelBuilder.build(readings: readings, cfg: Config())   // primary = claude, absent
+    T.eq("secondary order: codex, openrouter, deepseek, agy, local, cursor, then others",
+         model.secondaries.map(\.id), ["codex", "openrouter", "deepseek", "agy", "local", "cursor", "zzzgeneric"])
+}
+
+func testPanelModelSecondaryOrderExcludesThePrimary() {
+    var codex = Reading(id: "codex", title: "Codex")
+    codex.gauges = [Gauge(label: "5h", percent: 40, text: "40%", kind: .shortWindow)]
+    var cfg = Config()
+    cfg.menuBar.primary = "codex"
+    let model = PanelModelBuilder.build(readings: ["codex": [codex]], cfg: cfg)
+    T.check("the primary provider does not also appear as a secondary card",
+           !model.secondaries.contains { $0.id == "codex" })
+}
+
+func testPanelModelFailureReadingYieldsTheAlarmMessage() {
+    let failed = Reading.failed("claude", "Claude", nil, "Connection failed: timed out")
+    let model = PanelModelBuilder.build(readings: ["claude": [failed]], cfg: Config())
+    T.eq("primary state is .failure", model.primary.state, .failure)
+    T.eq("primary failure message is the reading's first line",
+         model.primary.failureMessage, "Connection failed: timed out")
+
+    var cfg = Config()
+    cfg.menuBar.primary = "somethingElse"
+    let failedCodex = Reading.failed("codex", "Codex", nil, "HTTP 500")
+    let model2 = PanelModelBuilder.build(readings: ["codex": [failedCodex]], cfg: cfg)
+    guard let card = model2.secondaries.first(where: { $0.id == "codex" }) else {
+        T.check("codex produced a secondary card", false); return
+    }
+    T.eq("secondary card state is .failure", card.state, .failure)
+    T.eq("secondary card failure message is the reading's first line", card.failureMessage, "HTTP 500")
+}
+
+func testPanelModelMissingPrimaryYieldsTheNoDataState() {
+    let model = PanelModelBuilder.build(readings: [:], cfg: Config())
+    T.check("no reading at all -> primary has no data", !model.primary.hasData)
+    T.eq("no reading at all -> primary state is .off", model.primary.state, .off)
+
+    var otherOnly = Reading(id: "codex", title: "Codex")
+    otherOnly.gauges = [Gauge(label: "5h", percent: 10, text: "10%", kind: .shortWindow)]
+    let model2 = PanelModelBuilder.build(readings: ["codex": [otherOnly]], cfg: Config())
+    T.check("primary's own id absent from readings -> no data even though others exist",
+           !model2.primary.hasData)
+}
+
+// MARK: - PanelFormat: reset-time phrasing
+
+func testPanelFormatResetTextPastIsEndedFutureIsUntilReset() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let future = now.addingTimeInterval(3600)
+    let past = now.addingTimeInterval(-3600)
+    T.isNil("no resetsAt -> no reset text", PanelFormat.resetText(nil, now: now))
+    let futureText = PanelFormat.resetText(future, now: now) ?? ""
+    T.check("future resetsAt reads \"until reset\"", futureText.contains("until reset"), futureText)
+    let pastText = PanelFormat.resetText(past, now: now) ?? ""
+    T.check("past resetsAt reads \"ended\"", pastText.contains("ended"), pastText)
+}
+
+// MARK: - Config: an old config.json without "panel" decodes as "cards"
+
+func testConfigPanelDefaultsToCardsForAnOldConfigJSON() {
+    let data = Data("{}".utf8)
+    guard let cfg = try? JSONDecoder().decode(Config.self, from: data) else {
+        T.check("empty config decodes", false); return
+    }
+    T.eq("default menuBar.panel is \"cards\"", cfg.menuBar.panel, "cards")
+
+    // A settings file with every other field already populated by an older
+    // build, but no "panel" key at all - the exact shape this guards.
+    let oldStyle = """
+    {"menuBar": {"lines": [], "staleAfterMinutes": 360, "colourScheme": "provider",
+     "adaptiveHueOffset": 218, "style": "ring", "primary": "claude", "alertDot": true, "animate": true}}
+    """
+    guard let cfg2 = try? JSONDecoder().decode(Config.self, from: Data(oldStyle.utf8)) else {
+        T.check("pre-v1.0.27-shaped config decodes", false); return
+    }
+    T.eq("panel-less menuBar still defaults panel to \"cards\"", cfg2.menuBar.panel, "cards")
+}
+
+// MARK: - Sparkline: the primary card's trend samples
+
+func testSparklineSamplesFiltersByProviderAndKind() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let iso = ISO8601DateFormatter()
+    func line(_ provider: String, _ kind: String, _ pct: Double, _ t: Date) -> String {
+        "{\"provider\":\"\(provider)\",\"kind\":\"\(kind)\",\"percent\":\(pct),\"t\":\"\(iso.string(from: t))\"}"
+    }
+    let lines = [
+        line("claude", "shortWindow", 10, now.addingTimeInterval(-3600)),
+        line("codex", "shortWindow", 99, now.addingTimeInterval(-3600)),      // wrong provider
+        line("claude", "longWindow", 55, now.addingTimeInterval(-3600)),     // wrong kind
+        line("claude", "shortWindow", 20, now.addingTimeInterval(-1800))
+    ]
+    let samples = Sparkline.samples(from: lines, provider: "claude", now: now)
+    T.eq("only the matching provider+kind lines survive", samples.count, 2)
+    T.check("no sample carries the wrong-provider or wrong-kind percent",
+           !samples.contains { $0.1 == 99 || $0.1 == 55 })
+}
+
+func testSparklineSamplesIgnoresBadLines() {
+    let now = Date()
+    let iso = ISO8601DateFormatter()
+    let good = "{\"provider\":\"claude\",\"kind\":\"shortWindow\",\"percent\":30,\"t\":\"\(iso.string(from: now))\"}"
+    let lines = ["not json at all", "{\"provider\":\"claude\"}", "", good,
+                 "{\"provider\":\"claude\",\"kind\":\"shortWindow\",\"percent\":null,\"t\":\"\(iso.string(from: now))\"}"]
+    let samples = Sparkline.samples(from: lines, provider: "claude", now: now)
+    T.eq("only the one well-formed line with a numeric percent survives", samples.count, 1)
+}
+
+func testSparklineSamplesRespectsTheTwentyFourHourWindow() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let iso = ISO8601DateFormatter()
+    func line(_ t: Date) -> String {
+        "{\"provider\":\"claude\",\"kind\":\"shortWindow\",\"percent\":50,\"t\":\"\(iso.string(from: t))\"}"
+    }
+    let lines = [line(now.addingTimeInterval(-25 * 3600)),  // too old
+                 line(now.addingTimeInterval(-23 * 3600)),
+                 line(now)]
+    let samples = Sparkline.samples(from: lines, provider: "claude", now: now)
+    T.eq("a line older than 24h is dropped", samples.count, 2)
+}
+
+func testSparklineSamplesDownsamplesToAtMostNinetySixAndStaysChronological() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let iso = ISO8601DateFormatter()
+    var lines: [String] = []
+    for i in 0..<500 {
+        let t = now.addingTimeInterval(-Double(500 - i) * 100)   // ascending, within 24h
+        lines.append("{\"provider\":\"claude\",\"kind\":\"shortWindow\",\"percent\":\(i % 100),"
+                    + "\"t\":\"\(iso.string(from: t))\"}")
+    }
+    let samples = Sparkline.samples(from: lines, provider: "claude", now: now, maxPoints: 96)
+    T.check("downsampled to at most 96 points", samples.count <= 96, "\(samples.count)")
+    var prev = Date.distantPast
+    var chronological = true
+    for s in samples { if s.0 < prev { chronological = false }; prev = s.0 }
+    T.check("samples stay in chronological order after downsampling", chronological)
+}
+
 // MARK: - entry point
 //
 // @main rather than a plain main.swift: top-level executable statements are
@@ -1854,6 +2038,19 @@ struct Runner {
         testHistoryReportExportProducesHTMLAndCSVWithNoSecrets()
         testCursorProviderHasNoGaugesAndTheLinkLine()
         testResolveStripLineYieldsNoStripLineForAGaugelessCursorReading()
+        testPanelModelPrimaryPicksConfiguredProvider()
+        testPanelModelHeroUsesShortWindowGauge()
+        testPanelModelChipOrderIsLongThenModelSortedThenOther()
+        testPanelModelSecondaryOrderIsFixed()
+        testPanelModelSecondaryOrderExcludesThePrimary()
+        testPanelModelFailureReadingYieldsTheAlarmMessage()
+        testPanelModelMissingPrimaryYieldsTheNoDataState()
+        testPanelFormatResetTextPastIsEndedFutureIsUntilReset()
+        testConfigPanelDefaultsToCardsForAnOldConfigJSON()
+        testSparklineSamplesFiltersByProviderAndKind()
+        testSparklineSamplesIgnoresBadLines()
+        testSparklineSamplesRespectsTheTwentyFourHourWindow()
+        testSparklineSamplesDownsamplesToAtMostNinetySixAndStaysChronological()
 
         let elapsed = Date().timeIntervalSince(start)
         print(String(format: "(%.2fs)", elapsed))

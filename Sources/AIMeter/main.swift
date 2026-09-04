@@ -210,46 +210,44 @@ func renderIcon(to path: String) async {
     print("  ring outer \(f(model.outer)) inner \(f(model.inner)) dot \(model.alertDot) numeral \(model.numeral ?? "—")")
 }
 
-/// `AIMeter --panel out.png` renders the dropdown panel offscreen. AppKit's
-/// behaviour for view-backed menu items is not something to take on trust, and
-/// a PNG is cheaper to check than asking someone to open the menu and describe
-/// what they see.
+/// `AIMeter --panel out.png` renders the card panel offscreen (v1.0.27):
+/// the same `PanelView` an open panel would show, in an `NSHostingView` at
+/// 372pt width. Writes `out.png` for light and `out-dark.png` for dark -
+/// AppKit's behaviour for a view nobody ever put on screen is not something
+/// to take on trust, and a PNG is cheaper to check than asking someone to
+/// open the panel and describe what they see.
 @MainActor
-private func renderPanelRows(_ rows: [NSView], to path: String) {
-    guard !rows.isEmpty else { print("no rows"); return }
-    let w = Panel.width
-    let h = rows.reduce(CGFloat(0)) { $0 + $1.intrinsicContentSize.height }
-    let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
-    var y = h
-    for v in rows {
-        let rh = v.intrinsicContentSize.height
-        y -= rh
-        v.frame = NSRect(x: 0, y: y, width: w, height: rh)
-        container.addSubview(v)
+private func renderPanelState(_ state: PanelState, to path: String) {
+    let hosting = NSHostingView(rootView: PanelView(state: state, opaqueBackground: true))
+    hosting.translatesAutoresizingMaskIntoConstraints = false
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 372, height: 720),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    window.contentView = hosting
+    hosting.layoutSubtreeIfNeeded()
+    // One turn of the runloop so SwiftUI completes its first layout pass -
+    // the same technique --settings/--about already rely on.
+    RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+    hosting.layoutSubtreeIfNeeded()
+    let fitted = hosting.fittingSize
+    let height = max(80, min(fitted.height, 720))
+    window.setContentSize(NSSize(width: 372, height: height))
+    hosting.layoutSubtreeIfNeeded()
+
+    let base = (path as NSString).deletingPathExtension
+    let ext = (path as NSString).pathExtension.isEmpty ? "png" : (path as NSString).pathExtension
+
+    func snapshot(_ appearance: NSAppearance, to outPath: String) {
+        hosting.appearance = appearance
+        appearance.performAsCurrentDrawingAppearance {
+            guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { return }
+            hosting.cacheDisplay(in: hosting.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: outPath))
+            print("wrote \(outPath)  (\(Int(hosting.bounds.width))x\(Int(hosting.bounds.height)) pt)")
+        }
     }
-    // A detached NSView has no backing store on a machine without an attached
-    // display.  Draw into an explicit bitmap instead: this is still the real
-    // row views, but does not silently turn a visual check into no PNG.
-    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                     pixelsWide: Int(w), pixelsHigh: Int(h),
-                                     bitsPerSample: 8, samplesPerPixel: 4,
-                                     hasAlpha: true, isPlanar: false,
-                                     colorSpaceName: .deviceRGB,
-                                     bytesPerRow: 0, bitsPerPixel: 0) else { return }
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    NSColor.windowBackgroundColor.setFill()
-    container.bounds.fill()
-    for v in rows {
-        NSGraphicsContext.current?.saveGraphicsState()
-        NSGraphicsContext.current?.cgContext.translateBy(x: v.frame.origin.x, y: v.frame.origin.y)
-        v.draw(v.bounds)
-        NSGraphicsContext.current?.restoreGraphicsState()
-    }
-    NSGraphicsContext.restoreGraphicsState()
-    try? rep.representation(using: .png, properties: [:])?
-        .write(to: URL(fileURLWithPath: path))
-    print("wrote \(path)  (\(rows.count) rows, \(Int(w))x\(Int(h)) pt)")
+    snapshot(NSAppearance(named: .aqua)!, to: path)
+    snapshot(NSAppearance(named: .darkAqua)!, to: "\(base)-dark.\(ext)")
 }
 
 @MainActor
@@ -258,8 +256,16 @@ private func renderPanelDemo(to path: String) {
     L.current = cfg.language
     Palette.overrides = cfg.colours
     guard let readings = diagnosticDemo(&cfg) else { return }
-    let providers = buildProviders(cfg).filter { readings[$0.id] != nil }
-    renderPanelRows(buildPanelRows(providers, readings, cfg), to: path)
+    let state = PanelState()
+    state.model = PanelModelBuilder.build(readings: readings, cfg: cfg)
+    // Credential-free fixture: the trend stays empty rather than reading this
+    // machine's real usage ledger, so the render is deterministic.
+    state.sparkline = []
+    state.lastRefresh = Date()
+    state.refreshIntervalSeconds = cfg.interval(cfg.menuBar.primary)
+    state.language = cfg.language
+    state.animate = false
+    renderPanelState(state, to: path)
 }
 
 @MainActor
@@ -267,16 +273,22 @@ func renderPanel(to path: String) async {
     var cfg = Config.load()
     L.current = cfg.language
     Palette.overrides = cfg.colours
-    var providers = buildProviders(cfg)
-    var readings: [String: [Reading]] = [:]
-    if let demo = diagnosticDemo(&cfg) {
-        readings = demo
-        providers = providers.filter { readings[$0.id] != nil }
-    } else {
-        for p in providers { readings[p.id] = await p.fetchAll() }
+    if diagnosticDemo(&cfg) != nil {
+        renderPanelDemo(to: path)
+        return
     }
+    let providers = buildProviders(cfg)
+    var readings: [String: [Reading]] = [:]
+    for p in providers { readings[p.id] = await p.fetchAll() }
 
-    renderPanelRows(buildPanelRows(providers, readings, cfg), to: path)
+    let state = PanelState()
+    state.model = PanelModelBuilder.build(readings: readings, cfg: cfg)
+    state.sparkline = Sparkline.recentSamples(historyDir: Config.dir + "/history", provider: cfg.menuBar.primary)
+    state.lastRefresh = Date()
+    state.refreshIntervalSeconds = cfg.interval(cfg.menuBar.primary)
+    state.language = cfg.language
+    state.animate = false   // a still image has nothing to sweep from
+    renderPanelState(state, to: path)
 }
 
 /// `AIMeter --menushot out.png` opens the real dropdown — a genuine `NSMenu`,
@@ -294,6 +306,16 @@ func renderMenuShots(to path: String) async {
     var cfg = Config.load()
     L.current = cfg.language
     Palette.overrides = cfg.colours
+    // The default front-end (v1.0.27) is the floating card panel, which is
+    // not an NSMenu at all - there is nothing here for this flag's
+    // mouse-warp-and-screencapture technique to track. Say so plainly rather
+    // than silently screenshotting whatever happens to be under the pointer;
+    // `--panel` is the deliberate, deterministic way to see the card panel.
+    guard cfg.menuBar.panel == "menu" else {
+        print("--menushot needs menuBar.panel == \"menu\" (the NSMenu fallback) - "
+            + "the default card panel has no NSMenu to track. Use --panel instead.")
+        return
+    }
     var providers = buildProviders(cfg)
     var readings: [String: [Reading]] = [:]
     if let demo = diagnosticDemo(&cfg) {
@@ -434,6 +456,12 @@ if let idx = CommandLine.arguments.firstIndex(of: "--about"),
 if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
    CommandLine.arguments.count > idx + 1 {
     let path = CommandLine.arguments[idx + 1]
+    // A hosted SwiftUI view can draw only after AppKit has an
+    // application/appearance. In a headless diagnostic invocation that is not
+    // created by the normal app startup path, so make it explicit just as
+    // --settings and --menushot do - needed for the demo fixtures too now
+    // that they render the real `PanelView`, not a bare NSView.
+    NSApplication.shared.setActivationPolicy(.accessory)
     if CommandLine.arguments.contains("--demo-high") || CommandLine.arguments.contains("--demo-contrast") ||
        CommandLine.arguments.contains("--demo-expired") {
         // No fetch is involved in a fixture.  Calling it synchronously avoids
@@ -441,10 +469,6 @@ if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
         MainActor.assumeIsolated { renderPanelDemo(to: path) }
         exit(0)
     }
-    // An NSView can draw only after AppKit has an application/appearance.  In
-    // a headless diagnostic invocation that is not created by the normal app
-    // startup path, so make it explicit just as --settings and --menushot do.
-    NSApplication.shared.setActivationPolicy(.accessory)
     var done = false
     // A semaphore would deadlock here: renderPanel needs the main actor, and
     // the main thread is what would be blocked waiting for it.

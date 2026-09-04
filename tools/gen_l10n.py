@@ -210,6 +210,15 @@ ROWS = [
     ('e.pasteonly', 'This service needs a key pasted into the Accounts window, not a file path', '這個服務要在帳號視窗裏貼上金鑰，不能用檔案路徑', 'Ce service nécessite une clé collée dans la fenêtre Comptes, pas un chemin de fichier', 'Dieser Dienst benötigt einen in das Konten-Fenster eingefügten Schlüssel, keinen Dateipfad'),
     ('e.reapprove', 'Add this service again in the Accounts window — its address is not on record', '請在帳號視窗重新加入這個服務——它的網址沒有登記', 'Rajoutez ce service dans la fenêtre Comptes — son adresse n’est pas enregistrée', 'Diesen Dienst im Konten-Fenster erneut hinzufügen — seine Adresse ist nicht hinterlegt'),
     ('e.badpath', 'The balance path is not a plain path', '餘額路徑不是一個單純的路徑', 'Le chemin du solde n’est pas un chemin simple', 'Der Guthaben-Pfad ist kein einfacher Pfad'),
+
+    # v1.0.27: the floating card panel replacing the NSMenu dropdown.
+    ('pn.updated', 'Updated %@ · every %@', '更新於 %@ · 每 %@', 'Mis à jour %@ · toutes les %@', 'Aktualisiert %@ · alle %@'),
+    ('pn.manual', 'manual', '手動', 'manuel', 'manuell'),
+    ('pn.free', 'reads usage without spending quota', '免額度讀取', 'lecture sans consommer de quota', 'liest ohne Kontingentverbrauch'),
+    ('pn.reset.in', '%@ until reset', '%@後重置', 'réinitialisation dans %@', 'Zurücksetzung in %@'),
+    ('pn.trend.empty', 'Trend appears after a few hours of readings', '累積幾小時的讀數後就會出現走勢', 'La tendance apparaît après quelques heures de relevés', 'Der Verlauf erscheint nach einigen Stunden Messwerten'),
+    ('pn.settings', 'Settings', '設定', 'Réglages', 'Einstellungen'),
+    ('pn.more', 'More', '更多', 'Plus', 'Mehr'),
 ]
 
 HEADER = '''import Foundation

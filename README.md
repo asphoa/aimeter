@@ -18,7 +18,7 @@ entry.
 
 The icon is one service ("primary" — Claude Code by default) shown as two
 concentric arcs, not a five-line strip: everything else you're tracking still
-shows up in the dropdown panel, and the alert dot says when it's worth a
+shows up in the card panel below, and the alert dot says when it's worth a
 look. On refresh the arcs sweep from the old value to the new one; past 90%
 the outer arc breathes gently rather than sitting still. Both the sweep and
 the breathing are off automatically when macOS's Reduce Motion is on, and can
@@ -28,8 +28,39 @@ circle. The old five-line bar strip is still there as `menuBar.style: "bars"`
 in `config.json` for anyone who preferred it, but it isn't offered in the
 Settings UI any more.
 
-Click the strip for the full panel: every window, every account, when each one
-resets, and the plain-language reason when something cannot be read.
+## The panel
+
+Clicking the icon (v1.0.27) opens a floating card, not an `NSMenu` dropdown —
+it stays anchored under the icon, sits above everything else, and closes on a
+click outside, Esc, clicking the icon again, or the app losing focus.
+
+- **Header** — "AIMeter" on the left, "Updated *time* · every *interval*" (or
+  "· manual" when the primary service is not polled) on the right.
+- **Primary card** — a lamp for its state, the service's name, and (for
+  Claude) "reads usage without spending quota" or (for a snapshot service)
+  how old the snapshot is. A 64pt ring plus a big number is the 5-hour window;
+  under it, a chip per remaining window — the weekly window first, then any
+  per-model weekly window sorted by name, then anything else (overage, extra
+  usage) — each with its own tiny ring, value, and reset time. Below the chips,
+  a trend line: the last 24h of that 5-hour window, read straight from the
+  usage ledger on disk (see **Usage history** below) — with fewer than two
+  points recorded yet, it just says so rather than drawing a shape.
+- **Secondary cards**, in a fixed order — Codex, then OpenRouter (one row per
+  key), then a compact two-column row of DeepSeek, Antigravity, Local AI, and
+  Cursor — followed by anything else you've added. A failed reading shows its
+  message in red instead of a meter.
+- **Click any card** to check that one service by hand — the same "Check now"
+  the old dropdown had, now with a brief highlight flash instead of its own
+  menu row. **Hover** lifts a card slightly and shows the exact reset time as
+  a tooltip.
+- **Footer** — five icon buttons (refresh ⌘R, usage history, accounts,
+  settings, quit ⌘Q) and a **…** menu for everything else the old dropdown's
+  bottom half held: language, refresh interval, start at login, debug folder,
+  about. Esc closes the panel from anywhere.
+
+Prefer the old `NSMenu` dropdown? Set `"panel": "menu"` under `menuBar` in
+`config.json` (there is no Settings toggle for it) — every card above becomes
+the same rows and footer items the pre-v1.0.27 dropdown drew.
 
 ## Requirements
 
@@ -46,7 +77,7 @@ open dist/AIMeter.app
 ```
 
 Move `dist/AIMeter.app` into `/Applications` if you want it filed properly, then
-tick **Start at login** in the menu.
+tick **Start at login** from the panel footer's **…** menu.
 
 **Run `tools/make_signing_cert.sh` before the first build.** Without it the app
 is signed ad hoc, which means macOS identifies it by the hash of its own bytes:
@@ -106,17 +137,22 @@ missed the bug too.
 ### Diagnostics
 
 ```bash
-./dist/AIMeter.app/Contents/MacOS/AIMeter --once          # every reading, as text
-./dist/AIMeter.app/Contents/MacOS/AIMeter --icon out    # ring, 4x: out-light.png, out-dark.png, out-states.png
-./dist/AIMeter.app/Contents/MacOS/AIMeter --panel out.png # panel rows on an opaque diagnostic ground
-./dist/AIMeter.app/Contents/MacOS/AIMeter --menushot out.png # the real translucent NSMenu
+./dist/AIMeter.app/Contents/MacOS/AIMeter --once            # every reading, as text
+./dist/AIMeter.app/Contents/MacOS/AIMeter --icon out        # ring, 4x: out-light.png, out-dark.png, out-states.png
+./dist/AIMeter.app/Contents/MacOS/AIMeter --panel out.png   # the card panel: out.png (light), out-dark.png
+./dist/AIMeter.app/Contents/MacOS/AIMeter --menushot out.png # the real translucent NSMenu — "menu" style only
 ```
 
-`--icon` and `--panel` draw the same strip and row views as the app.  The
-panel image deliberately has an opaque diagnostic ground; use `--menushot` to
-check the real menu material and highlighting.  Add `--demo-high` for five
-near-limit services, or `--demo-contrast` for the reported 19% 5-hour / 97%
-weekly Claude shape, without reading credentials or making a request.
+`--icon` and `--panel` render the same views the app shows: `--panel` hosts
+the actual `PanelView` SwiftUI content offscreen, once under a light
+appearance and once dark, so a change to the panel can be checked as a PNG
+rather than by opening it and describing what's there. Add `--demo-high` for
+five near-limit services, or `--demo-contrast` for the reported 19% 5-hour /
+97% weekly Claude shape (plus a 9% "Fable" model-scoped chip), without
+reading credentials or making a request; both keep working through `--panel`.
+`--menushot` only has something to track when `menuBar.panel` is set to
+`"menu"` — the default card panel has no `NSMenu` to open, and the command
+says so rather than screenshotting something misleading.
 
 ## Security: what this app reads, and what it sends
 
@@ -191,7 +227,7 @@ This is the part worth reading before you trust it with your credentials.
 Every completed refresh — timer or manual, for every provider — appends one
 line per gauge to a monthly ledger at
 `~/.config/aimeter/history/YYYY-MM.jsonl` (UTC month), written 0600 in a 0700
-directory. Each line carries only what the menu already shows: the provider
+directory. Each line carries only what the panel already shows: the provider
 and account, the gauge's label, kind, percentage and text, its reset time, and
 the reading's state — never a token, header, or any other credential. A
 provider that failed outright is logged as one line with the error message, so
@@ -202,8 +238,8 @@ Retention defaults to 12 months (`history.retentionMonths` in the settings
 file); older monthly files are deleted once at launch. Set
 `history.enabled: false` to stop the ledger being written at all.
 
-**Open usage history…** in the menu (next to **Open debug folder**) rebuilds
-the report from every ledger file and opens it. The same thing happens from
+The panel footer's chart-icon button rebuilds the report from every ledger
+file and opens it (the **…** menu's **Open debug folder** is right next to it). The same thing happens from
 the command line with `AIMeter --export-history [dir]`, which writes
 `history.csv` (one row per ledger line) and `history.html` — a self-contained
 page, inline CSS and JS, no external resources of any kind, drawn with a small
@@ -343,7 +379,8 @@ Set `agyQuotaViaTUI: false` in the settings file to switch it off entirely.
 
 ## Adding accounts
 
-Everything is done in **Accounts…** in the menu. Nothing requires editing a file.
+Everything is done in **Accounts…** — the panel footer's person-icon button, or
+the **…** menu. Nothing requires editing a file.
 
 - **Detect automatically** finds what is already on this Mac and tests each find
   immediately, so a key file holding a credential that was revoked months ago

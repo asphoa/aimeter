@@ -1,0 +1,504 @@
+import AppKit
+import SwiftUI
+
+/// The live view-model `PanelView` observes. AppDelegate rebuilds `model` and
+/// `sparkline` after every fetch (see `AppDelegate.refreshUI`); the `on...`
+/// closures are wired once, in `AppDelegate.wirePanelActions`, so this type
+/// itself has no notion of how its actions are actually carried out.
+@MainActor
+final class PanelState: ObservableObject {
+    @Published var model: PanelModel = .empty(primaryId: "claude")
+    @Published var sparkline: [(Date, Double)] = []
+    @Published var lastRefresh: Date?
+    @Published var refreshIntervalSeconds: Int = 60
+    @Published var language: Lang = .system
+    @Published var loginEnabled: Bool = false
+    @Published var animate: Bool = true
+
+    var onRefreshAll: () -> Void = {}
+    var onRefreshProvider: (String) -> Void = { _ in }
+    var onOpenHistory: () -> Void = {}
+    var onOpenAccounts: () -> Void = {}
+    var onOpenSettings: () -> Void = {}
+    var onQuit: () -> Void = {}
+    var onPickLanguage: (Lang) -> Void = { _ in }
+    var onPickInterval: (Int) -> Void = { _ in }
+    var onToggleLogin: () -> Void = {}
+    var onOpenDebug: () -> Void = {}
+    var onOpenAbout: () -> Void = {}
+    var onCursorOpen: () -> Void = {}
+}
+
+private var panelAppVersion: String {
+    Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+}
+
+private let intervalChoices = [30, 60, 300, 900, 0]
+private func intervalLabel(_ secs: Int) -> String {
+    secs == 0 ? L.t("m.onopen") : (secs < 60 ? L.t("m.seconds", secs) : L.t("m.minutes", secs / 60))
+}
+
+/// The floating card panel's content, top to bottom: header, primary card
+/// (hero ring + chips + sparkline), the fixed-order secondary cards, footer.
+/// Pure SwiftUI so the same view drives both the live panel (`PanelWindow`)
+/// and the offscreen `--panel` renderer in main.swift.
+struct PanelView: View {
+    @ObservedObject var state: PanelState
+    var requestClose: () -> Void = {}
+    /// True only for the offscreen `--panel` renderer. The live panel gets its
+    /// translucent ground from the NSPanel's own `NSVisualEffectView`
+    /// (`PanelWindow.swift`) and must stay clear here so that shows through;
+    /// an offscreen render has no live desktop behind it for vibrancy to
+    /// blend with, so it substitutes a plain opaque fill instead of the flat
+    /// mid-grey a materialless capture would otherwise show.
+    var opaqueBackground: Bool = false
+
+    private var animated: Bool {
+        state.animate && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    PrimaryCardView(primary: state.model.primary, sparkline: state.sparkline,
+                                    animated: animated,
+                                    onCheck: { state.onRefreshProvider(state.model.primary.providerId) })
+                    ForEach(Array(state.model.secondaries.enumerated()), id: \.offset) { _, card in
+                        SecondaryCardView(card: card,
+                                          onCheck: { state.onRefreshProvider(card.id) },
+                                          onCursorOpen: state.onCursorOpen)
+                    }
+                }
+                .padding(12)
+            }
+            footer
+        }
+        .frame(width: 372)
+        .frame(maxHeight: 720)
+        .background(opaqueBackground ? Color(nsColor: .windowBackgroundColor) : Color.clear)
+        .background(shortcuts)
+        .onExitCommand(perform: requestClose)
+    }
+
+    /// Zero-size, invisible buttons purely so ⌘R/⌘Q work while the panel is
+    /// key - the panel has no NSMenu of its own to carry the key equivalents.
+    private var shortcuts: some View {
+        ZStack {
+            Button("") { state.onRefreshAll() }.keyboardShortcut("r", modifiers: .command)
+            Button("") { state.onQuit() }.keyboardShortcut("q", modifiers: .command)
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+    }
+
+    private var header: some View {
+        HStack {
+            Text("AIMeter")
+                .font(.system(size: 11, weight: .semibold))
+                .kerning(0.8)
+            Spacer()
+            Text(PanelFormat.updatedLine(time: state.lastRefresh, intervalSeconds: state.refreshIntervalSeconds))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private var footer: some View {
+        VStack(spacing: 6) {
+            Divider()
+            HStack(spacing: 2) {
+                FooterIconButton(systemName: "arrow.clockwise", help: L.t("m.refresh")) { state.onRefreshAll() }
+                FooterIconButton(systemName: "chart.xyaxis.line", help: L.t("m.history")) { state.onOpenHistory() }
+                FooterIconButton(systemName: "person.crop.circle", help: L.t("m.accounts")) { state.onOpenAccounts() }
+                FooterIconButton(systemName: "gearshape", help: L.t("pn.settings")) { state.onOpenSettings() }
+                FooterIconButton(systemName: "power", help: L.t("m.quit")) { state.onQuit() }
+                Spacer()
+                moreMenu
+                    .help(L.t("pn.more"))
+            }
+            .padding(.horizontal, 8)
+            Text("v\(panelAppVersion)")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.bottom, 8)
+    }
+
+    /// Pops the same secondary items `AppDelegate.rebuildMenu` puts at the
+    /// bottom of the NSMenu fallback - language, interval, start at login,
+    /// debug folder, about - as a real menu (SwiftUI's `Menu` is backed by an
+    /// actual `NSMenu` on macOS), so nothing from the old dropdown is lost.
+    private var moreMenu: some View {
+        Menu {
+            Menu(L.t("m.language")) {
+                ForEach(Lang.allCases, id: \.self) { lang in
+                    Button {
+                        state.onPickLanguage(lang)
+                    } label: {
+                        if state.language == lang { Label(lang.displayName, systemImage: "checkmark") }
+                        else { Text(lang.displayName) }
+                    }
+                }
+            }
+            Menu(L.t("m.interval")) {
+                ForEach(intervalChoices, id: \.self) { secs in
+                    Button {
+                        state.onPickInterval(secs)
+                    } label: {
+                        if state.refreshIntervalSeconds == secs { Label(intervalLabel(secs), systemImage: "checkmark") }
+                        else { Text(intervalLabel(secs)) }
+                    }
+                }
+            }
+            Toggle(L.t("m.login"), isOn: Binding(
+                get: { state.loginEnabled },
+                set: { _ in state.onToggleLogin() }))
+            Divider()
+            Button(L.t("m.debug")) { state.onOpenDebug() }
+            Button(L.t("m.about")) { state.onOpenAbout() }
+        } label: {
+            Text("…").font(.system(size: 13, weight: .bold))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+}
+
+private struct FooterIconButton: View {
+    var systemName: String
+    var help: String
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .frame(width: 30, height: 26)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+// MARK: - Primary card
+
+private struct PrimaryCardView: View {
+    var primary: PanelModel.Primary
+    var sparkline: [(Date, Double)]
+    var animated: Bool
+    var onCheck: () -> Void
+
+    @State private var hovering = false
+    @State private var flashing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Circle().fill(Color(nsColor: stateColour(primary.state))).frame(width: 8, height: 8)
+                Text(primary.title).font(.system(size: 13, weight: .semibold))
+                Spacer()
+                if let ageText = primary.ageText {
+                    Text(ageText).font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+
+            if let msg = primary.failureMessage {
+                Text(msg).font(.system(size: 12))
+                    .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
+            } else if !primary.hasData {
+                Text(L.t("m.loading")).font(.system(size: 12)).foregroundStyle(.secondary)
+            } else {
+                HStack(alignment: .center, spacing: 14) {
+                    RingGauge(percent: primary.heroPercent, animated: animated)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(alignment: .firstTextBaseline, spacing: 2) {
+                            Text(heroNumber)
+                                .font(.system(size: 34, weight: .bold)).monospacedDigit()
+                            if primary.heroPercent != nil {
+                                Text("%").font(.system(size: 14)).foregroundStyle(.secondary)
+                            }
+                        }
+                        Text(windowLine).font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                if !primary.chips.isEmpty {
+                    ChipsFlow(chips: primary.chips)
+                }
+                SparklineView(samples: sparkline, ink: Color(nsColor: .labelColor))
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CardBackground())
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(nsColor: .labelColor).opacity(flashing ? 0.08 : 0))
+        )
+        .offset(y: hovering ? -1 : 0)
+        .shadow(color: .black.opacity(hovering ? 0.20 : 0), radius: hovering ? 6 : 0, y: hovering ? 2 : 0)
+        .onHover { hovering = $0 }
+        .help(tooltip)
+        .onTapGesture {
+            onCheck()
+            flashing = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { flashing = false }
+        }
+        .animation(.easeOut(duration: 0.15), value: hovering)
+        .animation(.easeOut(duration: 0.15), value: flashing)
+    }
+
+    private var heroNumber: String {
+        guard let pct = primary.heroPercent else { return primary.hasData ? "—" : "—" }
+        return String(format: "%.0f", pct)
+    }
+
+    private var windowLine: String {
+        let parts: [String?] = [primary.windowLabel.isEmpty ? nil : primary.windowLabel, primary.resetText]
+        return parts.compactMap { $0 }.joined(separator: " · ")
+    }
+
+    private var tooltip: String {
+        guard let at = primary.resetsAt else { return primary.windowLabel }
+        return exactDateTime(at)
+    }
+}
+
+/// One remaining gauge of the primary reading: a 12pt conic mini-ring, label,
+/// bold value, and reset text - order is the caller's (`PanelModel` already
+/// sorted longWindow, modelWindow, other).
+private struct ChipsFlow: View {
+    var chips: [PanelModel.Chip]
+
+    var body: some View {
+        // A manual flow layout: SwiftUI has no wrap-aware HStack pre-macOS 15,
+        // and this app's declared deployment target is 14. Three per row
+        // keeps a chip's label legible at the panel's 372pt width.
+        let rows = stride(from: 0, to: chips.count, by: 3).map { Array(chips[$0..<min($0 + 3, chips.count)]) }
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 10) {
+                    ForEach(Array(row.enumerated()), id: \.offset) { _, chip in
+                        ChipView(chip: chip)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+}
+
+private struct ChipView: View {
+    var chip: PanelModel.Chip
+
+    var body: some View {
+        HStack(spacing: 5) {
+            MiniRing(percent: chip.percent)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(chip.label).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                HStack(spacing: 3) {
+                    Text(chip.value).font(.system(size: 11, weight: .semibold)).monospacedDigit()
+                    if let r = chip.resetText {
+                        Text(r).font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .help(chip.resetsAt.map(exactDateTime) ?? chip.label)
+    }
+}
+
+private struct MiniRing: View {
+    var percent: Double?
+
+    private var colour: Color {
+        guard let percent else { return Color(nsColor: .labelColor).opacity(0.3) }
+        switch RingIcon.colourBand(percent) {
+        case .ink: return Color(nsColor: .labelColor)
+        case .warn: return Color(nsColor: Palette.colour(Palette.warn))
+        case .alarm: return Color(nsColor: Palette.colour(Palette.alarm))
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(Color(nsColor: .labelColor).opacity(0.14), lineWidth: 2)
+            Circle()
+                .trim(from: 0, to: CGFloat(max(0, min(100, percent ?? 0)) / 100))
+                .stroke(AngularGradient(colors: [colour.opacity(0.4), colour], center: .center),
+                       style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: 12, height: 12)
+    }
+}
+
+/// The primary card's 64pt hero ring. Sweeps from 0 on appear/refresh when
+/// `animated`, using an ease-out curve of the same shape as `RingIcon.eased`
+/// (fast start, gentle arrival) - the icon's own sweep is drawn frame-by-frame
+/// through `RingAnimator` because it renders to a bitmap `NSImage`, but this
+/// is SwiftUI, so `Animation.timingCurve` reproduces the same curve natively
+/// instead of duplicating that per-frame machinery.
+private struct RingGauge: View {
+    var percent: Double?
+    var animated: Bool
+    @State private var shown: Double = 0
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(Color(nsColor: .labelColor).opacity(0.12), lineWidth: 6)
+            Circle()
+                .trim(from: 0, to: CGFloat(max(0, min(100, shown)) / 100))
+                .stroke(colour, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: 64, height: 64)
+        .onAppear { apply() }
+        .onChange(of: percent) { _, _ in apply() }
+    }
+
+    private var colour: Color {
+        guard let percent else { return Color(nsColor: .labelColor).opacity(0.3) }
+        switch RingIcon.colourBand(percent) {
+        case .ink: return Color(nsColor: .labelColor)
+        case .warn: return Color(nsColor: Palette.colour(Palette.warn))
+        case .alarm: return Color(nsColor: Palette.colour(Palette.alarm))
+        }
+    }
+
+    private func apply() {
+        let target = percent ?? 0
+        guard animated else { shown = target; return }
+        shown = 0
+        withAnimation(.timingCurve(0.33, 1, 0.68, 1, duration: 0.5)) { shown = target }
+    }
+}
+
+// MARK: - Secondary cards
+
+private struct SecondaryCardView: View {
+    var card: PanelModel.SecondaryCard
+    var onCheck: () -> Void
+    var onCursorOpen: () -> Void
+
+    @State private var hovering = false
+    @State private var flashing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Circle().fill(Color(nsColor: stateColour(card.state))).frame(width: 7, height: 7)
+                Text(card.title).font(.system(size: 12, weight: .semibold))
+                Spacer()
+                if let badge = card.badge {
+                    Text(badge).font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }
+            if let msg = card.failureMessage, card.state == .failure {
+                Text(msg).font(.system(size: 11))
+                    .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
+            } else if card.linkOnly {
+                HStack {
+                    Text(card.failureMessage ?? L.t("x.cursor.link"))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                    Image(systemName: "arrow.up.right.square").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                .onTapGesture { onCursorOpen() }
+            } else {
+                ForEach(Array(card.rows.enumerated()), id: \.offset) { _, row in
+                    RowView(row: row)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .opacity(card.opacity)
+        .background(CardBackground(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .labelColor).opacity(flashing ? 0.08 : 0)))
+        .offset(y: hovering ? -1 : 0)
+        .shadow(color: .black.opacity(hovering ? 0.16 : 0), radius: hovering ? 5 : 0, y: hovering ? 1 : 0)
+        .onHover { hovering = $0 }
+        .help(card.rows.compactMap(\.resetsAt).first.map(exactDateTime) ?? card.title)
+        .onTapGesture {
+            guard !card.linkOnly else { return }
+            onCheck()
+            flashing = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { flashing = false }
+        }
+        .animation(.easeOut(duration: 0.15), value: hovering)
+        .animation(.easeOut(duration: 0.15), value: flashing)
+    }
+}
+
+private struct RowView: View {
+    var row: PanelModel.Row
+
+    var body: some View {
+        if row.label.isEmpty && row.percent == nil {
+            // An informational line (DeepSeek's peak/off-peak note, Local AI's
+            // memory line, ...): text only, no meter.
+            Text(row.value).font(.system(size: 10)).foregroundStyle(.secondary)
+        } else {
+            HStack(spacing: 6) {
+                Text(row.label).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .lineLimit(1).frame(maxWidth: 110, alignment: .leading)
+                if let pct = row.percent {
+                    Meter(percent: pct)
+                    Text(String(format: "%.0f%%", pct)).font(.system(size: 11)).monospacedDigit()
+                } else {
+                    Spacer(minLength: 0)
+                    Text(row.value).font(.system(size: 11)).monospacedDigit()
+                }
+                if let r = row.resetText {
+                    Text(r).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+        }
+    }
+}
+
+private struct Meter: View {
+    var percent: Double
+
+    var body: some View {
+        let style = panelGaugeStyle(kind: .other, percent: percent)
+        GeometryReader { geo in
+            let w = geo.size.width
+            let filled = max(percent > 0 ? 2 : 0, min(w, w * CGFloat(percent) / 100))
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color(nsColor: Palette.colour(Palette.track)))
+                Capsule().fill(Color(nsColor: style.fill)).frame(width: filled)
+                if let alert = style.alert {
+                    Capsule().fill(Color(nsColor: alert))
+                        .frame(width: min(style.alertWidth, filled))
+                        .offset(x: filled - min(style.alertWidth, filled))
+                }
+            }
+        }
+        .frame(height: 5)
+        .frame(minWidth: 50, maxWidth: 90)
+    }
+}
+
+private struct CardBackground: View {
+    var cornerRadius: CGFloat = 12
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius)
+            .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+            .overlay(RoundedRectangle(cornerRadius: cornerRadius)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+    }
+}
+
+private func exactDateTime(_ d: Date) -> String {
+    let f = DateFormatter()
+    f.locale = L.locale
+    f.dateStyle = .medium
+    f.timeStyle = .short
+    return f.string(from: d)
+}

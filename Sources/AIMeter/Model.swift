@@ -173,11 +173,12 @@ extension Reading {
 // MARK: - small shared helpers
 
 enum Fmt {
-    /// Localised "in 4h 51m" / "2 hr ago". DateComponentsFormatter does the
-    /// language-specific unit names, so this stays correct in every language
-    /// the table covers without a per-language special case.
-    static func relative(_ date: Date) -> String {
-        let secs = date.timeIntervalSinceNow
+    /// Just the magnitude ("4h 51m"), no "in"/"ago" direction word - for a
+    /// caller that supplies its own directional template (the panel's
+    /// "%@ until reset", which would otherwise double up with `relative`'s
+    /// own "in"/"後"/"dans" wording).
+    static func span(_ date: Date, now: Date = Date()) -> String {
+        let secs = date.timeIntervalSince(now)
         let a = abs(secs)
         if a < 45 { return L.t("t.now") }
         let f = DateComponentsFormatter()
@@ -189,8 +190,17 @@ enum Fmt {
         if a < 3600 { f.allowedUnits = [.minute] }
         else if a < 86400 { f.allowedUnits = [.hour, .minute] }
         else { f.allowedUnits = [.day, .hour] }
-        let span = f.string(from: a) ?? "\(Int(a))s"
-        return secs < 0 ? L.t("t.ago", span) : L.t("t.in", span)
+        return f.string(from: a) ?? "\(Int(a))s"
+    }
+
+    /// Localised "in 4h 51m" / "2 hr ago". DateComponentsFormatter does the
+    /// language-specific unit names, so this stays correct in every language
+    /// the table covers without a per-language special case.
+    static func relative(_ date: Date) -> String {
+        let secs = date.timeIntervalSinceNow
+        if abs(secs) < 45 { return L.t("t.now") }
+        let sp = span(date)
+        return secs < 0 ? L.t("t.ago", sp) : L.t("t.in", sp)
     }
 
     static func money(_ v: Double, _ currency: String) -> String {

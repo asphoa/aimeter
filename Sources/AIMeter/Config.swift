@@ -100,6 +100,10 @@ struct MenuBarConfig: Codable {
     /// the outer arc at ≥90%. Always off when Reduce Motion is on, regardless
     /// of this setting.
     var animate: Bool = true
+    /// "cards" (default, v1.0.27) - a floating card panel replaces the NSMenu
+    /// dropdown. "menu" keeps the old NSMenu path as a fallback, selectable
+    /// only by editing config.json.
+    var panel: String = "cards"
 
     init() {}
 
@@ -113,6 +117,7 @@ struct MenuBarConfig: Codable {
         primary = (try? c.decode(String.self, forKey: .primary)) ?? def.primary
         alertDot = (try? c.decode(Bool.self, forKey: .alertDot)) ?? def.alertDot
         animate = (try? c.decode(Bool.self, forKey: .animate)) ?? def.animate
+        panel = (try? c.decode(String.self, forKey: .panel)) ?? def.panel
         if let decoded = try? c.decode([MenuLine].self, forKey: .lines), !decoded.isEmpty {
             lines = decoded
         } else if let legacy = try? c.decode([String].self, forKey: .rows), !legacy.isEmpty {
@@ -130,7 +135,7 @@ struct MenuBarConfig: Codable {
 
     enum CodingKeys: String, CodingKey {
         case lines, staleAfterMinutes, colourScheme, rows, adaptiveHueOffset
-        case style, primary, alertDot, animate
+        case style, primary, alertDot, animate, panel
     }
 
     func encode(to e: Encoder) throws {
@@ -143,6 +148,7 @@ struct MenuBarConfig: Codable {
         try c.encode(primary, forKey: .primary)
         try c.encode(alertDot, forKey: .alertDot)
         try c.encode(animate, forKey: .animate)
+        try c.encode(panel, forKey: .panel)
     }
 }
 

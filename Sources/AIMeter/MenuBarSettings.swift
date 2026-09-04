@@ -1,48 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// One choosable thing that can occupy a slot in the menu bar strip.
-struct SourceOption: Identifiable, Hashable {
-    var line: MenuLine?
-    var label: String
-    var id: String {
-        guard let l = line else { return "" }
-        return "\(l.provider)|\(l.account)|\(l.gauge)"
-    }
-
-    /// Everything the user could put on the strip, in plain words, built from
-    /// the accounts they actually have rather than from a hardcoded list.
-    static func all(_ cfg: Config) -> [SourceOption] {
-        var out: [SourceOption] = [SourceOption(line: nil, label: L.t("w.empty"))]
-        for kind in ProviderKind.all {
-            let accounts = (cfg.accounts[kind.id] ?? []).filter(\.enabled)
-            guard !accounts.isEmpty else { continue }
-            if kind.id == "openrouter" {
-                // Each key is its own budget, so the useful choices are "the
-                // worst of them" or one named key - not the account list.
-                out.append(SourceOption(line: MenuLine(provider: kind.id),
-                                        label: "\(kind.title) — \(L.t("w.worstkey"))"))
-                for a in accounts {
-                    out.append(SourceOption(line: MenuLine(provider: kind.id, gauge: a.name),
-                                            label: "\(kind.title) — \(a.name)"))
-                }
-                continue
-            }
-            if accounts.count > 1 {
-                out.append(SourceOption(line: MenuLine(provider: kind.id),
-                                        label: "\(kind.title) — \(L.t("w.worstkey"))"))
-            }
-            for a in accounts {
-                out.append(SourceOption(line: MenuLine(provider: kind.id, account: a.name),
-                                        label: accounts.count > 1 ? "\(kind.title) — \(a.name)"
-                                                                  : kind.title))
-            }
-        }
-        out.append(SourceOption(line: MenuLine(provider: "local"), label: L.t("p.local")))
-        return out
-    }
-}
-
 /// The "Menu bar" half of the Accounts window: five ordered slots and a live
 /// preview of what they produce. The preview is the point - without it, picking
 /// sources is guesswork for anyone who does not already know what the strip
