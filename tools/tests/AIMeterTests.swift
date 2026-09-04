@@ -143,6 +143,126 @@ func testAgyTUIParseRejectsTextWithoutAPanel() {
     T.isNil("empty text -> nil", AgyTUI.parse(""))
 }
 
+// MARK: - AgyPrint: the print-mode `/usage` path (v1.0.28's main source)
+//
+// Fixture is a real capture (agy 1.1.26, 2026-09-04, n=3 measured) - no
+// account, email, or credential in it, unlike the TUI's screen capture,
+// which is exactly why print mode was chosen as the main path.
+
+let agyUsageFixture = #"""
+{"conversation_id":"","status":"SUCCESS","response":"Gemini Models\tWeekly Limit Remaining\t93%\t2026-09-11T01:25:50Z\nGemini Models\tFive Hour Limit Remaining\t97%\t2026-09-04T11:25:50Z\nClaude and GPT models\tWeekly Limit Remaining\t100%\t2026-09-11T06:28:20Z\nClaude and GPT models\tFive Hour Limit Remaining\t100%\t2026-09-04T11:28:20Z\n","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0},"command":{"name":"usage","data":{"description":"Within each group, models share a weekly limit and a 5-hour limit. Quota is consumed proportionally to the cost of the tokens. Thus, limits will last longer with shorter tasks or using more cost-effective models. The 5-hour limit smooths out aggregate demand to fairly distribute global capacity across all users, while your weekly limit is tied directly to your individual tier.","groups":[{"name":"Gemini Models","description":"Models within this group: Gemini Flash, Gemini Pro","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","description":"You have used some of your weekly limit, it will fully refresh in 6 days, 18 hours.","window":"weekly","remaining_fraction":0.9287041425704956,"reset_time":"2026-09-11T01:25:50Z"},{"id":"gemini-5h","name":"Five Hour Limit Remaining","description":"You have used some of your 5-hour limit, it will fully refresh in 4 hours, 57 minutes.","window":"5h","remaining_fraction":0.9728128910064697,"reset_time":"2026-09-04T11:25:50Z"}]},{"name":"Claude and GPT models","description":"Models within this group: Claude Opus, Claude Sonnet, GPT-OSS","buckets":[{"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":1,"reset_time":"2026-09-11T06:28:20Z"},{"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":1,"reset_time":"2026-09-04T11:28:20Z"}]}]}}}
+"""#
+
+func testAgyPrintParsesTheMeasuredFixtureIntoTwoGroupsOfTwoPercents() {
+    guard let result = AgyPrint.parse(Data(agyUsageFixture.utf8)) else {
+        T.check("fixture parses", false)
+        return
+    }
+    T.eq("two groups", result.groups.count, 2)
+    guard let gemini = result.groups.first(where: { $0.name.contains("Gemini") }),
+          let claudeGpt = result.groups.first(where: { $0.name.contains("Claude") }) else {
+        T.check("both named groups present", false)
+        return
+    }
+    T.near("Gemini weekly used%", gemini.weeklyUsed ?? -1, 7.1296, tol: 0.01)
+    T.near("Gemini 5h used%", gemini.fiveHourUsed ?? -1, 2.7187, tol: 0.01)
+    T.notNil("Gemini weekly reset parses", gemini.weeklyResets)
+    T.notNil("Gemini 5h reset parses", gemini.fiveHourResets)
+    T.near("Claude/GPT weekly used% at remaining_fraction 1", claudeGpt.weeklyUsed ?? -1, 0, tol: 0.001)
+    T.near("Claude/GPT 5h used% at remaining_fraction 1", claudeGpt.fiveHourUsed ?? -1, 0, tol: 0.001)
+}
+
+func testAgyPrintRemainingFractionOneMeansZeroUsed() {
+    let json = """
+    {"status":"SUCCESS","command":{"data":{"groups":[{"name":"G","buckets":[
+        {"window":"weekly","remaining_fraction":1,"reset_time":"2026-09-11T00:00:00Z"}
+    ]}]}}}
+    """
+    guard let result = AgyPrint.parse(Data(json.utf8)), let g = result.groups.first else {
+        T.check("single-bucket fixture parses", false)
+        return
+    }
+    T.eq("remaining_fraction 1 -> 0 used", g.weeklyUsed, 0)
+}
+
+func testAgyPrintResetTimeParsesWithAndWithoutFractionalSeconds() {
+    for reset in ["2026-09-11T01:25:50Z", "2026-09-11T01:25:50.123Z"] {
+        let json = """
+        {"status":"SUCCESS","command":{"data":{"groups":[{"name":"G","buckets":[
+            {"window":"5h","remaining_fraction":0.5,"reset_time":"\(reset)"}
+        ]}]}}}
+        """
+        guard let result = AgyPrint.parse(Data(json.utf8)), let g = result.groups.first else {
+            T.check("\(reset): parses", false)
+            continue
+        }
+        T.notNil("\(reset): 5h reset parses", g.fiveHourResets)
+    }
+}
+
+func testAgyPrintStatusFailedYieldsNil() {
+    let json = """
+    {"status":"FAILED","command":{"data":{"groups":[{"name":"G","buckets":[
+        {"window":"weekly","remaining_fraction":0.5,"reset_time":"2026-09-11T00:00:00Z"}
+    ]}]}}}
+    """
+    T.isNil("status FAILED -> nil", AgyPrint.parse(Data(json.utf8)))
+}
+
+func testAgyPrintEmptyStdoutYieldsNil() {
+    T.isNil("empty data -> nil", AgyPrint.parse(Data()))
+}
+
+func testAgyPrintMissingBucketsYieldsNil() {
+    let json = """
+    {"status":"SUCCESS","command":{"data":{"groups":[{"name":"G"}]}}}
+    """
+    T.isNil("group with no buckets -> nil", AgyPrint.parse(Data(json.utf8)))
+
+    let emptyArray = """
+    {"status":"SUCCESS","command":{"data":{"groups":[{"name":"G","buckets":[]}]}}}
+    """
+    T.isNil("group with an empty buckets array -> nil", AgyPrint.parse(Data(emptyArray.utf8)))
+}
+
+func testAgyPrintTSVTextModeIsNotParsedAsJSON() {
+    // The same fixture's own "response" field - the TSV text the CLI would
+    // print in its default (non-JSON) text mode - must not be mistaken for
+    // the structured payload this parser expects.
+    let tsv = "Gemini Models\tWeekly Limit Remaining\t93%\t2026-09-11T01:25:50Z\n"
+    T.isNil("TSV text mode -> nil", AgyPrint.parse(Data(tsv.utf8)))
+}
+
+// MARK: - AgyProvider.refused: a real false positive found during this
+// feature's own first live run (2026-09-04), pinned so it cannot come back.
+//
+// An early version scanned the CLI's log file for a bare "403" and it fired
+// on a completely successful run: `keyringAuth: loaded token,
+// expiry=2026-09-04 14:53:58.764034` - the fractional-seconds field
+// `764034` contains the digits `403` by coincidence, and a real account got
+// paused over a request that had actually succeeded. The fix drops the log
+// scan entirely and checks only this run's own stderr, with `\b403\b`.
+
+func testAgyProviderRefusedIgnoresADigitRunThatMerelyContains403() {
+    // The exact string that caused the incident, verbatim.
+    let timestampNoise = "keyringAuth: loaded token, expiry=2026-09-04 14:53:58.764034 +0700 +07 expired=false"
+    T.check("764034's embedded 403 is not a refusal", !AgyProvider.refused(timestampNoise))
+}
+
+func testAgyProviderRefusedRecognisesAnActualHTTP403() {
+    T.check("standalone 403 is a refusal", AgyProvider.refused("Error: HTTP 403 Forbidden"))
+    T.check("403 at line start is a refusal", AgyProvider.refused("403: access denied"))
+}
+
+func testAgyProviderRefusedRecognisesPermissionDenied() {
+    T.check("PERMISSION_DENIED is a refusal", AgyProvider.refused("rpc error: code = PERMISSION_DENIED"))
+}
+
+func testAgyProviderRefusedIsFalseForOrdinaryStderr() {
+    T.check("empty stderr is not a refusal", !AgyProvider.refused(""))
+    T.check("unrelated stderr text is not a refusal", !AgyProvider.refused("Warning: cache miss"))
+}
+
 func testAgyTUIBinaryWhitelist() {
     // A configured path outside the three allowed locations must be rejected
     // even if the file exists and is executable - the whole point of the
@@ -241,6 +361,52 @@ func testConfigDecodesMinimalJSON() {
     T.eq("default refreshSeconds", cfg.refreshSeconds, 60)
     T.eq("default menu bar line count", cfg.menuBar.lines.count, 3)
     T.eq("default first line is claude", cfg.menuBar.lines.first?.provider ?? "", "claude")
+}
+
+// MARK: - Config: the "agy" interval migration (v1.0.28, owner decision
+// 2026-09-04: the old default of 0 becomes 3600, once, for an existing
+// settings file - see Config.migratingAgyInterval, called from load())
+
+func testConfigDefaultAgyIntervalIsNowHourly() {
+    let cfg = Config()
+    T.eq("fresh config defaults \"agy\" interval to hourly", cfg.intervals["agy"], 3600)
+    T.check("fresh config starts unmigrated", !cfg.agyIntervalMigrated)
+}
+
+func testConfigMigratesTheOldZeroAgyIntervalOnce() {
+    var old = Config()
+    old.intervals["agy"] = 0
+    old.agyIntervalMigrated = false
+
+    let migrated = Config.migratingAgyInterval(old)
+    T.eq("old default 0 migrates to hourly", migrated.intervals["agy"], 3600)
+    T.check("migration flag is set", migrated.agyIntervalMigrated)
+
+    // The whole point of the flag: once migration has run, a 0 set on
+    // purpose afterwards (going back to manual-only) must survive the next
+    // launch rather than being silently reverted to 3600 again.
+    var deliberate = migrated
+    deliberate.intervals["agy"] = 0
+    let untouched = Config.migratingAgyInterval(deliberate)
+    T.eq("a deliberate 0 after migration is respected", untouched.intervals["agy"], 0)
+    T.check("already-migrated config is returned unchanged (guard short-circuits)",
+           untouched.agyIntervalMigrated)
+}
+
+func testConfigDecodingAnOldSettingsFileStillCarryingAgyDirectQuotaKeyIsTolerant() {
+    // "agyDirectQuotaOnManualCheck" was removed in v1.0.28 (the direct HTTP
+    // call it gated was dead code). An old settings file that still has the
+    // key must decode without error - the same tolerant-decode property
+    // every other removed/renamed field in this project relies on.
+    let json = """
+    {"agyDirectQuotaOnManualCheck": true, "intervals": {"agy": 0}}
+    """
+    guard let cfg = try? JSONDecoder().decode(Config.self, from: Data(json.utf8)) else {
+        T.check("config with the removed agy key still decodes", false)
+        return
+    }
+    T.eq("the removed key's value has nowhere to land, and doesn't need one",
+        cfg.intervals["agy"], 0)
 }
 
 // MARK: - RingIcon: pure model/colour/easing core
@@ -1965,12 +2131,26 @@ struct Runner {
         testAgyTUIStripLeavesPlainTextUnchanged()
         testAgyTUIParseHandlesMixedLineEndings()
         testAgyTUIParseRejectsTextWithoutAPanel()
+        testAgyPrintParsesTheMeasuredFixtureIntoTwoGroupsOfTwoPercents()
+        testAgyPrintRemainingFractionOneMeansZeroUsed()
+        testAgyPrintResetTimeParsesWithAndWithoutFractionalSeconds()
+        testAgyPrintStatusFailedYieldsNil()
+        testAgyPrintEmptyStdoutYieldsNil()
+        testAgyPrintMissingBucketsYieldsNil()
+        testAgyPrintTSVTextModeIsNotParsedAsJSON()
+        testAgyProviderRefusedIgnoresADigitRunThatMerelyContains403()
+        testAgyProviderRefusedRecognisesAnActualHTTP403()
+        testAgyProviderRefusedRecognisesPermissionDenied()
+        testAgyProviderRefusedIsFalseForOrdinaryStderr()
         testAgyTUIBinaryWhitelist()
         testTrustedHomeRequiresExistingMarkedDirectory()
         testColourHexRoundTrip()
         testFmtMoney()
         testFmtGB()
         testConfigDecodesMinimalJSON()
+        testConfigDefaultAgyIntervalIsNowHourly()
+        testConfigMigratesTheOldZeroAgyIntervalOnce()
+        testConfigDecodingAnOldSettingsFileStillCarryingAgyDirectQuotaKeyIsTolerant()
         testColourBandThresholds()
         testRingModelPicksPrimarysShortAndUnscopedLongWindow()
         testRingModelPrimaryWithNoGaugesIsNilOuterAndInner()

@@ -175,15 +175,15 @@ struct Config: Codable {
     var refreshSeconds: Int = 60
     /// Provider id -> shown or not. Missing key means shown.
     var enabled: [String: Bool] = [:]
-    /// Off, and measured to be pointless as well as risky: the credential the
-    /// CLI keeps is not an OAuth access token this endpoint accepts (tested
-    /// 2026-08-23, HTTP 401 UNAUTHENTICATED), so getting a number would mean
-    /// replicating the vendor client's own handshake. The code path is kept in
-    /// case that ever changes; it fires only during a manual check, never on a
-    /// timer.
-    var agyDirectQuotaOnManualCheck: Bool = false
-    /// A manual check reads Antigravity's own `/usage` panel by driving the CLI
-    /// in a pseudo-terminal. Slow and never automatic - see AgyTUI.
+    /// The main path (v1.0.28): reads Antigravity's quota through the CLI's
+    /// own read-only print-mode command, `agy -p "/usage" --output-format
+    /// json` - see AgyPrint. Measured to spend no quota and take ~4s, so
+    /// unlike the pty screen-scrape it replaced as the default, it is safe
+    /// on a timer.
+    var agyQuotaViaPrint: Bool = true
+    /// A manual-only fallback for when print mode is off or has failed:
+    /// reads Antigravity's own `/usage` panel by driving the CLI in a
+    /// pseudo-terminal. Slow and never automatic - see AgyTUI.
     var agyQuotaViaTUI: Bool = true
     /// Path to the agy binary; empty means look in the usual places.
     var agyBinary: String = ""
@@ -193,12 +193,22 @@ struct Config: Codable {
     /// Per-provider check interval in seconds. 0 means "only when I ask".
     /// A missing entry falls back to `refreshSeconds`.
     ///
-    /// Antigravity starts on manual: scheduled checks can only ever read its
-    /// log, which never contains a number, so polling it buys nothing - and the
-    /// request that does return a number is one to make by hand.
+    /// Antigravity defaults to hourly (owner decision, 2026-09-04): the old
+    /// default of 0 dated from when the only source was the pty screen-
+    /// scrape, which really was too slow and too close to the traffic shape
+    /// that gets accounts flagged to run unattended. Print mode (AgyPrint)
+    /// measures at ~4s and spends no quota, so polling it hourly costs
+    /// nothing worth withholding. `Config.migratingAgyInterval` moves an
+    /// existing settings file off the old default once; see `load()`.
     /// Cursor has no public usage API (see CursorProvider) and its row never
     /// carries a percentage to poll for — it is a link, opened by hand.
-    var intervals: [String: Int] = ["agy": 0, "cursor": 0]
+    var intervals: [String: Int] = ["agy": 3600, "cursor": 0]
+    /// Set once `load()` has applied the one-time "agy" interval migration
+    /// below. Guards that migration to run exactly once per install, so a
+    /// user who deliberately sets the interval back to 0 afterwards (to go
+    /// manual-only again) is respected rather than silently reverted on the
+    /// next launch.
+    var agyIntervalMigrated: Bool = false
     var claudeProbeModel: String = "claude-haiku-4-5-20251001"
     /// A manual check on a Claude row whose access token has gone stale runs the
     /// real `claude` once - a local status check, then a minimal one-turn
@@ -231,9 +241,13 @@ struct Config: Codable {
         history = (try? c.decode(HistoryConfig.self, forKey: .history)) ?? def.history
         refreshSeconds = (try? c.decode(Int.self, forKey: .refreshSeconds)) ?? def.refreshSeconds
         enabled = (try? c.decode([String: Bool].self, forKey: .enabled)) ?? def.enabled
-        agyDirectQuotaOnManualCheck = (try? c.decode(Bool.self, forKey: .agyDirectQuotaOnManualCheck))
-            ?? def.agyDirectQuotaOnManualCheck
+        // "agyDirectQuotaOnManualCheck" is no longer a field - an old
+        // settings file that still carries it is decoded tolerantly here by
+        // simply never asking for that key, the same way every other
+        // removed or renamed field in this file is handled.
         intervals = (try? c.decode([String: Int].self, forKey: .intervals)) ?? def.intervals
+        agyIntervalMigrated = (try? c.decode(Bool.self, forKey: .agyIntervalMigrated)) ?? def.agyIntervalMigrated
+        agyQuotaViaPrint = (try? c.decode(Bool.self, forKey: .agyQuotaViaPrint)) ?? def.agyQuotaViaPrint
         agyQuotaViaTUI = (try? c.decode(Bool.self, forKey: .agyQuotaViaTUI)) ?? def.agyQuotaViaTUI
         agyBinary = (try? c.decode(String.self, forKey: .agyBinary)) ?? def.agyBinary
         colours = (try? c.decode([String: String].self, forKey: .colours)) ?? def.colours
@@ -263,6 +277,10 @@ struct Config: Codable {
         } else {
             cfg = Config()
         }
+        if !cfg.agyIntervalMigrated {
+            cfg = migratingAgyInterval(cfg)
+            cfg.save()
+        }
         if cfg.accounts.isEmpty {
             cfg.accounts = Discovery.all()
             cfg.save()
@@ -272,6 +290,19 @@ struct Config: Codable {
         Palette.overrides = cfg.colours
         Palette.adaptiveHueOffset = cfg.menuBar.adaptiveHueOffset
         return cfg
+    }
+
+    /// The one-time "agy" interval migration (2026-09-04): a settings file
+    /// still carrying the old default of 0 is moved to the new default of
+    /// 3600, once. Pulled out of `load()` as a pure function so it can be
+    /// tested without touching the real settings file - `load()`'s own job
+    /// is only to call this and persist the result.
+    static func migratingAgyInterval(_ cfg: Config) -> Config {
+        guard !cfg.agyIntervalMigrated else { return cfg }
+        var out = cfg
+        if out.intervals["agy"] == 0 { out.intervals["agy"] = 3600 }
+        out.agyIntervalMigrated = true
+        return out
     }
 
     func save() {

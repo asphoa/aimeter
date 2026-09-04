@@ -1,17 +1,24 @@
 import Foundation
 
-/// Reads Antigravity's quota by driving the vendor's own client.
+/// Reads Antigravity's quota by driving the vendor's own client through its
+/// interactive TUI.
 ///
-/// The numbers exist in exactly one place: the `/usage` panel of the agy TUI.
-/// There is no endpoint a third party can ask — the credential the CLI stores
-/// is not an OAuth access token the internal quota endpoint accepts (measured
-/// 2026-08-23: HTTP 401), so producing one would mean impersonating the client.
+/// v1.0.28 demoted this to the **manual-only fallback**: `AgyPrint` reads the
+/// same numbers through the CLI's own non-interactive `-p "/usage"` command,
+/// which is what a scheduled refresh now uses. This file still exists for
+/// when that fails - an older `agy` without print-mode support, say - and for
+/// anyone who has switched it on by hand.
 ///
-/// This does the opposite: it launches the real client in a pseudo-terminal,
-/// types `/usage`, and reads the panel it draws. Every request to Google is
-/// made by the genuine client with its own credentials and headers. It is slow
-/// (tens of seconds) and it is screen-scraping, so it runs only when a person
-/// asks for it — never on a timer.
+/// The numbers exist in exactly one place a third party could ask instead:
+/// nowhere. The credential the CLI stores is not an OAuth access token the
+/// internal quota endpoint accepts (measured 2026-08-23: HTTP 401), so
+/// producing a number that way would mean impersonating the client.
+///
+/// This drives the real client in a pseudo-terminal, types `/usage`, and
+/// reads the panel it draws. Every request to Google is made by the genuine
+/// client with its own credentials and headers. It is slow (tens of seconds)
+/// and it is screen-scraping, so it runs only when a person asks for it —
+/// never on a timer.
 enum AgyTUI {
 
     struct Group {
@@ -19,6 +26,13 @@ enum AgyTUI {
         var weeklyUsed: Double?
         var fiveHourUsed: Double?
         var weeklyResets: Date?
+        /// Only ever set by `AgyPrint.parse`: the TUI panel's "Five Hour
+        /// Limit Remaining" section prints "Quota available" rather than a
+        /// "Refreshes in ..." line whenever the window is not yet spent, so
+        /// this field could never be filled from the screen capture parsed
+        /// below. The print-mode JSON always carries a `reset_time` for
+        /// both buckets, so it can.
+        var fiveHourResets: Date?
     }
 
     struct Result {
@@ -120,6 +134,11 @@ enum AgyTUI {
 
         _ = "\u{03}".utf8.withContiguousStorageIfAvailable { Darwin.write(master, $0.baseAddress, $0.count) }
         process.terminate()
+        // Without this, a terminated child that has not yet been wait()'d on
+        // stays a zombie until something else reaps it - and nothing else
+        // ever does, since this app owns the process. Every "Check now" on
+        // the TUI fallback used to leak one.
+        process.waitUntilExit()
         close(master)
 
         let text = strip(String(decoding: raw, as: UTF8.self))

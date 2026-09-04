@@ -117,9 +117,10 @@ guarantee in `GenericProvider` (`approvedHost`/`safeURL`): that a credential's
 destination cannot be redirected by anything in the settings file, including
 the exact attacker payloads found during the security review below. The rest
 covers parsing that has broken silently before — Antigravity's screen capture
-(mixed line endings, ANSI stripping), the settings file's tolerant decoding of
-older configs — plus the menu bar strip's gauge-to-bar mapping and a few
-formatting helpers.
+(mixed line endings, ANSI stripping) and its print-mode JSON (against a real
+captured fixture: two groups, four percentages, both reset-time formats), the
+settings file's tolerant decoding of older configs — plus the menu bar strip's
+gauge-to-bar mapping and a few formatting helpers.
 
 One test (`trustedHome`'s ownership check) needs to run outside a sandbox that
 restricts `FileManager.attributesOfItem`'s owner field — the same class of
@@ -128,7 +129,7 @@ this project. It is not expected to affect a normal `swift`/Xcode environment
 or CI.
 
 What it does not cover: anything that talks to a vendor API, drives the
-keychain, or launches `agy` in a pty. Those paths have been verified by hand,
+keychain, or launches `agy` (print mode or a pty). Those paths have been verified by hand,
 repeatedly, against the running app — see Diagnostics below — rather than
 mocked, since a mock of the exact bug class this project has hit (bytes lost
 to a full pty buffer, a capture with mixed CR/LF/CRLF) would likely have
@@ -196,16 +197,22 @@ This is the part worth reading before you trust it with your credentials.
   real request.
 - **Keys you paste** into the Accounts window are stored in your login keychain
   under `AIMeter · <service> · <account>`, never in the settings file.
-- **The settings file and debug dumps are written 0600 in a 0700 directory**,
-  and the Antigravity screen capture has the account address removed before it
-  reaches the disk. These are the files most likely to be pasted somewhere while
-  troubleshooting.
+- **The settings file and debug dumps are written 0600 in a 0700 directory**.
+  The manual-only Antigravity screen capture has the account address removed
+  before it reaches the disk; the print-mode JSON dump needs no redaction at
+  all, because that response carries no account, email, or credential in the
+  first place — only percentages and reset times. These are the files most
+  likely to be pasted somewhere while troubleshooting.
 - **The settings file is treated as untrusted input.** A custom "Other" service
   can only use a key you pasted (kept in the keychain) over https — not an
   arbitrary file path, which would otherwise make it a "read this file, post it
-  to my host" gadget for anyone who could edit that file. The Antigravity CLI is
-  only ever run from a known install location, with a minimal environment rather
-  than the inherited one.
+  to my host" gadget for anyone who could edit that file. The Antigravity CLI —
+  print mode or the pty fallback — is only ever run from a known install
+  location (`AgyTUI.allowedBinaries`), against a HOME that must already exist
+  and already contain `.gemini/antigravity-cli` (`trustedHome`), and with a
+  minimal environment built from nothing rather than the inherited one. This
+  app never calls Google's quota endpoint itself in either mode; it only ever
+  launches the genuine, vendor-installed client and reads what it prints.
 - **Keys in files** are read from the paths you point at, and are not copied.
 - **Network**: only the vendor endpoints listed below, plus `127.0.0.1` for
   local model runtimes. There is no telemetry, no analytics, and no server
@@ -253,7 +260,7 @@ the file, `history.html` can be copied anywhere and still renders correctly.
 |---|---|---|
 | **Claude Code** | One `GET api.anthropic.com/api/oauth/usage` request — the CLI's own usage endpoint; nothing is charged per refresh. | Live |
 | **Codex** | The `rate_limits` block Codex writes into its own session files under `~/.codex/sessions/`. No network call and no credential needed. | **Snapshot** — as of the last time Codex ran. Labelled with its age; dimmed once stale; a window that ended since is shown as `—` rather than as a number. |
-| **Antigravity** | The result of the CLI's own quota refresh, read out of `~/.gemini/antigravity-cli/cli.log`. | Snapshot |
+| **Antigravity** | `agy -p "/usage" --output-format json` — the CLI's own read-only print-mode command, run non-interactively; spends no quota and takes ~4s (measured). Checked hourly by default. | Live |
 | **OpenRouter** | `GET openrouter.ai/api/v1/key`, once per key. | Live |
 | **DeepSeek** | `GET api.deepseek.com/user/balance`. This is money, not a percentage, so it has no bar. Also flags peak-hour pricing. | Live |
 | **Local AI** | Ollama on `127.0.0.1:11434`, LM Studio on `127.0.0.1:1234`, and an MLX server (`mlx_lm.server`/`mlx_vlm.server`) on `127.0.0.1:8081`; reports memory held by loaded models. | Live |
@@ -344,7 +351,9 @@ prompt, and a real prompt costs something.
   the subprocess's own report is the exact mistake that let the broken version
   pass review.
 - **Manual only.** Never on the timer, never at launch, never on opening the
-  menu — the same rule as Antigravity.
+  menu — this one spends real quota from your own subscription window, unlike
+  Antigravity's print-mode read (see below), which is on a timer precisely
+  because it was measured to spend nothing.
 - **Only the CLI's own account.** An account holding a pasted API key never
   causes the CLI to be launched: running `claude` would not refresh it.
 - **Only from the installers' own locations** — `~/.local/bin`, `/usr/local/bin`,
@@ -361,21 +370,43 @@ Set `claudeRefreshViaCLI: false` in the settings file to switch it off; set
 
 ### Antigravity: how its quota is read
 
-Antigravity publishes these numbers in exactly one place — the `/usage` panel of
-its own CLI. There is no endpoint a third party can ask: the credential the CLI
-stores is not an OAuth access token the internal quota endpoint accepts (tested,
-HTTP 401), so producing one would mean impersonating the client.
+Antigravity publishes these numbers in exactly one place a third party could
+otherwise ask instead: nowhere. The credential the CLI stores is not an OAuth
+access token the internal quota endpoint accepts (tested, HTTP 401), so
+producing a number that way would mean impersonating the client.
 
-So this app does the opposite. **Check now** on the Antigravity row launches the
-real `agy` client in a pseudo-terminal, types `/usage`, and reads the panel it
-draws. Every request to Google is made by the genuine client with its own
-credentials and headers.
+So, as of v1.0.28, this app does the opposite in the cheapest way the CLI
+itself allows: it runs `agy -p "/usage" --output-format json`, a documented,
+read-only print-mode command — the same "non-interactive answers for
+read-only slash commands" the CLI added for `/usage`, `/quota`, `/credits`,
+`/model`, `/effort` and `/skills`. This app never calls Google's quota
+endpoint itself; the CLI is launched non-interactively with a minimal
+environment (`HOME`, a fixed `PATH`, `LANG`, and
+`AGY_CLI_DISABLE_AUTO_UPDATE=1` — never the parent process's own), does its
+own handshake with its own credentials, prints one JSON object, and exits.
+Measured 2026-09-04, n=3: ~4 seconds, no quota spent, no conversation left
+behind — the conversations directory's file count is unchanged before and
+after, and the response's own `usage.total_tokens` is `0`.
 
-It runs **only when you press it** — never on a timer, and the source defaults to
-"manual only". It takes roughly half a minute, and it will not work while you
-have an `agy` session of your own open, since the CLI binds a local port.
+That is fast and cheap enough to run on a timer, so it does: **checked hourly
+by default**, the same as most other rows, not "only when you press it" any
+more. If a check is refused (HTTP 403 / `PERMISSION_DENIED`) or otherwise
+fails, this row pauses itself — the timer stops asking until you press
+**Check now** — rather than repeat a request that just failed once an hour
+forever. A scheduled check also steps aside if `agy` is already running under
+this account (`pgrep -x agy`), since two `agy` processes contending for the
+same local state is untested.
 
-Set `agyQuotaViaTUI: false` in the settings file to switch it off entirely.
+The old pseudo-terminal screen-scrape — type `/usage` into a real `agy`
+session and read the panel it draws — still exists as a **manual-only
+fallback**, for an `agy` old enough not to support print mode, or for anyone
+who has switched print mode off. It only ever runs on **Check now**, never on
+a timer, takes tens of seconds, and will not work while you have an `agy`
+session of your own open, since the CLI binds a local port.
+
+Set `agyQuotaViaPrint: false` in the settings file to switch off the
+print-mode path (falling back to the manual TUI screen-scrape on a press of
+**Check now**); `agyQuotaViaTUI: false` switches that fallback off too.
 
 ## Adding accounts
 

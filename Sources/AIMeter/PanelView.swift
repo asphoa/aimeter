@@ -267,26 +267,62 @@ private struct PrimaryCardView: View {
     }
 }
 
-/// One remaining gauge of the primary reading: a 12pt conic mini-ring, label,
-/// bold value, and reset text - order is the caller's (`PanelModel` already
-/// sorted longWindow, modelWindow, other).
+/// One remaining gauge of the primary reading: a 12pt conic mini-ring, then
+/// "label · **value** reset" as a single line - order is the caller's
+/// (`PanelModel` already sorted longWindow, modelWindow, other). Rows of a
+/// fixed three-per-line used to wrap a two-line chip mid-chip whenever a
+/// long label didn't fit; a single line per chip laid out by `FlowLayout`
+/// wraps whole chips instead, never breaking one across two lines.
 private struct ChipsFlow: View {
     var chips: [PanelModel.Chip]
 
     var body: some View {
-        // A manual flow layout: SwiftUI has no wrap-aware HStack pre-macOS 15,
-        // and this app's declared deployment target is 14. Three per row
-        // keeps a chip's label legible at the panel's 372pt width.
-        let rows = stride(from: 0, to: chips.count, by: 3).map { Array(chips[$0..<min($0 + 3, chips.count)]) }
-        return VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                HStack(spacing: 10) {
-                    ForEach(Array(row.enumerated()), id: \.offset) { _, chip in
-                        ChipView(chip: chip)
-                    }
-                    Spacer(minLength: 0)
-                }
+        FlowLayout(spacing: 12, lineSpacing: 6) {
+            ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
+                ChipView(chip: chip)
             }
+        }
+    }
+}
+
+/// A left-to-right, top-to-bottom wrap layout: place children until one
+/// would not fit the available width, then start a new line. SwiftUI's
+/// `Layout` protocol (macOS 13+, this app targets 14) is exactly this - no
+/// GeometryReader-plus-offset trick needed, and each child is measured at
+/// its own natural size rather than squeezed, which is what keeps a chip's
+/// line from breaking internally.
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, lineHeight: CGFloat = 0
+        for (i, subview) in subviews.enumerated() {
+            let size = subview.sizeThatFits(.unspecified)
+            if i > 0, x + size.width > maxWidth {
+                x = 0
+                y += lineHeight + lineSpacing
+                lineHeight = 0
+            }
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
+        return CGSize(width: maxWidth.isFinite ? maxWidth : x, height: y + lineHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, lineHeight: CGFloat = 0
+        for (i, subview) in subviews.enumerated() {
+            let size = subview.sizeThatFits(.unspecified)
+            if i > 0, x + size.width > bounds.maxX {
+                x = bounds.minX
+                y += lineHeight + lineSpacing
+                lineHeight = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
         }
     }
 }
@@ -297,16 +333,17 @@ private struct ChipView: View {
     var body: some View {
         HStack(spacing: 5) {
             MiniRing(percent: chip.percent)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(chip.label).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                HStack(spacing: 3) {
-                    Text(chip.value).font(.system(size: 11, weight: .semibold)).monospacedDigit()
-                    if let r = chip.resetText {
-                        Text(r).font(.system(size: 9)).foregroundStyle(.secondary)
-                    }
+            HStack(spacing: 3) {
+                Text(chip.label).font(.system(size: 10)).foregroundStyle(.secondary)
+                Text("·").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text(chip.value).font(.system(size: 11, weight: .semibold)).monospacedDigit()
+                if let r = chip.resetText {
+                    Text(r).font(.system(size: 9)).foregroundStyle(.secondary)
                 }
             }
         }
+        .lineLimit(1)
+        .fixedSize()
         .help(chip.resetsAt.map(exactDateTime) ?? chip.label)
     }
 }
@@ -461,22 +498,31 @@ private struct RowView: View {
     }
 }
 
+/// A secondary card's row meter (Codex, OpenRouter, ...). Deliberately ink
+/// below 70% rather than the traffic-light green `panelGaugeStyle`'s
+/// untyped `.other` path used to fill it with - the same colour rule
+/// `RingIcon.colourBand` and the primary card's `MiniRing`/`RingGauge`
+/// already use, via the amber/red bands only at 70%/90% and up. A card full
+/// of green bars read as "everything is great" when most of them were
+/// simply nowhere near their limit, which is not the same claim.
 private struct Meter: View {
     var percent: Double
 
+    private var fill: NSColor {
+        switch RingIcon.colourBand(percent) {
+        case .ink: return .labelColor
+        case .warn: return Palette.colour(Palette.warn)
+        case .alarm: return Palette.colour(Palette.alarm)
+        }
+    }
+
     var body: some View {
-        let style = panelGaugeStyle(kind: .other, percent: percent)
         GeometryReader { geo in
             let w = geo.size.width
             let filled = max(percent > 0 ? 2 : 0, min(w, w * CGFloat(percent) / 100))
             ZStack(alignment: .leading) {
                 Capsule().fill(Color(nsColor: Palette.colour(Palette.track)))
-                Capsule().fill(Color(nsColor: style.fill)).frame(width: filled)
-                if let alert = style.alert {
-                    Capsule().fill(Color(nsColor: alert))
-                        .frame(width: min(style.alertWidth, filled))
-                        .offset(x: filled - min(style.alertWidth, filled))
-                }
+                Capsule().fill(Color(nsColor: fill)).frame(width: filled)
             }
         }
         .frame(height: 5)
