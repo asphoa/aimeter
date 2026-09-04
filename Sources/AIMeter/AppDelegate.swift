@@ -96,6 +96,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastFetched: [String: Date] = [:]
     private var timer: Timer?
     private var refreshing = false
+    private lazy var ringAnimator = RingAnimator { [weak self] img in
+        self?.statusItem?.button?.image = img
+        self?.statusItem?.button?.imagePosition = .imageOnly
+        self?.statusItem?.button?.attributedTitle = NSAttributedString(string: "")
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         L.current = cfg.language
@@ -221,15 +226,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateTitle() {
         guard let button = statusItem.button else { return }
-        let lines = cfg.menuBar.lines.map { resolveStripLine($0, readings, cfg) }
-        button.image = StatusStrip.image(lines: lines, scheme: cfg.menuBar.colourScheme)
-        button.imagePosition = .imageOnly
-        button.attributedTitle = NSAttributedString(string: "")
-        button.image?.accessibilityDescription = zip(cfg.menuBar.lines, lines).map { line, s in
-            let parts = [s.merged, s.top, s.bottom].compactMap { $0 }
-                .map { String(format: "%.0f%%", $0) }
-            return "\(line.provider) " + (parts.isEmpty ? "—" : parts.joined(separator: "/"))
-        }.joined(separator: ", ")
+        guard cfg.menuBar.style != "bars" else {
+            ringAnimator.stop()
+            statusItem.length = NSStatusItem.variableLength
+            let lines = cfg.menuBar.lines.map { resolveStripLine($0, readings, cfg) }
+            button.image = StatusStrip.image(lines: lines, scheme: cfg.menuBar.colourScheme)
+            button.imagePosition = .imageOnly
+            button.attributedTitle = NSAttributedString(string: "")
+            button.image?.accessibilityDescription = zip(cfg.menuBar.lines, lines).map { line, s in
+                let parts = [s.merged, s.top, s.bottom].compactMap { $0 }
+                    .map { String(format: "%.0f%%", $0) }
+                return "\(line.provider) " + (parts.isEmpty ? "—" : parts.joined(separator: "/"))
+            }.joined(separator: ", ")
+            return
+        }
+        let model = RingIcon.model(readings: readings, primary: cfg.menuBar.primary, style: cfg.menuBar.style)
+        var described = model
+        if !cfg.menuBar.alertDot { described.alertDot = false }
+        statusItem.length = model.numeral != nil ? 52 : 22
+        ringAnimator.show(described, animated: cfg.menuBar.animate)
+        button.toolTip = [described.outer, described.inner].compactMap { $0 }
+            .map { String(format: "%.0f%%", $0) }.joined(separator: " / ")
     }
 
     /// Wraps a drawn row in a disabled menu item.
@@ -404,5 +421,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AboutWindowController.shared.show()
     }
 
-    @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func quit() { ringAnimator.stop(); NSApp.terminate(nil) }
 }

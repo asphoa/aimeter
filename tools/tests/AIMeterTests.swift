@@ -243,6 +243,92 @@ func testConfigDecodesMinimalJSON() {
     T.eq("default first line is claude", cfg.menuBar.lines.first?.provider ?? "", "claude")
 }
 
+// MARK: - RingIcon: pure model/colour/easing core
+
+func testColourBandThresholds() {
+    T.eq("69.9 -> ink", RingIcon.colourBand(69.9), .ink)
+    T.eq("70 -> warn", RingIcon.colourBand(70), .warn)
+    T.eq("89.9 -> warn", RingIcon.colourBand(89.9), .warn)
+    T.eq("90 -> alarm", RingIcon.colourBand(90), .alarm)
+}
+
+func testRingModelPicksPrimarysShortAndUnscopedLongWindow() {
+    var r = Reading(id: "claude", title: "Claude")
+    r.gauges = [
+        Gauge(label: "5h", percent: 53, text: "53%", kind: .shortWindow),
+        Gauge(label: "week", percent: 11, text: "11%", kind: .longWindow),
+        Gauge(label: "Fable", percent: 9, text: "9%", kind: .modelWindow)
+    ]
+    let model = RingIcon.model(readings: ["claude": [r]], primary: "claude")
+    T.eq("outer = shortWindow", model.outer, 53)
+    T.eq("inner = longWindow, ignores modelWindow", model.inner, 11)
+}
+
+func testRingModelPrimaryWithNoGaugesIsNilOuterAndInner() {
+    let model = RingIcon.model(readings: [:], primary: "claude")
+    T.isNil("no reading -> nil outer", model.outer)
+    T.isNil("no reading -> nil inner", model.inner)
+}
+
+func testRingModelAlertDotOnlyFromNonPrimaryProvider() {
+    var claude = Reading(id: "claude", title: "Claude")
+    claude.gauges = [Gauge(label: "5h", percent: 95, text: "95%", kind: .shortWindow)]
+    var codex = Reading(id: "codex", title: "Codex")
+    codex.gauges = [Gauge(label: "5h", percent: 80, text: "80%", kind: .shortWindow)]
+    let withOther = RingIcon.model(readings: ["claude": [claude], "codex": [codex]], primary: "claude")
+    T.check("dot on: a non-primary provider is at 70%+", withOther.alertDot)
+
+    let primaryOnly = RingIcon.model(readings: ["claude": [claude]], primary: "claude")
+    T.check("dot off: only the primary is high", !primaryOnly.alertDot)
+}
+
+func testRingModelNumeralFormattingByStyle() {
+    var r = Reading(id: "claude", title: "Claude")
+    r.gauges = [Gauge(label: "5h", percent: 53, text: "53%", kind: .shortWindow)]
+    let numeral = RingIcon.model(readings: ["claude": [r]], primary: "claude", style: "ringNumeral")
+    T.eq("ringNumeral formats the outer percent", numeral.numeral, "53%")
+    let ring = RingIcon.model(readings: ["claude": [r]], primary: "claude", style: "ring")
+    T.isNil("ring style carries no numeral", ring.numeral)
+}
+
+func testEasedIsZeroToOneMonotoneAndEaseOut() {
+    T.eq("eased(0) == 0", RingIcon.eased(0), 0)
+    T.eq("eased(1) == 1", RingIcon.eased(1), 1)
+    T.check("eased(0.5) > 0.5 (ease-out)", RingIcon.eased(0.5) > 0.5)
+    var prev = -1.0
+    for i in 0...10 {
+        let t = Double(i) / 10
+        let v = RingIcon.eased(t)
+        T.check("eased is monotone at t=\(t)", v >= prev)
+        prev = v
+    }
+}
+
+func testMenuBarConfigStyleDefaultsSurviveAnOldConfigJSON() {
+    let data = Data("{}".utf8)
+    guard let cfg = try? JSONDecoder().decode(Config.self, from: data) else {
+        T.check("empty config decodes", false)
+        return
+    }
+    T.eq("default style is ring", cfg.menuBar.style, "ring")
+    T.eq("default primary is claude", cfg.menuBar.primary, "claude")
+    T.eq("default alertDot is on", cfg.menuBar.alertDot, true)
+    T.eq("default animate is on", cfg.menuBar.animate, true)
+}
+
+func testRingImageSanityAndNoCrashOnNilValues() {
+    let empty = RingIcon.image(for: RingIcon.RingModel())
+    T.eq("no-data ring image is the plain 18x18 canvas", empty.size, NSSize(width: 18, height: 18))
+
+    let withNumeral = RingIcon.image(for: RingIcon.RingModel(outer: 53, inner: 11, numeral: "53%"))
+    T.check("numeral variant is wider than the plain ring",
+           withNumeral.size.width > RingIcon.canvas)
+    T.eq("numeral variant height stays the canvas height", withNumeral.size.height, RingIcon.canvas)
+
+    let full = RingIcon.image(for: RingIcon.RingModel(outer: 93, inner: 40, alertDot: true, numeral: nil))
+    T.check("drawing a full model does not crash", full.size.width > 0)
+}
+
 func testConfigIgnoresUnknownFieldsAndFillsMissingOnes() {
     let json = """
     {"refreshSeconds": 120, "somethingFutureVersionAdded": {"x": 1},
@@ -1701,6 +1787,14 @@ struct Runner {
         testFmtMoney()
         testFmtGB()
         testConfigDecodesMinimalJSON()
+        testColourBandThresholds()
+        testRingModelPicksPrimarysShortAndUnscopedLongWindow()
+        testRingModelPrimaryWithNoGaugesIsNilOuterAndInner()
+        testRingModelAlertDotOnlyFromNonPrimaryProvider()
+        testRingModelNumeralFormattingByStyle()
+        testEasedIsZeroToOneMonotoneAndEaseOut()
+        testMenuBarConfigStyleDefaultsSurviveAnOldConfigJSON()
+        testRingImageSanityAndNoCrashOnNilValues()
         testConfigIgnoresUnknownFieldsAndFillsMissingOnes()
         testConfigMigratesLegacyPerServiceColourKey()
         testConfigDefaultsAndRoundTripsAdaptiveHueOffset()

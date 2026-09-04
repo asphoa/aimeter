@@ -107,11 +107,45 @@ func runOnce(manual: Bool = false, record: Bool = false) async {
     }
 }
 
-/// `AIMeter --icon out.png` renders the menu bar strip from live data at 8x, so
-/// the icon can be inspected as an artefact instead of squinted at in the bar.
-/// Deliberately not @MainActor: nothing here is main-actor isolated, and hopping
-/// to the main actor while the main thread waits on the semaphore below would
-/// deadlock.
+/// Renders one NSImage into a PNG at `scale`, optionally forcing a light or
+/// dark `NSAppearance` around the draw (`--icon`'s light/dark backgrounds) and
+/// a solid background colour behind it.
+private func writePNG(_ image: NSImage, scale: CGFloat, background: NSColor?,
+                      appearance: NSAppearance?, to path: String) {
+    let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                     pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                                     bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                     isPlanar: false, colorSpaceName: .deviceRGB,
+                                     bytesPerRow: 0, bitsPerPixel: 0) else { return }
+    func draw() {
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSGraphicsContext.current?.imageInterpolation = .none
+        if let background {
+            background.setFill()
+            NSRect(origin: .zero, size: size).fill()
+        }
+        image.draw(in: NSRect(origin: .zero, size: size))
+        NSGraphicsContext.restoreGraphicsState()
+    }
+    if let appearance {
+        appearance.performAsCurrentDrawingAppearance { draw() }
+    } else {
+        draw()
+    }
+    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+    print("wrote \(path)")
+}
+
+/// `AIMeter --icon out` renders the ring icon at 4x on a light and a dark
+/// menu-bar background (`out-light.png` / `out-dark.png`) plus a labelled row
+/// of the six named states (`out-states.png`), so the icon can be inspected as
+/// an artefact instead of squinted at in the bar.
+///
+/// Deliberately not @MainActor: nothing here is main-actor isolated, and
+/// hopping to the main actor while the main thread waits on the semaphore
+/// below would deadlock.
 func renderIcon(to path: String) async {
     var cfg = Config.load()
     L.current = cfg.language
@@ -121,43 +155,59 @@ func renderIcon(to path: String) async {
     } else {
         for p in buildProviders(cfg) { readings[p.id] = await p.fetchAll() }
     }
-    let lines = cfg.menuBar.lines.map { resolveStripLine($0, readings, cfg) }
+    let model = RingIcon.model(readings: readings, primary: cfg.menuBar.primary, style: cfg.menuBar.style)
+    let ring = RingIcon.image(for: model)
+    let base = (path as NSString).deletingPathExtension.isEmpty ? path : (path as NSString).deletingPathExtension
 
-    for scheme in BarColourScheme.allCases {
-        let strip = StatusStrip.image(lines: lines, scheme: scheme)
-        let scale: CGFloat = 8
-        let size = NSSize(width: StatusStrip.width * scale, height: StatusStrip.height * scale)
-        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                         pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
-                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                                         isPlanar: false, colorSpaceName: .deviceRGB,
-                                         bytesPerRow: 0, bitsPerPixel: 0) else { continue }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        NSGraphicsContext.current?.imageInterpolation = .none
+    let light = NSAppearance(named: .aqua)
+    let dark = NSAppearance(named: .darkAqua)
+    writePNG(ring, scale: 4, background: NSColor.white, appearance: light, to: base + "-light.png")
+    writePNG(ring, scale: 4, background: NSColor.black, appearance: dark, to: base + "-dark.png")
+
+    // Six named states, credential-free, laid out left to right on one canvas.
+    func gauge(_ pct: Double, kind: GaugeKind) -> Gauge {
+        Gauge(label: "", percent: pct, text: "\(Int(pct))%", kind: kind)
+    }
+    var claude = Reading(id: "claude", title: "Claude")
+    claude.gauges = [gauge(53, kind: .shortWindow), gauge(11, kind: .longWindow)]
+    var warnR = Reading(id: "claude", title: "Claude")
+    warnR.gauges = [gauge(76, kind: .shortWindow), gauge(11, kind: .longWindow)]
+    var alarmR = Reading(id: "claude", title: "Claude")
+    alarmR.gauges = [gauge(93, kind: .shortWindow), gauge(40, kind: .longWindow)]
+    var codexHigh = Reading(id: "codex", title: "Codex")
+    codexHigh.gauges = [gauge(80, kind: .shortWindow)]
+    codexHigh.state = .warn
+
+    let states: [(String, RingIcon.RingModel)] = [
+        ("53% / 11%", RingIcon.model(readings: ["claude": [claude]], primary: "claude")),
+        ("warn 76% / 11%", RingIcon.model(readings: ["claude": [warnR]], primary: "claude")),
+        ("alarm 93% / 40%", RingIcon.model(readings: ["claude": [alarmR]], primary: "claude")),
+        ("+ alert dot", RingIcon.model(readings: ["claude": [claude], "codex": [codexHigh]], primary: "claude")),
+        ("ring + numeral", RingIcon.model(readings: ["claude": [claude]], primary: "claude", style: "ringNumeral")),
+        ("no data", RingIcon.RingModel())
+    ]
+    let scale: CGFloat = 4
+    let cellW = RingIcon.canvas * scale + RingIcon.numeralWidth * scale + 40
+    let cellH = RingIcon.canvas * scale + 40
+    let sheetSize = NSSize(width: cellW * CGFloat(states.count), height: cellH)
+    let sheet = NSImage(size: sheetSize, flipped: false) { _ in
         NSColor.white.setFill()
-        NSRect(origin: .zero, size: size).fill()
-        strip.draw(in: NSRect(origin: .zero, size: size))
-        NSGraphicsContext.restoreGraphicsState()
-        let out: String
-        switch scheme {
-        case .provider:
-            out = path
-        case .window:
-            out = (path as NSString).deletingPathExtension + "-window.png"
-        case .adaptive:
-            out = (path as NSString).deletingPathExtension + "-adaptive.png"
+        NSRect(origin: .zero, size: sheetSize).fill()
+        for (i, entry) in states.enumerated() {
+            let (label, model) = entry
+            let img = RingIcon.image(for: model)
+            let x = CGFloat(i) * cellW + 20
+            img.draw(in: NSRect(x: x, y: 30, width: img.size.width * scale, height: img.size.height * scale))
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11),
+                                                          .foregroundColor: NSColor.black]
+            NSAttributedString(string: label, attributes: attrs).draw(at: NSPoint(x: x, y: 8))
         }
-        try? rep.representation(using: .png, properties: [:])?
-            .write(to: URL(fileURLWithPath: out))
-        print("wrote \(out)")
+        return true
     }
-    for (i, l) in lines.enumerated() {
-        func f(_ v: Double?) -> String { v.map { String(format: "%.0f%%", $0) } ?? "—" }
-        print(String(format: "  line %d  %-11@ top %-5@ bottom %-5@ merged %-5@%@",
-                     i, l.provider, f(l.top), f(l.bottom), f(l.merged),
-                     l.stale ? "  (stale)" : ""))
-    }
+    writePNG(sheet, scale: 1, background: nil, appearance: light, to: base + "-states.png")
+
+    let f = { (v: Double?) in v.map { String(format: "%.0f%%", $0) } ?? "—" }
+    print("  ring outer \(f(model.outer)) inner \(f(model.inner)) dot \(model.alertDot) numeral \(model.numeral ?? "—")")
 }
 
 /// `AIMeter --panel out.png` renders the dropdown panel offscreen. AppKit's

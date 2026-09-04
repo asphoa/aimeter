@@ -89,6 +89,17 @@ struct MenuBarConfig: Codable {
     /// letting someone click until a rotation reads well to them, which needs
     /// a stored choice, not a value recomputed the same way every time.
     var adaptiveHueOffset: Double = 218
+    /// "ring" (default), "ringNumeral", or "bars" (the legacy strip — kept
+    /// selectable only via config.json, not offered in Settings).
+    var style: String = "ring"
+    /// Provider id whose windows the rings show.
+    var primary: String = "claude"
+    /// A red dot when a non-primary provider is at 70%+ or in an alert state.
+    var alertDot: Bool = true
+    /// Sweep the rings from the previous reading on each refresh, and breathe
+    /// the outer arc at ≥90%. Always off when Reduce Motion is on, regardless
+    /// of this setting.
+    var animate: Bool = true
 
     init() {}
 
@@ -98,6 +109,10 @@ struct MenuBarConfig: Codable {
         staleAfterMinutes = (try? c.decode(Int.self, forKey: .staleAfterMinutes)) ?? def.staleAfterMinutes
         colourScheme = (try? c.decode(BarColourScheme.self, forKey: .colourScheme)) ?? def.colourScheme
         adaptiveHueOffset = (try? c.decode(Double.self, forKey: .adaptiveHueOffset)) ?? def.adaptiveHueOffset
+        style = (try? c.decode(String.self, forKey: .style)) ?? def.style
+        primary = (try? c.decode(String.self, forKey: .primary)) ?? def.primary
+        alertDot = (try? c.decode(Bool.self, forKey: .alertDot)) ?? def.alertDot
+        animate = (try? c.decode(Bool.self, forKey: .animate)) ?? def.animate
         if let decoded = try? c.decode([MenuLine].self, forKey: .lines), !decoded.isEmpty {
             lines = decoded
         } else if let legacy = try? c.decode([String].self, forKey: .rows), !legacy.isEmpty {
@@ -115,6 +130,7 @@ struct MenuBarConfig: Codable {
 
     enum CodingKeys: String, CodingKey {
         case lines, staleAfterMinutes, colourScheme, rows, adaptiveHueOffset
+        case style, primary, alertDot, animate
     }
 
     func encode(to e: Encoder) throws {
@@ -123,6 +139,10 @@ struct MenuBarConfig: Codable {
         try c.encode(staleAfterMinutes, forKey: .staleAfterMinutes)
         try c.encode(colourScheme, forKey: .colourScheme)
         try c.encode(adaptiveHueOffset, forKey: .adaptiveHueOffset)
+        try c.encode(style, forKey: .style)
+        try c.encode(primary, forKey: .primary)
+        try c.encode(alertDot, forKey: .alertDot)
+        try c.encode(animate, forKey: .animate)
     }
 }
 

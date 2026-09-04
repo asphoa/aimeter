@@ -50,12 +50,11 @@ struct SourceOption: Identifiable, Hashable {
 struct MenuBarSection: View {
     @ObservedObject var store: AccountsStore
 
-    private var options: [SourceOption] { SourceOption.all(store.cfg) }
-
-    private var slots: [MenuLine?] {
-        var l: [MenuLine?] = store.cfg.menuBar.lines.map { Optional($0) }
-        while l.count < StatusStrip.maxLines { l.append(nil) }
-        return Array(l.prefix(StatusStrip.maxLines))
+    /// Providers that actually have windows to ring — the primary picker
+    /// offers only these, not every enabled service.
+    private var primaryOptions: [(id: String, title: String)] {
+        [("claude", L.t("p.claude")), ("codex", L.t("p.codex"))]
+            .filter { (store.cfg.accounts[$0.id] ?? []).contains { $0.enabled } }
     }
 
     var body: some View {
@@ -66,103 +65,54 @@ struct MenuBarSection: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(alignment: .top, spacing: 20) {
-                VStack(spacing: 6) {
-                    ForEach(0..<StatusStrip.maxLines, id: \.self) { slot(at: $0) }
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker(L.t("mb.primary"), selection: Binding(
+                        get: { store.cfg.menuBar.primary },
+                        set: { store.cfg.menuBar.primary = $0; store.persist(cosmetic: true) })) {
+                            ForEach(primaryOptions, id: \.id) { Text($0.title).tag($0.id) }
+                        }
+                        .frame(width: 260)
+
+                    Picker("", selection: Binding(
+                        get: { store.cfg.menuBar.style == "bars" ? "ring" : store.cfg.menuBar.style },
+                        set: { store.cfg.menuBar.style = $0; store.persist(cosmetic: true) })) {
+                            Text(L.t("mb.style.ring")).tag("ring")
+                            Text(L.t("mb.style.numeral")).tag("ringNumeral")
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 260)
+
+                    Toggle(L.t("mb.alertdot"), isOn: Binding(
+                        get: { store.cfg.menuBar.alertDot },
+                        set: { store.cfg.menuBar.alertDot = $0; store.persist(cosmetic: true) }))
+                    Toggle(L.t("mb.animate"), isOn: Binding(
+                        get: { store.cfg.menuBar.animate },
+                        set: { store.cfg.menuBar.animate = $0; store.persist(cosmetic: true) }))
                 }
                 VStack(spacing: 6) {
-                    Text(L.t("w.preview")).font(.caption).foregroundStyle(.secondary)
+                    Text(L.t("mb.preview")).font(.caption).foregroundStyle(.secondary)
                     preview
                 }
                 .padding(.top, 2)
             }
-
-            Picker("", selection: Binding(
-                get: { store.cfg.menuBar.colourScheme },
-                set: { store.cfg.menuBar.colourScheme = $0; store.persist(cosmetic: true) })) {
-                    Text(L.t("m.barcolour.provider")).tag(BarColourScheme.provider)
-                    Text(L.t("m.barcolour.window")).tag(BarColourScheme.window)
-                    Text(L.t("m.barcolour.adaptive")).tag(BarColourScheme.adaptive)
-                }
-                .pickerStyle(.radioGroup)
-                .labelsHidden()
-            Button(L.t("w.menubar.optimize")) {
-                // Adaptive is computed from these slots at draw time, not
-                // baked into Config.colours - a later slot edit must not
-                // quietly leave two visible services sharing an old colour.
-                // What *is* stored is where the hue circle starts: the whole
-                // point of this button is a reroll to click through until one
-                // reads well, which needs a remembered choice, not the same
-                // arrangement every time.
-                store.cfg.menuBar.adaptiveHueOffset = Double.random(in: 0..<360)
-                store.cfg.menuBar.colourScheme = .adaptive
-                store.persist(cosmetic: true)
-            }
-            .help(L.t("w.menubar.optimize.help"))
         }
     }
 
-    @ViewBuilder
-    private func slot(at index: Int) -> some View {
-        let current = slots[index]
-        HStack(spacing: 6) {
-            Picker("", selection: Binding(
-                get: { SourceOption(line: current, label: "").id },
-                set: { newID in
-                    let picked = options.first { $0.id == newID }?.line
-                    apply(picked, at: index)
-                })) {
-                    ForEach(options) { Text($0.label).tag($0.id) }
-                }
-                .labelsHidden()
-                .frame(width: 260)
-
-            Button {
-                move(index, by: -1)
-            } label: { Image(systemName: "chevron.up") }
-                .disabled(index == 0 || current == nil)
-                .help(L.t("w.moveup"))
-
-            Button {
-                move(index, by: 1)
-            } label: { Image(systemName: "chevron.down") }
-                .disabled(index >= store.cfg.menuBar.lines.count - 1 || current == nil)
-                .help(L.t("w.movedown"))
-        }
-    }
-
+    /// Renders the actual `RingIcon.image`, on a menu-bar-coloured strip, so
+    /// the picker/toggles above update it live — the same live-readings box
+    /// the old strip preview used.
     private var preview: some View {
-        let lines = store.cfg.menuBar.lines.map {
-            resolveStripLine($0, ReadingsBox.shared.current, store.cfg)
-        }
-        let img = StatusStrip.image(lines: lines, scheme: store.cfg.menuBar.colourScheme)
+        let model = RingIcon.model(readings: ReadingsBox.shared.current,
+                                   primary: store.cfg.menuBar.primary,
+                                   style: store.cfg.menuBar.style)
+        var shown = model
+        if !store.cfg.menuBar.alertDot { shown.alertDot = false }
+        let img = RingIcon.image(for: shown)
         return Image(nsImage: img)
-            .interpolation(.none)
+            .interpolation(.high)
             .resizable()
-            .frame(width: StatusStrip.width * 4, height: StatusStrip.height * 4)
+            .frame(width: img.size.width * 4, height: img.size.height * 4)
             .padding(6)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
-    }
-
-    private func apply(_ picked: MenuLine?, at index: Int) {
-        var lines = store.cfg.menuBar.lines
-        if let picked {
-            // Nothing is gained by the same source twice, and a duplicate row
-            // looks like a bug rather than a choice.
-            lines.removeAll { $0 == picked }
-            if index < lines.count { lines[index] = picked } else { lines.append(picked) }
-        } else if index < lines.count {
-            lines.remove(at: index)
-        }
-        store.cfg.menuBar.lines = Array(lines.prefix(StatusStrip.maxLines))
-        store.persist(cosmetic: true)
-    }
-
-    private func move(_ index: Int, by delta: Int) {
-        var lines = store.cfg.menuBar.lines
-        let to = index + delta
-        guard lines.indices.contains(index), lines.indices.contains(to) else { return }
-        lines.swapAt(index, to)
-        store.cfg.menuBar.lines = lines
-        store.persist(cosmetic: true)
     }
 }

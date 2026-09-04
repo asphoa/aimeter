@@ -2,18 +2,31 @@
 
 A macOS menu bar app that shows how much of each AI service you have left —
 Claude Code, Codex, Antigravity, OpenRouter, DeepSeek, and whatever is loaded
-into local inference right now — as a strip of stacked bars you can read without
+into local inference right now — as a two-ring icon you can read without
 clicking anything.
 
 Menu bar only. `LSUIElement` is set, so there is no Dock icon and no Cmd-Tab
 entry.
 
 ```
-   ▁▁▁▁▁▁    ← each line is one service
-   ███░░░       upper half = the 5-hour pool
-   ██░░░░       lower half = the weekly pool
-   · · ·        three dots = no reading (not "zero used")
+   ◎    outer ring = the primary service's 5-hour pool
+        inner ring = its weekly pool
+        ink below 70%, amber from 70%, red from 90% — each ring on its own
+        percent. A small red dot at top-right means some other service is
+        at 70%+ or in an alert state.
 ```
+
+The icon is one service ("primary" — Claude Code by default) shown as two
+concentric arcs, not a five-line strip: everything else you're tracking still
+shows up in the dropdown panel, and the alert dot says when it's worth a
+look. On refresh the arcs sweep from the old value to the new one; past 90%
+the outer arc breathes gently rather than sitting still. Both the sweep and
+the breathing are off automatically when macOS's Reduce Motion is on, and can
+be turned off in Settings regardless. Add a numeral next to the ring
+("Ring + number") if you'd rather read a percentage than a fraction of a
+circle. The old five-line bar strip is still there as `menuBar.style: "bars"`
+in `config.json` for anyone who preferred it, but it isn't offered in the
+Settings UI any more.
 
 Click the strip for the full panel: every window, every account, when each one
 resets, and the plain-language reason when something cannot be read.
@@ -94,7 +107,7 @@ missed the bug too.
 
 ```bash
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --once          # every reading, as text
-./dist/AIMeter.app/Contents/MacOS/AIMeter --icon out.png  # the strip, 8x, all three schemes
+./dist/AIMeter.app/Contents/MacOS/AIMeter --icon out    # ring, 4x: out-light.png, out-dark.png, out-states.png
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --panel out.png # panel rows on an opaque diagnostic ground
 ./dist/AIMeter.app/Contents/MacOS/AIMeter --menushot out.png # the real translucent NSMenu
 ```
@@ -353,15 +366,12 @@ Reasonable settings differ by source: Codex reads local files and costs nothing,
 DeepSeek is a balance that moves slowly, and Claude is the one that spends a
 request per refresh.
 
-### Choosing what appears in the menu bar
+### Choosing what the ring shows
 
-The same window has a **Menu bar** section: up to five slots, each a dropdown of
-the services you have configured, reorderable, with a live preview of the
-resulting strip.
-
-Each line splits in two — the 5-hour pool above, the weekly pool below. A
-service that has only one kind of window (Codex, OpenRouter) draws a single
-full-height bar instead, which is how you can tell the two cases apart.
+The same window has a **Menu bar** section: a **Primary service** picker
+(Claude Code or Codex — whichever has windows), a **Ring** / **Ring + number**
+choice, and two toggles — the alert dot, and the sweep/breathe animation —
+with a live preview of the exact icon that will be drawn.
 
 ### Colours
 
