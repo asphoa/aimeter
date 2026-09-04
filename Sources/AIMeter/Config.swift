@@ -126,9 +126,26 @@ struct MenuBarConfig: Codable {
     }
 }
 
+/// Usage ledger settings. Percentages, labels, times and error strings only —
+/// see History.swift; never a token, header, or secret.
+struct HistoryConfig: Codable, Sendable {
+    var enabled: Bool = true
+    var retentionMonths: Int = 12
+
+    init() {}
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        let def = HistoryConfig()
+        enabled = (try? c.decode(Bool.self, forKey: .enabled)) ?? def.enabled
+        retentionMonths = (try? c.decode(Int.self, forKey: .retentionMonths)) ?? def.retentionMonths
+    }
+}
+
 struct Config: Codable {
     var language: Lang = .system
     var menuBar: MenuBarConfig = MenuBarConfig()
+    var history: HistoryConfig = HistoryConfig()
     var refreshSeconds: Int = 60
     /// Provider id -> shown or not. Missing key means shown.
     var enabled: [String: Bool] = [:]
@@ -153,7 +170,9 @@ struct Config: Codable {
     /// Antigravity starts on manual: scheduled checks can only ever read its
     /// log, which never contains a number, so polling it buys nothing - and the
     /// request that does return a number is one to make by hand.
-    var intervals: [String: Int] = ["agy": 0]
+    /// Cursor has no public usage API (see CursorProvider) and its row never
+    /// carries a percentage to poll for — it is a link, opened by hand.
+    var intervals: [String: Int] = ["agy": 0, "cursor": 0]
     var claudeProbeModel: String = "claude-haiku-4-5-20251001"
     /// A manual check on a Claude row whose access token has gone stale runs the
     /// real `claude` once - a local status check, then a minimal one-turn
@@ -183,6 +202,7 @@ struct Config: Codable {
         let def = Config()
         language = (try? c.decode(Lang.self, forKey: .language)) ?? def.language
         menuBar = (try? c.decode(MenuBarConfig.self, forKey: .menuBar)) ?? def.menuBar
+        history = (try? c.decode(HistoryConfig.self, forKey: .history)) ?? def.history
         refreshSeconds = (try? c.decode(Int.self, forKey: .refreshSeconds)) ?? def.refreshSeconds
         enabled = (try? c.decode([String: Bool].self, forKey: .enabled)) ?? def.enabled
         agyDirectQuotaOnManualCheck = (try? c.decode(Bool.self, forKey: .agyDirectQuotaOnManualCheck))

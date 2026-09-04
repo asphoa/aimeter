@@ -1528,6 +1528,157 @@ func testEveryLocalizationCallSiteHasATableRow() {
          missing.sorted { $0.key < $1.key }.map { "\($0.key) (\($0.value))" }, [])
 }
 
+// MARK: - History: ledger line shape, append, retention, export
+
+func testHistoryLineShapeForAGaugeAndAFailure() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    var r = Reading(id: "claude", title: "Claude Code", account: "Work", state: .ok)
+    let g = Gauge(label: "5-hour window", percent: 42.5, text: "42%",
+                  resetsAt: now.addingTimeInterval(3600), kind: .shortWindow)
+    r.gauges = [g]
+    let line = History.line(for: r, gauge: g, at: now)
+    guard let data = line.data(using: .utf8),
+          let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+        T.check("gauge line parses as JSON", false); return
+    }
+    T.eq("gauge line: provider", obj["provider"] as? String, "claude")
+    T.eq("gauge line: account", obj["account"] as? String, "Work")
+    T.eq("gauge line: gauge", obj["gauge"] as? String, "5-hour window")
+    T.eq("gauge line: kind", obj["kind"] as? String, "shortWindow")
+    T.eq("gauge line: percent", obj["percent"] as? Double, 42.5)
+    T.eq("gauge line: state", obj["state"] as? Int, ReadingState.ok.rawValue)
+    T.check("gauge line: t is ISO8601 UTC", (obj["t"] as? String)?.hasSuffix("Z") == true)
+    T.check("gauge line: resets_at is ISO8601", (obj["resets_at"] as? String)?.hasSuffix("Z") == true)
+    T.isNil("gauge line: snapshot_at is null when absent", obj["snapshot_at"] as? String)
+    let noSecretKeys = Set(obj.keys).isDisjoint(with: ["token", "accessToken", "Authorization", "apiKey"])
+    T.check("gauge line: no secret-looking keys", noSecretKeys)
+
+    let failed = Reading.failed("codex", "Codex", nil, "Connection failed: timed out")
+    let failLine = History.line(for: failed, gauge: nil, at: now)
+    guard let fdata = failLine.data(using: .utf8),
+          let fobj = (try? JSONSerialization.jsonObject(with: fdata)) as? [String: Any] else {
+        T.check("failure line parses as JSON", false); return
+    }
+    T.eq("failure line: error", fobj["error"] as? String, "Connection failed: timed out")
+    T.eq("failure line: state", fobj["state"] as? Int, ReadingState.failure.rawValue)
+    T.isNil("failure line has no gauge key", fobj["gauge"] as? String)
+}
+
+func testHistoryAppendCreatesMonthlyFileWithModeAndTwoLines() {
+    let tmp = NSTemporaryDirectory() + "aimeter-hist-\(UUID().uuidString)"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    let now = Date(timeIntervalSince1970: 1_700_000_000) // 2023-11-14 UTC
+    let r1 = Reading(id: "claude", title: "Claude Code",
+                     gauges: [Gauge(label: "5-hour window", percent: 10, text: "10%", kind: .shortWindow)])
+    let r2 = Reading(id: "claude", title: "Claude Code",
+                     gauges: [Gauge(label: "5-hour window", percent: 20, text: "20%", kind: .shortWindow)])
+    History.record([r1], at: now, dir: tmp)
+    History.record([r2], at: now.addingTimeInterval(60), dir: tmp)
+
+    let historyDir = tmp + "/history"
+    var isDir: ObjCBool = false
+    T.check("history dir exists", FileManager.default.fileExists(atPath: historyDir, isDirectory: &isDir) && isDir.boolValue)
+    if let attrs = try? FileManager.default.attributesOfItem(atPath: historyDir) {
+        T.eq("history dir mode 0700", (attrs[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+    } else { T.check("history dir attrs readable", false) }
+
+    let monthPath = historyDir + "/2023-11.jsonl"
+    T.check("monthly file exists", FileManager.default.fileExists(atPath: monthPath))
+    if let attrs = try? FileManager.default.attributesOfItem(atPath: monthPath) {
+        T.eq("monthly file mode 0600", (attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    } else { T.check("monthly file attrs readable", false) }
+
+    let content = (try? String(contentsOfFile: monthPath, encoding: .utf8)) ?? ""
+    let lines = content.split(separator: "\n")
+    T.eq("two records -> two lines", lines.count, 2)
+    for l in lines {
+        T.check("each line is valid JSON",
+                 (try? JSONSerialization.jsonObject(with: Data(l.utf8))) != nil)
+    }
+}
+
+func testHistoryRetentionDeletesOldMonthKeepsRecent() {
+    let tmp = NSTemporaryDirectory() + "aimeter-hist-\(UUID().uuidString)"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    let historyDir = tmp + "/history"
+    try? FileManager.default.createDirectory(atPath: historyDir, withIntermediateDirectories: true)
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(identifier: "UTC")!
+    func stamp(_ monthsAgo: Int) -> String {
+        let d = cal.date(byAdding: .month, value: -monthsAgo, to: now)!
+        let c = cal.dateComponents([.year, .month], from: d)
+        return String(format: "%04d-%02d", c.year!, c.month!)
+    }
+    let old = historyDir + "/\(stamp(13)).jsonl"
+    let recent = historyDir + "/\(stamp(11)).jsonl"
+    FileManager.default.createFile(atPath: old, contents: Data("{}\n".utf8))
+    FileManager.default.createFile(atPath: recent, contents: Data("{}\n".utf8))
+
+    History.applyRetention(dir: tmp, months: 12, now: now)
+
+    T.check("13-months-old file deleted", !FileManager.default.fileExists(atPath: old))
+    T.check("11-months-old file kept", FileManager.default.fileExists(atPath: recent))
+}
+
+// MARK: - HistoryReport: export produces a self-contained, secret-free HTML+CSV
+
+func testHistoryReportExportProducesHTMLAndCSVWithNoSecrets() {
+    let tmp = NSTemporaryDirectory() + "aimeter-hist-\(UUID().uuidString)"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    let now = Date()
+    let claude = Reading(id: "claude", title: "Claude Code",
+                         gauges: [Gauge(label: "5-hour window", percent: 30, text: "30%",
+                                       resetsAt: now.addingTimeInterval(3600), kind: .shortWindow)])
+    let codex = Reading(id: "codex", title: "Codex",
+                        gauges: [Gauge(label: "Weekly window", percent: 55, text: "55%", kind: .longWindow)])
+    History.record([claude], at: now.addingTimeInterval(-120), dir: tmp)
+    History.record([codex], at: now.addingTimeInterval(-60), dir: tmp)
+
+    let (csvPath, htmlPath) = HistoryReport.export(dir: tmp, providerTitle: { id in
+        id == "claude" ? "Claude Code" : (id == "codex" ? "Codex" : id)
+    })
+    T.check("csv file exists", FileManager.default.fileExists(atPath: csvPath))
+    T.check("html file exists", FileManager.default.fileExists(atPath: htmlPath))
+
+    let html = (try? String(contentsOfFile: htmlPath, encoding: .utf8)) ?? ""
+    T.check("html contains Claude Code title", html.contains("Claude Code"))
+    T.check("html contains Codex title", html.contains("Codex"))
+    for secret in ["Bearer", "sk-", "eyJ", "accessToken"] {
+        T.check("html contains no \"\(secret)\"", !html.contains(secret))
+    }
+    T.check("html has at least one svg chart", html.contains("<svg"))
+
+    let csv = (try? String(contentsOfFile: csvPath, encoding: .utf8)) ?? ""
+    let csvLines = csv.split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.isEmpty }
+    // header + 2 ledger lines
+    T.eq("csv row count = ledger lines + header", csvLines.count, 3)
+}
+
+// MARK: - Cursor: link-only row, never a strip slot
+
+func testCursorProviderHasNoGaugesAndTheLinkLine() {
+    let cfg = Config()
+    let provider = CursorProvider(cfg: cfg)
+    var readings: [Reading] = []
+    let sem = DispatchSemaphore(value: 0)
+    Task { readings = await provider.fetchAll(manual: false); sem.signal() }
+    sem.wait()
+    guard FileManager.default.fileExists(atPath: "/Applications/Cursor.app") else {
+        T.check("no Cursor.app on this machine -> no reading", readings.isEmpty)
+        return
+    }
+    guard let r = readings.first else { T.check("cursor produced a reading", false); return }
+    T.check("cursor reading has no gauges", r.gauges.isEmpty)
+    T.eq("cursor reading state is .off", r.state, .off)
+    T.check("cursor reading carries the link line", r.lines.contains(L.t("x.cursor.link")))
+}
+
+func testResolveStripLineYieldsNoStripLineForAGaugelessCursorReading() {
+    let reading = Reading.off("cursor", "Cursor", "Cursor", L.t("x.cursor.link"))
+    let line = resolveStripLine(MenuLine(provider: "cursor"), ["cursor": [reading]], Config())
+    T.check("a gaugeless off reading yields no bar data", !line.hasData)
+}
+
 // MARK: - entry point
 //
 // @main rather than a plain main.swift: top-level executable statements are
@@ -1603,6 +1754,12 @@ struct Runner {
         testPanelGaugeColoursKeepWindowIdentityAndSignalUrgency()
         testTimeoutDoesNotWaitForAnUncooperativeOperation()
         testEveryLocalizationCallSiteHasATableRow()
+        testHistoryLineShapeForAGaugeAndAFailure()
+        testHistoryAppendCreatesMonthlyFileWithModeAndTwoLines()
+        testHistoryRetentionDeletesOldMonthKeepsRecent()
+        testHistoryReportExportProducesHTMLAndCSVWithNoSecrets()
+        testCursorProviderHasNoGaugesAndTheLinkLine()
+        testResolveStripLineYieldsNoStripLineForAGaugelessCursorReading()
 
         let elapsed = Date().timeIntervalSince(start)
         print(String(format: "(%.2fs)", elapsed))

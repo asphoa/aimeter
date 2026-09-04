@@ -9,7 +9,8 @@ func buildProviders(_ cfg: Config) -> [Provider] {
         OpenRouterProvider(cfg: cfg),
         DeepSeekProvider(cfg: cfg),
         GenericProvider(cfg: cfg),
-        LocalAIProvider()
+        LocalAIProvider(),
+        CursorProvider(cfg: cfg)
     ]
     return all.filter { cfg.isEnabled($0.id) }
 }
@@ -100,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         L.current = cfg.language
         Palette.overrides = cfg.colours
         providers = buildProviders(cfg)
+        History.applyRetention(months: cfg.history.retentionMonths)
         NotificationCenter.default.addObserver(
             forName: AccountsStore.changed, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.reload() }
@@ -180,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 for await (pid, rs) in group {
                     self.readings[pid] = rs
                     self.lastFetched[pid] = Date()
+                    History.record(rs)
                 }
             }
             ReadingsBox.shared.current = self.readings
@@ -245,11 +248,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let rows = buildPanelRows([p], readings, cfg)
             guard !rows.isEmpty else { continue }
             rows.forEach { menu.addItem(item($0)) }
-            let check = NSMenuItem(title: "    " + L.t("w.checknow"),
-                                   action: #selector(checkProvider(_:)), keyEquivalent: "")
-            check.target = self
-            check.representedObject = p.id
-            menu.addItem(check)
+            if p.id == "cursor" {
+                let open = NSMenuItem(title: "    " + L.t("m.cursor.open"),
+                                      action: #selector(openCursorUsage), keyEquivalent: "")
+                open.target = self
+                menu.addItem(open)
+            } else {
+                let check = NSMenuItem(title: "    " + L.t("w.checknow"),
+                                       action: #selector(checkProvider(_:)), keyEquivalent: "")
+                check.target = self
+                check.representedObject = p.id
+                menu.addItem(check)
+            }
             menu.addItem(.separator())
         }
 
@@ -269,6 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(menu, L.t("m.accounts"), #selector(openAccounts), key: ",")
         menu.addItem(languageMenu())
         menu.addItem(intervalMenu())
+        add(menu, L.t("m.history"), #selector(openHistory))
         add(menu, L.t("m.debug"), #selector(openDebug))
         add(menu, L.t("m.about"), #selector(openAbout))
         menu.addItem(.separator())
@@ -378,6 +389,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openDebug() {
         NSWorkspace.shared.open(URL(fileURLWithPath: Config.dir))
+    }
+
+    @objc private func openHistory() {
+        let (_, htmlPath) = HistoryReport.export()
+        NSWorkspace.shared.open(URL(fileURLWithPath: htmlPath))
+    }
+
+    @objc private func openCursorUsage() {
+        NSWorkspace.shared.open(URL(string: "https://cursor.com/dashboard/spending")!)
     }
 
     @objc private func openAbout() {

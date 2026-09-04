@@ -165,6 +165,38 @@ This is the part worth reading before you trust it with your credentials.
   never the request headers or the token) is written to
   `~/.config/aimeter/last-usage-<account>.json` so you can check the parsing
   against reality.
+- **Cursor is a link, not a reading.** Cursor has no public usage API. Two
+  routes would work anyway — reading Cursor's own stored token to call its
+  private RPC, or scraping the dashboard with a browser session — and both were
+  deliberately rejected: neither is something this project wants to depend on
+  for a menu-bar number. The row shows only a message pointing at
+  `cursor.com/dashboard/spending`, opened from the row's own menu item, never
+  polled, and never written to the usage ledger (there is nothing to chart).
+
+## Usage history
+
+Every completed refresh — timer or manual, for every provider — appends one
+line per gauge to a monthly ledger at
+`~/.config/aimeter/history/YYYY-MM.jsonl` (UTC month), written 0600 in a 0700
+directory. Each line carries only what the menu already shows: the provider
+and account, the gauge's label, kind, percentage and text, its reset time, and
+the reading's state — never a token, header, or any other credential. A
+provider that failed outright is logged as one line with the error message, so
+a gap in the chart is explained rather than silent; the Cursor row, which
+never carries a percentage, is not logged at all.
+
+Retention defaults to 12 months (`history.retentionMonths` in the settings
+file); older monthly files are deleted once at launch. Set
+`history.enabled: false` to stop the ledger being written at all.
+
+**Open usage history…** in the menu (next to **Open debug folder**) rebuilds
+the report from every ledger file and opens it. The same thing happens from
+the command line with `AIMeter --export-history [dir]`, which writes
+`history.csv` (one row per ledger line) and `history.html` — a self-contained
+page, inline CSS and JS, no external resources of any kind, drawn with a small
+hand-written SVG line chart per provider·account, a legend, the last 24 hours
+in a table, and an errors list. Because nothing it references lives outside
+the file, `history.html` can be copied anywhere and still renders correctly.
 
 ## Where each number comes from
 
@@ -176,6 +208,7 @@ This is the part worth reading before you trust it with your credentials.
 | **OpenRouter** | `GET openrouter.ai/api/v1/key`, once per key. | Live |
 | **DeepSeek** | `GET api.deepseek.com/user/balance`. This is money, not a percentage, so it has no bar. Also flags peak-hour pricing. | Live |
 | **Local AI** | Ollama on `127.0.0.1:11434`, LM Studio on `127.0.0.1:1234`, and an MLX server (`mlx_lm.server`/`mlx_vlm.server`) on `127.0.0.1:8081`; reports memory held by loaded models. | Live |
+| **Cursor** | Nothing — a link only. Cursor has no public usage API; see the Security section below for why the two undocumented routes were rejected. | — |
 
 A snapshot ages at a rate that depends on the window, not on the snapshot, and
 one age label cannot speak for both. Fifteen hours off a weekly figure is a

@@ -74,12 +74,14 @@ private final class MenuCanceller: @unchecked Sendable {
 /// `AIMeter --once` prints every provider's reading as plain text and exits.
 /// Same code path as the menu, so it is the honest way to see what the app is
 /// actually reading without staring at the menu bar.
-func runOnce(manual: Bool = false) async {
+func runOnce(manual: Bool = false, record: Bool = false) async {
     setbuf(stdout, nil)
     let cfg = Config.load()
     L.current = cfg.language
     for p in buildProviders(cfg) {
-        for r in Reading.asOfNow(await p.fetchAll(manual: manual)) {
+        let readings = await p.fetchAll(manual: manual)
+        if record { History.record(readings) }
+        for r in Reading.asOfNow(readings) {
             let mark: String
             switch r.state {
             case .ok: mark = "OK  "
@@ -420,11 +422,21 @@ if let idx = CommandLine.arguments.firstIndex(of: "--icon"),
     exit(0)
 }
 
+if let idx = CommandLine.arguments.firstIndex(of: "--export-history") {
+    let dir = CommandLine.arguments.count > idx + 1 && !CommandLine.arguments[idx + 1].hasPrefix("--")
+        ? CommandLine.arguments[idx + 1] : Config.dir
+    let (csv, html) = HistoryReport.export(dir: dir)
+    print("wrote \(csv)")
+    print("wrote \(html)")
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--once") {
     // --manual also runs the checks that are deliberately never automatic.
     let manual = CommandLine.arguments.contains("--manual")
+    let record = CommandLine.arguments.contains("--record")
     let sem = DispatchSemaphore(value: 0)
-    Task { await runOnce(manual: manual); sem.signal() }
+    Task { await runOnce(manual: manual, record: record); sem.signal() }
     sem.wait()
     exit(0)
 }
