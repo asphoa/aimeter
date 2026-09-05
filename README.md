@@ -1,9 +1,9 @@
 # AIMeter
 
-v1.0.34 centralises configuration in `ConfigStore`, routes refreshes through
-`RefreshCoordinator` (per-account slots, manual coalescing, generation checks),
-and runs subprocesses via `ProcessRunner` (monotonic deadlines, SIGTERM→SIGKILL,
-output caps). See `VERSION`.
+v1.0.35 adds strict parsing (`Parse.swift`), bounded HTTP (`Net.swift`), history
+correctness (observed_at, gauge_id, sparkline gaps), hermetic/integration test
+split, and structural cleanup (`SettingsStore`, `PanelRender`, `FileIO`). Run
+`bash tools/test.sh` (hermetic) or `bash tools/test.sh --integration`. See `VERSION`.
 
 A macOS menu bar app that shows how much of each AI service you have left —
 Claude Code, Codex, Antigravity, OpenRouter, DeepSeek, and whatever is loaded

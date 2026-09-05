@@ -1,11 +1,23 @@
 import Foundation
 
+enum HistoryReportError: Error, CustomStringConvertible {
+    case writeFailed(String)
+
+    var description: String {
+        switch self {
+        case .writeFailed(let path): return "history export write failed: \(path)"
+        }
+    }
+}
+
 /// One parsed ledger line, gauge or error, kept generic enough to feed both
 /// the CSV and the HTML chart without re-parsing.
 struct HistoryRecord {
     var t: Date
+    var observedAt: Date?
     var provider: String
     var account: String
+    var gaugeId: String?
     var gauge: String?
     var kind: String?
     var percent: Double?
@@ -13,15 +25,17 @@ struct HistoryRecord {
     var resetsAt: Date?
     var error: String?
     var state: Int
+    var source: String?
+    var fresh: Bool?
 }
 
 /// Reads every `history/*.jsonl` file and writes a self-contained CSV and
 /// HTML report. No external resources of any kind — the HTML is meant to be
 /// copied anywhere and still work.
 enum HistoryReport {
-    /// Returns (csvPath, htmlPath).
-    @discardableResult
-    static func export(dir: String = Config.dir, providerTitle: (String) -> String = defaultTitle) -> (String, String) {
+    /// Returns (csvPath, htmlPath) on success.
+    static func export(dir: String = Config.dir,
+                       providerTitle: (String) -> String = defaultTitle) throws -> (String, String) {
         let historyDir = dir + "/history"
         let fm = FileManager.default
         try? fm.createDirectory(atPath: historyDir, withIntermediateDirectories: true,
@@ -33,76 +47,106 @@ enum HistoryReport {
         var skipped = 0
         let iso = ISO8601DateFormatter()
         for f in files {
-            guard let content = try? String(contentsOfFile: historyDir + "/" + f, encoding: .utf8) else { continue }
-            for raw in content.split(separator: "\n") {
-                guard let data = raw.data(using: .utf8),
-                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                      let tStr = obj["t"] as? String, let t = iso.date(from: tStr),
-                      let provider = obj["provider"] as? String,
-                      let state = obj["state"] as? Int else {
+            let chunk = History.load(path: historyDir + "/" + f)
+            skipped += chunk.damaged
+            for raw in chunk.lines {
+                guard let rec = parseLine(raw, iso: iso) else {
                     skipped += 1
                     continue
                 }
-                let account = (obj["account"] as? String) ?? ""
-                if let error = obj["error"] as? String {
-                    records.append(HistoryRecord(t: t, provider: provider, account: account,
-                                                  gauge: nil, kind: nil, percent: nil, text: nil,
-                                                  resetsAt: nil, error: error, state: state))
-                } else if let gauge = obj["gauge"] as? String {
-                    let percent: Double? = {
-                        if let n = obj["percent"] as? NSNumber { return n.doubleValue }
-                        return nil
-                    }()
-                    let resetsAt: Date? = (obj["resets_at"] as? String).flatMap(iso.date)
-                    records.append(HistoryRecord(t: t, provider: provider, account: account,
-                                                  gauge: gauge, kind: obj["kind"] as? String,
-                                                  percent: percent, text: obj["text"] as? String,
-                                                  resetsAt: resetsAt, error: nil, state: state))
-                } else {
-                    skipped += 1
-                }
+                records.append(rec)
             }
         }
 
         let csvPath = historyDir + "/history.csv"
         let htmlPath = historyDir + "/history.html"
-        writeCSV(records, to: csvPath)
-        writeHTML(records, skipped: skipped, to: htmlPath, providerTitle: providerTitle)
+        try writeCSV(records, to: csvPath)
+        try writeHTML(records, skipped: skipped, to: htmlPath, providerTitle: providerTitle)
         return (csvPath, htmlPath)
     }
 
     private static func defaultTitle(_ id: String) -> String { ProviderKind.find(id)?.title ?? id }
 
-    private static func csvField(_ s: String) -> String {
-        guard s.contains(",") || s.contains("\"") || s.contains("\n") else { return s }
-        return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    private static func parseLine(_ raw: String, iso: ISO8601DateFormatter) -> HistoryRecord? {
+        guard let data = raw.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let tStr = obj["t"] as? String, let t = iso.date(from: tStr),
+              let provider = obj["provider"] as? String,
+              let state = obj["state"] as? Int else { return nil }
+        let account = (obj["account"] as? String) ?? ""
+        let observedAt = (obj["observed_at"] as? String).flatMap(iso.date)
+        let source = obj["source"] as? String
+        let fresh = obj["fresh"] as? Bool
+        if let error = obj["error"] as? String {
+            return HistoryRecord(t: t, observedAt: observedAt, provider: provider, account: account,
+                                 gaugeId: nil, gauge: nil, kind: nil, percent: nil, text: nil,
+                                 resetsAt: nil, error: error, state: state, source: source, fresh: fresh)
+        }
+        let gaugeId = (obj["gauge_id"] as? String)
+            ?? legacyGaugeId(obj)
+        guard gaugeId != nil || obj["gauge"] as? String != nil else { return nil }
+        let percent: Double? = {
+            if let n = obj["percent"] as? NSNumber { return n.doubleValue }
+            return nil
+        }()
+        let resetsAt: Date? = (obj["resets_at"] as? String).flatMap(iso.date)
+        let label = obj["gauge"] as? String
+        return HistoryRecord(t: t, observedAt: observedAt, provider: provider, account: account,
+                             gaugeId: gaugeId, gauge: label ?? gaugeId, kind: obj["kind"] as? String,
+                             percent: percent, text: obj["text"] as? String,
+                             resetsAt: resetsAt, error: nil, state: state, source: source, fresh: fresh)
     }
 
-    private static func writeCSV(_ records: [HistoryRecord], to path: String) {
+    private static func legacyGaugeId(_ obj: [String: Any]) -> String? {
+        guard let label = obj["gauge"] as? String,
+              let kindRaw = obj["kind"] as? String,
+              let kind = GaugeKind(rawValue: kindRaw) else { return nil }
+        return Parse.gaugeId(label: label, kind: kind)
+    }
+
+    private static func csvField(_ s: String) -> String {
+        var out = s
+        if let first = s.unicodeScalars.first,
+           ["=", "+", "-", "@", "\t", "\r"].contains(Character(first)) {
+            out = "'" + out
+        }
+        guard out.contains(",") || out.contains("\"") || out.contains("\n") || out.contains("\r") else {
+            return out
+        }
+        return "\"" + out.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+
+    private static func writeCSV(_ records: [HistoryRecord], to path: String) throws {
         let iso = ISO8601DateFormatter()
-        var lines = ["t,provider,account,gauge,kind,percent,text,resets_at,error,state"]
+        var lines = ["t,observed_at,provider,account,gauge_id,gauge,kind,percent,text,resets_at,source,fresh,error,state"]
         for r in records {
             let fields = [
-                iso.string(from: r.t), r.provider, r.account,
-                r.gauge ?? "", r.kind ?? "",
+                iso.string(from: r.t),
+                r.observedAt.map(iso.string) ?? "",
+                r.provider, r.account,
+                r.gaugeId ?? "", r.gauge ?? "", r.kind ?? "",
                 r.percent.map { String($0) } ?? "",
                 r.text ?? "", r.resetsAt.map(iso.string) ?? "",
+                r.source ?? "",
+                r.fresh.map { $0 ? "true" : "false" } ?? "",
                 r.error ?? "", String(r.state)
             ].map(csvField)
             lines.append(fields.joined(separator: ","))
         }
         let data = (lines.joined(separator: "\n") + "\n").data(using: .utf8) ?? Data()
-        if (try? writePrivate(data, to: path)) == nil {
-            Diagnostics.warn("history CSV write failed: \(path)")
+        do {
+            try writePrivate(data, to: path)
+        } catch {
+            throw HistoryReportError.writeFailed(path)
         }
     }
 
     private static func writeHTML(_ records: [HistoryRecord], skipped: Int, to path: String,
-                                   providerTitle: (String) -> String) {
+                                   providerTitle: (String) -> String) throws {
         let iso = ISO8601DateFormatter()
         struct Key: Hashable { var provider: String; var account: String }
         var groups: [Key: [HistoryRecord]] = [:]
-        for r in records where r.gauge != nil {
+        for r in records where r.gauge != nil || r.gaugeId != nil {
             groups[Key(provider: r.provider, account: r.account), default: []].append(r)
         }
         let errors = records.filter { $0.error != nil }.sorted { $0.t > $1.t }
@@ -160,8 +204,10 @@ enum HistoryReport {
         \(body)
         </body></html>
         """
-        if (try? writePrivate((html).data(using: .utf8) ?? Data(), to: path)) == nil {
-            Diagnostics.warn("history HTML write failed: \(path)")
+        do {
+            try writePrivate((html).data(using: .utf8) ?? Data(), to: path)
+        } catch {
+            throw HistoryReportError.writeFailed(path)
         }
     }
 
@@ -179,13 +225,11 @@ enum HistoryReport {
         func y(_ p: Double) -> Double { padT + (1 - p / 100) * plotH }
 
         var svg = "<svg viewBox=\"0 0 \(Int(w)) \(Int(h))\" xmlns=\"http://www.w3.org/2000/svg\">\n"
-        // gridlines at 0/25/50/75/100%
         for pct in stride(from: 0, through: 100, by: 25) {
             let yy = y(Double(pct))
             svg += "<line x1=\"\(padL)\" y1=\"\(yy)\" x2=\"\(w - padR)\" y2=\"\(yy)\" stroke=\"var(--grid)\" stroke-width=\"1\"/>\n"
             svg += "<text x=\"2\" y=\"\(yy + 4)\" font-size=\"10\" fill=\"var(--muted)\">\(pct)%</text>\n"
         }
-        // one tick per day
         var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(identifier: "UTC")!
         var day = cal.startOfDay(for: first.t)
         let df = DateFormatter(); df.dateFormat = "MM-dd"; df.timeZone = TimeZone(identifier: "UTC")
@@ -197,11 +241,13 @@ enum HistoryReport {
             day = next
         }
 
-        let labels = Array(Set(recs.compactMap(\.gauge))).sorted()
+        let labels = Array(Set(recs.compactMap { $0.gauge ?? $0.gaugeId })).sorted()
         var lastResets: [String: Date] = [:]
         for (i, label) in labels.enumerated() {
             let colour = palette[i % palette.count]
-            let series = recs.filter { $0.gauge == label && $0.percent != nil }
+            let series = recs.filter {
+                ($0.gauge == label || $0.gaugeId == label) && $0.percent != nil
+            }
             guard !series.isEmpty else { continue }
             var points: [String] = []
             for r in series {
@@ -218,7 +264,7 @@ enum HistoryReport {
     }
 
     private static func legend(for recs: [HistoryRecord]) -> String {
-        let labels = Array(Set(recs.compactMap(\.gauge))).sorted()
+        let labels = Array(Set(recs.compactMap { $0.gauge ?? $0.gaugeId })).sorted()
         guard !labels.isEmpty else { return "" }
         var out = "<div class=\"legend\">\n"
         for (i, label) in labels.enumerated() {
@@ -234,7 +280,8 @@ enum HistoryReport {
         guard !recent.isEmpty else { return "" }
         var out = "<table><tr><th>Time</th><th>Gauge</th><th>Percent</th><th>Text</th></tr>\n"
         for r in recent.prefix(200) {
-            out += "<tr><td>\(escape(iso.string(from: r.t)))</td><td>\(escape(r.gauge ?? ""))</td>"
+            let gaugeLabel = r.gauge ?? r.gaugeId ?? ""
+            out += "<tr><td>\(escape(iso.string(from: r.t)))</td><td>\(escape(gaugeLabel))</td>"
             out += "<td>\(r.percent.map { String(format: "%.0f%%", $0) } ?? "—")</td>"
             out += "<td>\(escape(r.text ?? ""))</td></tr>\n"
         }

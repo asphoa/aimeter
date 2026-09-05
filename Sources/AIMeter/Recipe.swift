@@ -337,9 +337,10 @@ struct RecipeDraft {
                                     window: window, resetsAt: resetsAt.isEmpty ? nil : resetsAt)
         }
         let lines = linePath.isEmpty ? [] : [LineSpec(value: linePath, prefix: linePrefix)]
+        let mapFormat = glob == "**/*.jsonl" ? "jsonl" : "json"
         return Recipe(id: id, name: name, colour: colour,
                       symbol: symbol.isEmpty ? nil : symbol, credential: cred, fetch: fetch,
-                      map: MapSpec(gauges: [gauge], lines: lines), interval: interval)
+                      map: MapSpec(format: mapFormat, gauges: [gauge], lines: lines), interval: interval)
     }
 
     /// True when env/method/path/body differ from an approved baseline draft.

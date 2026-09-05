@@ -80,12 +80,17 @@ final class AgyProvider: Provider, @unchecked Sendable {
         var paused = pauseState.paused
 
         let approvedBinary = AgyTUI.binary(cfg.agyBinary.isEmpty ? nil : cfg.agyBinary)
-        let skipForConcurrency = !manual && approvedBinary.map(CommandRun.isRunning(binary:)) == true
         let inBackoff = !manual && backoffActive()
+        let printModeEligible = cfg.agyQuotaViaPrint && (manual || (!paused && !inBackoff))
+
+        var skipForConcurrency = false
+        if printModeEligible, !manual, let bin = approvedBinary {
+            skipForConcurrency = CommandRun.isRunning(binary: bin)
+        }
 
         var livePrint: Reading?
         var unsavedNotice = false
-        if cfg.agyQuotaViaPrint, manual || (!paused && !inBackoff), !skipForConcurrency,
+        if printModeEligible, !skipForConcurrency,
            let bin = approvedBinary, let home {
             if let reading = await printQuota(binary: bin, home: home, account: a.name) {
                 clearPause()
@@ -338,34 +343,107 @@ final class AgyProvider: Provider, @unchecked Sendable {
     }
 
     private func fromLog(dir: String, account: String) -> Reading {
-        guard let path = newestLog(dir), let text = tailBytes(path, limit: 256 * 1024) else {
+        guard let path = newestLog(dir) else {
             return .off(id, title, account, L.t("a.nolog"))
         }
-        var lastLine: String?
-        for line in text.split(separator: "\n").reversed()
-        where line.contains("retrieveUserQuotaSummary") || line.contains("quota_manager") {
-            lastLine = String(line); break
+        if let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int,
+           size > Net.maxResponseBytes {
+            return Reading(id: id, title: title, account: account,
+                           lines: [L.t("n.toolarge")], state: .warn)
         }
-        guard let line = lastLine else { return .off(id, title, account, L.t("a.norecord")) }
+        guard let text = tailBytes(path, limit: 256 * 1024) else {
+            return .off(id, title, account, L.t("a.nolog"))
+        }
 
-        var r = Reading(id: id, title: title, account: account)
-        r.snapshotAt = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date ?? Date()
-        r.source = "log"
+        var refusalLine: String?
+        var parsedUsed: Double?
+        for line in text.split(separator: "\n").reversed() {
+            let s = String(line)
+            guard s.contains("retrieveUserQuotaSummary") || s.contains("quota_manager") else { continue }
+            if AgyProvider.logRefused(s) {
+                refusalLine = s
+                break
+            }
+            if s.lowercased().contains("failed") {
+                var r = Reading(id: id, title: title, account: account)
+                r.snapshotAt = Self.logTimestamp(s) ?? fileDate(path)
+                r.source = "log"
+                r.state = .warn
+                r.lines = [L.t("a.failed")]
+                return r
+            }
+            if let used = AgyProvider.parseQuotaLogLine(s) {
+                parsedUsed = used
+                break
+            }
+        }
 
-        if line.contains("PERMISSION_DENIED") || line.contains("403") {
+        if let refusalLine {
+            _ = refusalLine
+            var r = Reading(id: id, title: title, account: account)
+            r.snapshotAt = fileDate(path)
+            r.source = "log"
             r.state = .failure
             r.lines = [L.t("a.403"), L.t("a.403b")]
-        } else if line.lowercased().contains("failed") {
-            r.state = .warn
-            r.lines = [L.t("a.failed")]
-        } else if let pct = firstPercent(line) {
-            r.gauges.append(Gauge(label: L.t("g.quota"), percent: pct,
-                                  text: String(format: "%.0f%%", pct), resetsAt: nil))
-            r.state = worstState(r.gauges)
-        } else {
-            r.lines = [L.t("a.silent"), L.t("a.silent2")]
+            return r
         }
+
+        guard let used = parsedUsed else {
+            return .off(id, title, account, L.t("a.norecord"))
+        }
+
+        var r = Reading(id: id, title: title, account: account)
+        r.snapshotAt = fileDate(path)
+        r.source = "log"
+        r.gauges.append(Gauge(label: L.t("g.quota"), percent: used,
+                              text: String(format: "%.0f%%", used), resetsAt: nil))
+        r.state = worstState(r.gauges)
         return r
+    }
+
+    /// A permission refusal in a quota log line: `PERMISSION_DENIED` or an
+    /// HTTP 403 in a status field — not a bare three-digit substring.
+    static func logRefused(_ line: String) -> Bool {
+        if line.contains("PERMISSION_DENIED") { return true }
+        if line.range(of: #"\bstatus[^0-9]*403\b"#, options: .regularExpression) != nil { return true }
+        return line.range(of: #"\bHTTP\s+403\b"#, options: .regularExpression) != nil
+    }
+
+    /// Parses a quota log line that names a direction (`left`/`remaining` vs
+    /// `used`) and carries a timestamp. Returns used percent, not remaining.
+    static func parseQuotaLogLine(_ line: String) -> Double? {
+        guard logTimestamp(line) != nil else { return nil }
+        let lower = line.lowercased()
+        let isRemaining = lower.range(of: #"\b(left|remaining)\b"#, options: .regularExpression) != nil
+        let isUsed = lower.range(of: #"\bused\b"#, options: .regularExpression) != nil
+        guard isRemaining || isUsed else { return nil }
+        guard let raw = firstPercent(in: line) else { return nil }
+        return isRemaining ? max(0, min(100, 100 - raw)) : raw
+    }
+
+    private static func logTimestamp(_ line: String) -> Date? {
+        if let r = line.range(of: #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?"#, options: .regularExpression) {
+            var s = String(line[r])
+            if !s.hasSuffix("Z") { s += "Z" }
+            return ISO8601DateFormatter.withFractional.date(from: s)
+                ?? ISO8601DateFormatter().date(from: s)
+        }
+        if let r = line.range(of: #"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}"#, options: .regularExpression) {
+            var s = String(line[r]).replacingOccurrences(of: " ", with: "T")
+            if !s.hasSuffix("Z") { s += "Z" }
+            return ISO8601DateFormatter.withFractional.date(from: s)
+                ?? ISO8601DateFormatter().date(from: s)
+        }
+        return nil
+    }
+
+    private static func firstPercent(in line: String) -> Double? {
+        guard let r = line.range(of: #"(\d{1,3}(\.\d+)?)\s*%"#, options: .regularExpression) else { return nil }
+        return Double(line[r].replacingOccurrences(of: "%", with: "").trimmingCharacters(in: .whitespaces))
+    }
+
+    private func fileDate(_ path: String) -> Date {
+        (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date ?? Date()
     }
 
     private func newestLog(_ dir: String) -> String? {
@@ -375,11 +453,6 @@ final class AgyProvider: Provider, @unchecked Sendable {
         let logs = dir + "/log"
         return ((try? fm.contentsOfDirectory(atPath: logs)) ?? [])
             .filter { $0.hasSuffix(".log") }.sorted(by: >).first.map { logs + "/" + $0 }
-    }
-
-    private func firstPercent(_ line: String) -> Double? {
-        guard let r = line.range(of: #"(\d{1,3}(\.\d+)?)\s*%"#, options: .regularExpression) else { return nil }
-        return Double(line[r].replacingOccurrences(of: "%", with: "").trimmingCharacters(in: .whitespaces))
     }
 
     /// Local/cache-only path for manual-only scheduling (interval 0).

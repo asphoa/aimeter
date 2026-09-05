@@ -912,17 +912,26 @@ struct MenuBarPageView: View {
                                  numeral: store.cfg.menuBar.style == "ringNumeral" ? "53%" : nil)
             : live
         if !store.cfg.menuBar.alertDot { model.alertDot = false }
-        let image = RingIcon.image(for: model)
-        let cells: [(String, NSColor)] = [
-            (L.t("s.preview.light"), .white), (L.t("s.preview.dark"), .black),
-            (L.t("s.preview.blue"), NSColor(srgbRed: 0.12, green: 0.42, blue: 0.86, alpha: 1)),
-            (L.t("s.preview.sel"), NSColor(srgbRed: 0.04, green: 0.36, blue: 0.82, alpha: 1))
+        func ringImage(for appearance: NSAppearance) -> NSImage {
+            var image = RingIcon.image(for: model)
+            appearance.performAsCurrentDrawingAppearance {
+                image = RingIcon.image(for: model)
+            }
+            return image
+        }
+        let aquaImage = ringImage(for: NSAppearance(named: .aqua)!)
+        let darkImage = ringImage(for: NSAppearance(named: .darkAqua)!)
+        let cells: [(String, NSColor, NSImage)] = [
+            (L.t("s.preview.light"), .white, aquaImage),
+            (L.t("s.preview.dark"), .black, darkImage),
+            (L.t("s.preview.blue"), NSColor(srgbRed: 0.12, green: 0.42, blue: 0.86, alpha: 1), aquaImage),
+            (L.t("s.preview.sel"), NSColor(srgbRed: 0.04, green: 0.36, blue: 0.82, alpha: 1), aquaImage)
         ]
         return LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
             ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
                 VStack(spacing: 3) {
-                    Image(nsImage: image).resizable().interpolation(.high)
-                        .frame(width: image.size.width * 2.2, height: image.size.height * 2.2)
+                    Image(nsImage: cell.2).resizable().interpolation(.high)
+                        .frame(width: cell.2.size.width * 2.2, height: cell.2.size.height * 2.2)
                     Text(cell.0).font(.system(size: 8))
                         .foregroundStyle(cell.1 == .black ? Color.white : Color.black)
                 }
@@ -1037,8 +1046,8 @@ struct HistoryPageView: View {
         picker.canCreateDirectories = true
         picker.allowsMultipleSelection = false
         guard picker.runModal() == .OK, let destination = picker.url else { return }
-        let (csv, html) = HistoryReport.export()
         do {
+            let (csv, html) = try HistoryReport.export()
             for source in [csv, html] {
                 let target = destination.appendingPathComponent((source as NSString).lastPathComponent)
                 if FileManager.default.fileExists(atPath: target.path) {

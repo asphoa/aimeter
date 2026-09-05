@@ -97,7 +97,7 @@ enum RecipeFetch {
         switch await run(recipe, account: account, pin: pin) {
         case .failure(let fail): return .failure(fail)
         case .success(let output):
-            var reading = RecipeMap.apply(recipe.map, to: output.data)
+            var reading = RecipeMap.apply(recipe.map, to: output.data, pick: recipe.fetch.pick)
             reading.id = recipe.id; reading.title = recipe.name; reading.account = account.name
             if let stamp = output.meta.snapshotAt { reading.snapshotAt = stamp }
             let key = credential(recipe, account: account).successValue.flatMap { $0 }
@@ -227,21 +227,31 @@ enum RecipeFetch {
         return .success((attempt.stdout, meta))
     }
 
+    private static let maxFileBytes = 8 * 1024 * 1024
+
     private static func file(_ recipe: Recipe, pin: RecipePin.Pin,
                              start: Date) -> Result<Output, Fail> {
         guard let folder = pin.folder, let glob = recipe.fetch.glob, fileGlobIsSafe(glob),
-              let path = newestFile(in: folder, glob: glob) else {
+              let path = pickFile(in: folder, glob: glob, pick: recipe.fetch.pick,
+                                  format: recipe.map.format) else {
             return .failure(Fail(message: L.t("rc.file.failed")))
         }
         let root = URL(fileURLWithPath: folder).standardizedFileURL.path + "/"
-        let fixed = URL(fileURLWithPath: path).standardizedFileURL.path
-        guard fixed.hasPrefix(root), let data = FileManager.default.contents(atPath: fixed) else {
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        guard resolved.hasPrefix(root) else {
             return .failure(Fail(message: L.t("rc.file.failed")))
         }
-        let stamp = (try? FileManager.default.attributesOfItem(atPath: fixed)[.modificationDate]) as? Date
-        return .success((data, RecipeFetchMeta(request: "READ \(fixed)", status: nil,
+        let attrs = try? FileManager.default.attributesOfItem(atPath: resolved)
+        let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+        guard size > 0, size <= maxFileBytes,
+              let data = FileManager.default.contents(atPath: resolved) else {
+            return .failure(Fail(message: L.t("rc.file.failed")))
+        }
+        let stamp = attrs?[.modificationDate] as? Date
+        let contentType = recipe.map.format == "jsonl" ? "application/x-ndjson" : "application/json"
+        return .success((data, RecipeFetchMeta(request: "READ \(resolved)", status: nil,
             bytes: data.count, elapsed: Date().timeIntervalSince(start),
-            contentType: "application/json", snapshotAt: stamp)))
+            contentType: contentType, snapshotAt: stamp)))
     }
 
     private static func credential(_ recipe: Recipe, account: AccountSpec) -> Result<String?, Fail> {
@@ -300,22 +310,84 @@ enum RecipeFetch {
         }
     }
 
-    private static func newestFile(in folder: String, glob: String) -> String? {
+    private static func pickFile(in folder: String, glob: String, pick: String,
+                                 format: String) -> String? {
+        let matches = matchingFiles(in: folder, glob: glob)
+        guard !matches.isEmpty else { return nil }
+        switch pick {
+        case "first":
+            return matches.sorted { $0.path < $1.path }.first?.path
+        case "last":
+            return matches.sorted { $0.path < $1.path }.last?.path
+        case let p where p.hasPrefix("newestBy:"):
+            let path = String(p.dropFirst("newestBy:".count))
+            var best: (FileMatch, Double)?
+            for match in matches {
+                guard let stamp = fileSortKey(match.path, path: path, format: format) else { continue }
+                if best == nil || stamp > best!.1 { best = (match, stamp) }
+            }
+            return best?.0.path ?? matches.max(by: { $0.modified < $1.modified })?.path
+        default:
+            return matches.max(by: { $0.modified < $1.modified })?.path
+        }
+    }
+
+    private struct FileMatch {
+        var path: String
+        var modified: Date
+    }
+
+    private static func matchingFiles(in folder: String, glob: String) -> [FileMatch] {
         let root = URL(fileURLWithPath: folder).standardizedFileURL
         guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey],
-                                                      options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
+                                                      options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
         let regex = globRegex(glob)
-        var best: (String, Date)?
+        var out: [FileMatch] = []
         for case let url as URL in e {
             let relative = String(url.path.dropFirst(root.path.count + (root.path.hasSuffix("/") ? 0 : 1)))
             let range = NSRange(relative.startIndex..<relative.endIndex, in: relative)
             guard regex?.firstMatch(in: relative, range: range) != nil,
-                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),
-                  values.isRegularFile == true else { continue }
-            let date = values.contentModificationDate ?? .distantPast
-            if best == nil || date > best!.1 { best = (url.path, date) }
+                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey]),
+                  values.isRegularFile == true,
+                  (values.fileSize ?? 0) <= maxFileBytes else { continue }
+            out.append(FileMatch(path: url.path, modified: values.contentModificationDate ?? .distantPast))
         }
-        return best?.0
+        return out
+    }
+
+    private static func fileSortKey(_ path: String, path jsonPath: String, format: String) -> Double? {
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        if format == "jsonl" {
+            return pickRecordField(data, pick: "newestBy:\(jsonPath)")
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: data),
+              let raw = RecipeMap.value(at: jsonPath, in: obj) else { return nil }
+        switch Parse.number(raw) {
+        case .value(let n): return n
+        case .missing, .invalid:
+            if let text = raw as? String { return ISO8601DateFormatter().date(from: text)?.timeIntervalSince1970 }
+            return nil
+        }
+    }
+
+    private static func pickRecordField(_ data: Data, pick: String) -> Double? {
+        guard pick.hasPrefix("newestBy:") else { return nil }
+        let jsonPath = String(pick.dropFirst("newestBy:".count))
+        let lines = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
+        var best: Double?
+        for line in lines {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+                  let raw = RecipeMap.value(at: jsonPath, in: obj) else { continue }
+            let stamp: Double?
+            switch Parse.number(raw) {
+            case .value(let n): stamp = n
+            case .missing, .invalid:
+                stamp = (raw as? String).flatMap { ISO8601DateFormatter().date(from: $0)?.timeIntervalSince1970 }
+            }
+            guard let stamp else { continue }
+            if best == nil || stamp > best! { best = stamp }
+        }
+        return best
     }
 
     private static func globRegex(_ glob: String) -> NSRegularExpression? {
@@ -324,8 +396,19 @@ enum RecipeFetch {
             let ch = glob[i]
             if ch == "*" {
                 let next = glob.index(after: i)
-                if next < glob.endIndex, glob[next] == "*" { pattern += ".*"; i = glob.index(after: next) }
-                else { pattern += "[^/]*"; i = next }
+                if next < glob.endIndex, glob[next] == "*" {
+                    let afterStar = glob.index(after: next)
+                    if afterStar < glob.endIndex, glob[afterStar] == "/" {
+                        pattern += "(?:.*/)?"
+                        i = glob.index(after: afterStar)
+                    } else {
+                        pattern += ".*"
+                        i = afterStar
+                    }
+                } else {
+                    pattern += "[^/]*"
+                    i = next
+                }
             } else if ch == "?" { pattern += "[^/]"; i = glob.index(after: i) }
             else { pattern += NSRegularExpression.escapedPattern(for: String(ch)); i = glob.index(after: i) }
         }

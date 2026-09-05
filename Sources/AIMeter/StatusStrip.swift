@@ -1,19 +1,5 @@
 import AppKit
 
-/// What a gauge measures. The strip maps `.shortWindow` to a line's top half
-/// and `.longWindow` to its bottom half, so providers only have to tag their
-/// gauges correctly and the layout follows.
-enum GaugeKind: String, Codable, Sendable {
-    case shortWindow, longWindow, other
-    /// A weekly window scoped to one model (Claude's `weekly_scoped` entries).
-    /// Deliberately distinct from `.longWindow`: the strip's window
-    /// classification (`resolveStripLine`) must keep showing the unified
-    /// session + weekly pair and must not pick a per-model entry up as "the"
-    /// weekly window — see the v1.0.19 regression this guards against. Panel
-    /// colouring treats it the same as `.longWindow`.
-    case modelWindow
-}
-
 enum BarColourScheme: String, Codable, Sendable, CaseIterable {
     case provider
 

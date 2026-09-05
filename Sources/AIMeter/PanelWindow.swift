@@ -137,7 +137,7 @@ final class CardPanelController: NSObject, NSWindowDelegate {
         p.delegate = self
         p.onEscape = { [weak self] in self?.handleEscape() }
 
-        let effect = NSVisualEffectView()
+        let effect = PanelBorderEffectView()
         effect.material = .popover
         effect.blendingMode = .behindWindow
         effect.state = .active
@@ -145,7 +145,7 @@ final class CardPanelController: NSObject, NSWindowDelegate {
         effect.layer?.cornerRadius = 16
         effect.layer?.masksToBounds = true
         effect.layer?.borderWidth = 1
-        effect.layer?.borderColor = NSColor.separatorColor.cgColor
+        effect.applyBorderColor()
         p.contentView = effect
         return p
     }
@@ -200,4 +200,21 @@ final class FloatingCardPanel: NSPanel {
     var onEscape: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override func cancelOperation(_ sender: Any?) { onEscape?() }
+}
+
+/// Re-resolves the panel border when the effective appearance changes.
+private final class PanelBorderEffectView: NSVisualEffectView {
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyBorderColor()
+    }
+
+    override func updateLayer() {
+        super.updateLayer()
+        applyBorderColor()
+    }
+
+    func applyBorderColor() {
+        layer?.borderColor = NSColor.separatorColor.cgColor
+    }
 }

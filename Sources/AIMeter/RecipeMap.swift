@@ -46,10 +46,22 @@ enum RecipeMap {
         return node
     }
 
-    static func apply(_ map: MapSpec, to data: Data) -> Reading {
+    static func apply(_ map: MapSpec, to data: Data, pick: String = "last") -> Reading {
         var reading = Reading(id: "recipe", title: "Recipe")
-        guard map.format == "json",
-              let obj = try? JSONSerialization.jsonObject(with: data) else {
+        guard map.format == "json" || map.format == "jsonl" else {
+            reading.state = .warn; reading.lines = [L.t("a.unknown")]
+            return reading
+        }
+        let obj: Any
+        if map.format == "jsonl" {
+            guard let record = pickJSONLRecord(data, pick: pick) else {
+                reading.state = .warn; reading.lines = [L.t("a.unknown")]
+                return reading
+            }
+            obj = record
+        } else if let parsed = try? JSONSerialization.jsonObject(with: data) {
+            obj = parsed
+        } else {
             reading.state = .warn; reading.lines = [L.t("a.unknown")]
             return reading
         }
@@ -77,7 +89,13 @@ enum RecipeMap {
     }
 
     static func unmappedTopLevelKeys(_ map: MapSpec, in data: Data) -> [String] {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        let obj: Any?
+        if map.format == "jsonl" {
+            obj = pickJSONLRecord(data, pick: "last")
+        } else {
+            obj = try? JSONSerialization.jsonObject(with: data)
+        }
+        guard let dict = obj as? [String: Any] else { return [] }
         var used = Set<String>()
         let paths = map.gauges.flatMap { [$0.value, $0.used, $0.limit, $0.remaining, $0.resetsAt] }
             + map.lines.map(\.value) + [map.snapshotAt]
@@ -89,7 +107,39 @@ enum RecipeMap {
                 }
             } else if !path.hasPrefix("$") { used.insert(path) }
         }
-        return obj.keys.filter { !used.contains($0) }.sorted()
+        return dict.keys.filter { !used.contains($0) }.sorted()
+    }
+
+    private static func pickJSONLRecord(_ data: Data, pick: String) -> [String: Any]? {
+        let lines = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
+        var records: [[String: Any]] = []
+        for line in lines {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+                  let dict = obj as? [String: Any] else { continue }
+            records.append(dict)
+        }
+        guard !records.isEmpty else { return nil }
+        if pick == "first" { return records.first }
+        if pick.hasPrefix("newestBy:") {
+            let path = String(pick.dropFirst("newestBy:".count))
+            var best: (record: [String: Any], stamp: Double)?
+            for record in records {
+                guard let raw = value(at: path, in: record),
+                      let stamp = sortKey(raw) else { continue }
+                if best == nil || stamp > best!.stamp { best = (record, stamp) }
+            }
+            return best?.record ?? records.last
+        }
+        return records.last
+    }
+
+    private static func sortKey(_ value: Any) -> Double? {
+        switch Parse.number(value) {
+        case .value(let n): return n
+        case .missing, .invalid:
+            if let text = value as? String { return ISO8601DateFormatter().date(from: text)?.timeIntervalSince1970 }
+            return nil
+        }
     }
 
     private static func makeGauge(_ spec: GaugeSpec, obj: Any) -> Gauge? {
@@ -121,16 +171,30 @@ enum RecipeMap {
         if unit == "text", let text = string(raw) {
             return Gauge(label: spec.label, percent: nil, text: text, resetsAt: reset, kind: kind)
         }
-        guard let n = number(raw) else { return nil }
-        let text: String
-        switch unit {
-        case "percent": text = String(format: "%.0f%%", n)
-        case "fraction": text = String(format: "%.0f%%", n * 100)
-        case "tokens": text = String(format: "%.0f", n)
-        case "bytes": text = Fmt.gb(n)
-        default: text = Fmt.money(n, unit.uppercased())
+        switch Parse.number(raw) {
+        case .value(let n):
+            switch unit {
+            case "percent":
+                let percent = max(0, min(100, n))
+                return Gauge(label: spec.label, percent: percent,
+                             text: String(format: "%.0f%%", percent), resetsAt: reset, kind: kind)
+            case "fraction":
+                let percent = max(0, min(100, n * 100))
+                return Gauge(label: spec.label, percent: percent,
+                             text: String(format: "%.0f%%", percent), resetsAt: reset, kind: kind)
+            case "tokens":
+                return Gauge(label: spec.label, percent: nil,
+                             text: String(format: "%.0f", n), resetsAt: reset, kind: kind)
+            case "bytes":
+                return Gauge(label: spec.label, percent: nil,
+                             text: Fmt.gb(n), resetsAt: reset, kind: kind)
+            default:
+                return Gauge(label: spec.label, percent: nil,
+                             text: Fmt.money(n, unit.uppercased()), resetsAt: reset, kind: kind)
+            }
+        case .missing, .invalid:
+            return nil
         }
-        return Gauge(label: spec.label, percent: nil, text: text, resetsAt: reset, kind: kind)
     }
 
     static func window(_ value: String) -> GaugeKind {
@@ -160,10 +224,10 @@ enum RecipeMap {
     }
 
     private static func number(_ value: Any?) -> Double? {
-        guard let value else { return nil }
-        if let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() { return n.doubleValue }
-        if let s = value as? String { return Double(s) }
-        return nil
+        switch Parse.number(value) {
+        case .value(let n): return n
+        case .missing, .invalid: return nil
+        }
     }
 
     private static func string(_ value: Any) -> String? {

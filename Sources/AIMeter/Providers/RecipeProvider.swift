@@ -49,7 +49,7 @@ final class RecipeProvider: Provider, @unchecked Sendable {
         case .failure(let fail):
             return .failed(recipe.id, recipe.name, account.name, fail.message)
         case .success(let output):
-            var reading = RecipeMap.apply(recipe.map, to: output.data)
+            var reading = RecipeMap.apply(recipe.map, to: output.data, pick: recipe.fetch.pick)
             reading.id = recipe.id; reading.title = recipe.name; reading.account = account.name
             if let stamp = output.meta.snapshotAt { reading.snapshotAt = stamp }
             return reading

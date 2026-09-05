@@ -124,6 +124,13 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
 
         let obj: Any, http: HTTPURLResponse
         do { (obj, http) = try await Net.json(req) }
+        catch Net.JSONError.tooLarge {
+            return Reading(id: id, title: title, account: account.name,
+                           lines: [L.t("n.toolarge")], state: .warn)
+        }
+        catch Net.JSONError.invalid {
+            return .failed(id, title, account.name, L.t("e.connplain"))
+        }
         catch { return .failed(id, title, account.name, L.t("e.conn", error.localizedDescription)) }
 
         if http.statusCode == 401 {
@@ -175,19 +182,29 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         var lines: [String] = []
         var state: ReadingState = .ok
 
-        func percent(_ raw: Any?) -> Double? {
-            if let n = raw as? Double { return n }
-            if let n = raw as? Int { return Double(n) }
-            if let s = raw as? String { return Double(s) }
-            return nil
-        }
         func resetDate(_ raw: Any?) -> Date? {
             guard let s = raw as? String else { return nil }
             return ISO8601DateFormatter.withFractional.date(from: s)
                 ?? ISO8601DateFormatter().date(from: s)
         }
 
-        let limits = (obj as? [String: Any])?["limits"] as? [[String: Any]] ?? []
+        func unifiedGauge(_ win: [String: Any], label: String, kind: GaugeKind) -> Gauge? {
+            switch Parse.number(win["utilization"]) {
+            case .value(let pct):
+                var g = Gauge(label: label, percent: pct, text: String(format: "%.0f%%", pct),
+                                resetsAt: resetDate(win["resets_at"]))
+                g.kind = kind
+                return g
+            case .missing, .invalid:
+                return nil
+            }
+        }
+
+        let root = obj as? [String: Any]
+        let limits = root?["limits"] as? [[String: Any]] ?? []
+        var hasSession = false
+        var hasWeeklyAll = false
+
         for entry in limits {
             let kind = entry["kind"] as? String ?? "?"
             let label: String
@@ -206,28 +223,34 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
                 // raw kind string is a better label than no row at all.
                 label = kind; gk = .other
             }
-            guard let pct = percent(entry["percent"]) else { continue }
-            var g = Gauge(label: label, percent: pct, text: String(format: "%.0f%%", pct),
-                         resetsAt: resetDate(entry["resets_at"]))
-            g.kind = gk
-            gauges.append(g)
-            if let severity = entry["severity"] as? String, severity != "normal" {
-                state = max(state, .warn)
-            }
-        }
-
-        if limits.isEmpty, let root = obj as? [String: Any] {
-            for (key, label, gk) in [("five_hour", L.t("g.5h"), GaugeKind.shortWindow),
-                                     ("seven_day", L.t("g.week"), GaugeKind.longWindow)] {
-                guard let win = root[key] as? [String: Any], let pct = percent(win["utilization"]) else { continue }
+            switch Parse.number(entry["percent"]) {
+            case .value(let pct):
                 var g = Gauge(label: label, percent: pct, text: String(format: "%.0f%%", pct),
-                             resetsAt: resetDate(win["resets_at"]))
+                                resetsAt: resetDate(entry["resets_at"]))
                 g.kind = gk
                 gauges.append(g)
+                if kind == "session" { hasSession = true }
+                if kind == "weekly_all" { hasWeeklyAll = true }
+                if let severity = entry["severity"] as? String, severity != "normal" {
+                    state = max(state, .warn)
+                }
+            case .invalid:
+                state = max(state, .warn)
+            case .missing:
+                break
             }
         }
 
-        if let root = obj as? [String: Any] {
+        if let root {
+            if !hasSession, let win = root["five_hour"] as? [String: Any],
+               let g = unifiedGauge(win, label: L.t("g.5h"), kind: .shortWindow) {
+                gauges.append(g)
+            }
+            if !hasWeeklyAll, let win = root["seven_day"] as? [String: Any],
+               let g = unifiedGauge(win, label: L.t("g.week"), kind: .longWindow) {
+                gauges.append(g)
+            }
+
             for key in ["five_hour", "seven_day"] {
                 guard let win = root[key] as? [String: Any],
                       let reason = win["locked_reason"] as? String else { continue }
@@ -235,19 +258,29 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
                 state = max(state, .nearLimit)
             }
             if let extra = root["extra_usage"] as? [String: Any], (extra["is_enabled"] as? Bool) == true {
-                let used = percent(extra["used_credits"]) ?? 0
-                let limitAmt = percent(extra["monthly_limit"]) ?? 0
-                let places = (extra["decimal_places"] as? Int) ?? 2
-                let currency = (extra["currency"] as? String) ?? "USD"
-                let scale = pow(10.0, Double(places))
-                let usedMoney = used / scale
-                let limitMoney = limitAmt / scale
-                let pct = limitAmt > 0 ? (used / limitAmt) * 100 : 0
-                let text = "\(Fmt.money(usedMoney, currency)) of \(Fmt.money(limitMoney, currency))"
-                var g = Gauge(label: L.t("g.extra"), percent: pct, text: text)
-                g.kind = .other
-                gauges.append(g)
+                switch (Parse.number(extra["used_credits"]), Parse.number(extra["monthly_limit"])) {
+                case (.value(let used), .value(let limitAmt)):
+                    let places = (extra["decimal_places"] as? Int) ?? 2
+                    let currency = (extra["currency"] as? String) ?? "USD"
+                    let scale = pow(10.0, Double(places))
+                    let usedMoney = used / scale
+                    let limitMoney = limitAmt / scale
+                    let pct = limitAmt > 0 ? (used / limitAmt) * 100 : 0
+                    let text = "\(Fmt.money(usedMoney, currency)) of \(Fmt.money(limitMoney, currency))"
+                    var g = Gauge(label: L.t("g.extra"), percent: pct, text: text)
+                    g.kind = .other
+                    gauges.append(g)
+                case (.invalid, _), (_, .invalid):
+                    state = max(state, .warn)
+                case (.missing, _), (_, .missing):
+                    break
+                }
             }
+        }
+
+        if gauges.isEmpty {
+            lines.append(L.t("c.schema"))
+            state = max(state, .warn)
         }
 
         return (gauges, lines, state)
@@ -395,16 +428,3 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
     }
 }
 
-
-func worstState(_ gauges: [Gauge]) -> ReadingState {
-    var s = ReadingState.ok
-    for g in gauges {
-        guard let p = g.percent else { continue }
-        if p >= 90 { s = max(s, .nearLimit) } else if p >= 70 { s = max(s, .warn) }
-    }
-    return s
-}
-
-extension ReadingState: Comparable {
-    static func < (a: ReadingState, b: ReadingState) -> Bool { a.rawValue < b.rawValue }
-}

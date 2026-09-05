@@ -1,68 +1,133 @@
 import Foundation
 import SwiftUI
 
-/// The primary card's trend line: the last 24h of the primary provider's
-/// short (5-hour) window, read straight from the on-disk usage ledger
-/// (`History.swift` writes it, one JSON object per line).
+/// The primary card's trend line: the last 24h of one account's short-window
+/// gauge, read from the on-disk usage ledger (`History.swift` writes it).
 enum Sparkline {
-    /// Parses already-read ledger lines into `(time, percent)` samples for one
-    /// provider's `.shortWindow` gauge, keeping only the last 24h and
-    /// downsampling to at most `maxPoints` while preserving chronological
-    /// order. A line that fails to parse, names a different provider/kind, or
-    /// carries no numeric percent (an expired-window line, or a malformed
-    /// one) is skipped rather than failing the whole read - this is exactly
-    /// the shape convention #3 in this project's pipeline rules asks for: a
-    /// bad unit costs itself, never the ones around it.
-    static func samples(from lines: [String], provider: String, now: Date = Date(),
-                        maxPoints: Int = 96) -> [(Date, Double)] {
+    struct Point: Equatable {
+        var date: Date
+        var value: Double
+    }
+
+    /// One contiguous run of samples. Gaps wider than 2× the refresh interval,
+    /// or a failure line between samples, start a new segment.
+    struct Segment: Equatable {
+        var points: [Point]
+    }
+
+  /// Parses ledger lines into segments for one provider/account/gauge on a
+    /// fixed 24h axis ending at `now`. Lines for other accounts or gauges are
+    /// ignored; a bad unit costs itself, never the ones around it.
+    static func samples(from lines: [String], provider: String, account: String,
+                        gaugeId: String, refreshInterval: Int,
+                        now: Date = Date()) -> [Segment] {
         let cutoff = now.addingTimeInterval(-24 * 3600)
+        let maxGap = TimeInterval(max(refreshInterval, 1) * 2)
         let iso = ISO8601DateFormatter()
-        var points: [(Date, Double)] = []
+        iso.formatOptions = [.withInternetDateTime]
+
+        enum Event {
+            case sample(Date, Double)
+            case failure(Date)
+        }
+        var events: [Event] = []
+
         for line in lines {
             guard let data = line.data(using: .utf8),
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   (obj["provider"] as? String) == provider,
-                  (obj["kind"] as? String) == "shortWindow",
+                  ((obj["account"] as? String) ?? "") == account,
                   let tStr = obj["t"] as? String,
                   let t = iso.date(from: tStr),
-                  t >= cutoff, t <= now,
-                  let pct = obj["percent"] as? Double else { continue }
-            points.append((t, pct))
+                  t >= cutoff, t <= now else { continue }
+
+            if obj["repeat"] as? Bool == true { continue }
+
+            if obj["error"] != nil, obj["gauge_id"] == nil {
+                if (obj["state"] as? Int) == ReadingState.failure.rawValue {
+                    events.append(.failure(t))
+                }
+                continue
+            }
+
+            let gid = (obj["gauge_id"] as? String) ?? legacyGaugeId(obj)
+            guard gid == gaugeId else { continue }
+
+            guard let pct = percent(from: obj) else { continue }
+            events.append(.sample(t, pct))
         }
-        points.sort { $0.0 < $1.0 }
-        guard points.count > maxPoints, maxPoints > 1 else { return points }
-        // Evenly spaced indices rather than every Nth line: the ledger is not
-        // written at a fixed cadence (a manual check lands between timer
-        // ticks), so a fixed stride would over-represent whichever stretch
-        // happened to be checked most often.
-        var out: [(Date, Double)] = []
-        let step = Double(points.count - 1) / Double(maxPoints - 1)
-        for i in 0..<maxPoints {
-            let idx = min(points.count - 1, Int((Double(i) * step).rounded()))
-            out.append(points[idx])
+
+        events.sort {
+            switch ($0, $1) {
+            case (.failure(let a), .failure(let b)): return a < b
+            case (.sample(let a, _), .sample(let b, _)): return a < b
+            case (.failure(let a), .sample(let b, _)): return a < b
+            case (.sample(let a, _), .failure(let b)): return a < b
+            }
         }
-        return out
+
+        var segments: [Segment] = []
+        var current: [Point] = []
+        var lastSample: Date?
+        var failureSinceLast = false
+
+        for event in events {
+            switch event {
+            case .failure:
+                failureSinceLast = true
+            case .sample(let t, let pct):
+                if let last = lastSample {
+                    let gap = t.timeIntervalSince(last)
+                    if failureSinceLast || gap > maxGap {
+                        if current.count >= 2 { segments.append(Segment(points: current)) }
+                        current = []
+                        failureSinceLast = false
+                    }
+                }
+                current.append(Point(date: t, value: pct))
+                lastSample = t
+            }
+        }
+        if current.count >= 2 { segments.append(Segment(points: current)) }
+        return segments
+    }
+
+    static func flatten(_ segments: [Segment]) -> [Point] {
+        segments.flatMap(\.points)
+    }
+
+    private static func percent(from obj: [String: Any]) -> Double? {
+        switch Parse.number(obj["percent"]) {
+        case .value(let n): return n
+        case .missing, .invalid: return nil
+        }
+    }
+
+    /// v1.0.34 and earlier wrote `gauge` + `kind` instead of `gauge_id`.
+    private static func legacyGaugeId(_ obj: [String: Any]) -> String? {
+        guard let label = obj["gauge"] as? String,
+              let kindRaw = obj["kind"] as? String,
+              let kind = GaugeKind(rawValue: kindRaw) else { return nil }
+        return Parse.gaugeId(label: label, kind: kind)
     }
 }
 
 extension Sparkline {
-    /// The file-reading counterpart to `samples(from:...)`, which stays a pure
-    /// function of already-read lines for testability. Reads the current
-    /// month's ledger plus the previous month's (a 24h window can cross a
-    /// UTC month boundary in the last hours of a month) and downsamples.
-    static func recentSamples(historyDir: String, provider: String, now: Date = Date()) -> [(Date, Double)] {
+    /// Loads the current and previous UTC months, then builds segments.
+    static func recentSamples(historyDir: String, provider: String, account: String,
+                              gaugeId: String, refreshInterval: Int,
+                              now: Date = Date()) -> [Segment] {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "UTC")!
         var lines: [String] = []
         for monthsAgo in [0, 1] {
             guard let d = cal.date(byAdding: .month, value: -monthsAgo, to: now) else { continue }
-            let c = cal.dateComponents([.year, .month], from: d)
-            let stamp = String(format: "%04d-%02d", c.year ?? 0, c.month ?? 0)
-            guard let text = try? String(contentsOfFile: historyDir + "/\(stamp).jsonl", encoding: .utf8)
-            else { continue }
-            lines.append(contentsOf: text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init))
+            let key = History.monthKey(for: d)
+            let chunk = History.load(path: historyDir + "/\(key).jsonl")
+            lines.append(contentsOf: chunk.lines)
         }
-        return samples(from: lines, provider: provider, now: now)
+        return samples(from: lines, provider: provider, account: account, gaugeId: gaugeId,
+                       refreshInterval: refreshInterval, now: now)
     }
 }
 
@@ -70,31 +135,45 @@ extension Sparkline {
 /// and "24h"/"70%" corner labels. Fewer than two points draws only the muted
 /// empty-state line - there is no shape a single point could honestly imply.
 struct SparklineView: View {
-    let samples: [(Date, Double)]
+    let segments: [Sparkline.Segment]
     var ink: Color
+    var now: Date = Date()
 
     private static let height: CGFloat = 44
 
-    /// Maps each sample to a point in a `width`x`height` box: x by its
-    /// position between the first and last sample's timestamp, y by its
-    /// percent (0 at the bottom, 100 at the top). A free function rather than
-    /// a closure/nested func inside the `GeometryReader` body below - a
-    /// `return` inside either trips the `@ViewBuilder` transform on the
-    /// enclosing closure.
-    private static func plot(_ samples: [(Date, Double)], width: CGFloat, height: CGFloat) -> [CGPoint] {
-        guard let first = samples.first, let last = samples.last else { return [] }
-        let minT = first.0.timeIntervalSinceReferenceDate
-        let span = max(1, last.0.timeIntervalSinceReferenceDate - minT)
-        return samples.map { s in
-            let x = CGFloat((s.0.timeIntervalSinceReferenceDate - minT) / span) * width
-            let y = height - CGFloat(max(0, min(100, s.1)) / 100) * height
-            return CGPoint(x: x, y: y)
+    init(samples: [(Date, Double)], ink: Color, now: Date = Date()) {
+        self.segments = samples.isEmpty ? [] : [Sparkline.Segment(points: samples.map {
+            Sparkline.Point(date: $0.0, value: $0.1)
+        })]
+        self.ink = ink
+        self.now = now
+    }
+
+    init(segments: [Sparkline.Segment], ink: Color, now: Date = Date()) {
+        self.segments = segments
+        self.ink = ink
+        self.now = now
+    }
+
+    private var pointCount: Int { segments.reduce(0) { $0 + $1.points.count } }
+
+    /// Maps each sample to a point on a fixed 24h axis ending at `now`.
+    private static func plot(_ segments: [Sparkline.Segment], width: CGFloat, height: CGFloat,
+                             now: Date) -> [[CGPoint]] {
+        let windowStart = now.addingTimeInterval(-24 * 3600)
+        let span = 24 * 3600.0
+        return segments.map { segment in
+            segment.points.map { s in
+                let x = CGFloat((s.date.timeIntervalSince1970 - windowStart.timeIntervalSince1970) / span) * width
+                let y = height - CGFloat(max(0, min(100, s.value)) / 100) * height
+                return CGPoint(x: x, y: y)
+            }
         }
     }
 
     var body: some View {
         Group {
-            if samples.count < 2 {
+            if pointCount < 2 {
                 Text(L.t("pn.trend.empty"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
@@ -104,37 +183,36 @@ struct SparklineView: View {
                 GeometryReader { geo in
                     let w = geo.size.width
                     let h = geo.size.height
-                    let pts = Self.plot(samples, width: w, height: h)
+                    let segmentPts = Self.plot(segments, width: w, height: h, now: now)
+                    let allPts = segmentPts.flatMap { $0 }
                     let guideY = h - CGFloat(70.0 / 100) * h
 
                     ZStack(alignment: .topLeading) {
-                        // dashed 70% guide
                         Path { p in
                             p.move(to: CGPoint(x: 0, y: guideY))
                             p.addLine(to: CGPoint(x: w, y: guideY))
                         }
                         .stroke(Color(nsColor: .separatorColor), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
 
-                        // area fill
-                        Path { p in
-                            guard let first = pts.first, let last = pts.last else { return }
-                            p.move(to: CGPoint(x: first.x, y: h))
-                            for pt in pts { p.addLine(to: pt) }
-                            p.addLine(to: CGPoint(x: last.x, y: h))
-                            p.closeSubpath()
-                        }
-                        .fill(ink.opacity(0.10))
+                        ForEach(Array(segmentPts.enumerated()), id: \.offset) { _, pts in
+                            Path { p in
+                                guard let first = pts.first, let last = pts.last else { return }
+                                p.move(to: CGPoint(x: first.x, y: h))
+                                for pt in pts { p.addLine(to: pt) }
+                                p.addLine(to: CGPoint(x: last.x, y: h))
+                                p.closeSubpath()
+                            }
+                            .fill(ink.opacity(0.10))
 
-                        // line
-                        Path { p in
-                            guard let first = pts.first else { return }
-                            p.move(to: first)
-                            for pt in pts.dropFirst() { p.addLine(to: pt) }
+                            Path { p in
+                                guard let first = pts.first else { return }
+                                p.move(to: first)
+                                for pt in pts.dropFirst() { p.addLine(to: pt) }
+                            }
+                            .stroke(ink, lineWidth: 1.4)
                         }
-                        .stroke(ink, lineWidth: 1.4)
 
-                        // endpoint dot
-                        if let last = pts.last {
+                        if let last = allPts.last {
                             Circle().fill(ink)
                                 .frame(width: 4.4, height: 4.4)
                                 .position(last)

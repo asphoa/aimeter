@@ -9,6 +9,8 @@ enum CommandRun {
 
     /// Injected by tests to count process launches without running real binaries.
     static var testHook: ((String, [String], String, TimeInterval, [String: String]) -> Attempt)?
+    /// Injected by tests to avoid spawning pgrep.
+    static var isRunningTestHook: ((String) -> Bool)?
 
     private static let deniedEnvKeys: Set<String> = [
         "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONSTARTUP", "PERL5OPT", "RUBYOPT",
@@ -55,6 +57,7 @@ enum CommandRun {
     }
 
     static func isRunning(binary: String) -> Bool {
+        if let hook = isRunningTestHook { return hook(binary) }
         let name = (binary as NSString).lastPathComponent
         guard !name.isEmpty else { return false }
         let sem = DispatchSemaphore(value: 0)

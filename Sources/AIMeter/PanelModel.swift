@@ -74,53 +74,7 @@ struct PanelModel: Equatable {
         var opacity: Double = 1.0
     }
 
-    /// Compatibility projections for pure tests that predate the unified card
-    /// model. Production panel code consumes `cards` only.
-    struct Primary: Equatable {
-        var providerId: String
-        var title: String
-        var hasData: Bool
-        var state: ReadingState
-        var ageText: String?
-        var heroPercent: Double?
-        var heroText: String
-        var windowLabel: String
-        var resetText: String?
-        var resetsAt: Date?
-        var failureMessage: String?
-        var chips: [Chip]
-    }
-
-    struct SecondaryCard: Equatable {
-        var id: String
-        var title: String
-        var state: ReadingState
-        var badge: String?
-        var rows: [Row]
-        var failureMessage: String?
-        var linkOnly: Bool = false
-        var opacity: Double = 1.0
-    }
-
     var cards: [Card]
-
-    var primary: Primary {
-        let card = cards.first ?? Self.emptyCard(primaryId: "claude")
-        return Primary(providerId: card.id, title: card.title, hasData: card.hasData,
-                       state: card.state, ageText: card.ageText ?? card.badge,
-                       heroPercent: card.hero?.percent, heroText: card.hero?.text ?? "—",
-                       windowLabel: card.hero?.label ?? "", resetText: card.hero?.resetText,
-                       resetsAt: card.hero?.resetsAt, failureMessage: card.failureMessage,
-                       chips: card.chips)
-    }
-
-    var secondaries: [SecondaryCard] {
-        cards.dropFirst().map { card in
-            SecondaryCard(id: card.id, title: card.title, state: card.state, badge: card.badge,
-                          rows: card.compact, failureMessage: card.failureMessage,
-                          linkOnly: card.linkOnly, opacity: card.opacity)
-        }
-    }
 
     static func empty(primaryId: String) -> PanelModel {
         PanelModel(cards: [emptyCard(primaryId: primaryId)])

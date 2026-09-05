@@ -174,6 +174,20 @@ struct MigrationFlags: Codable, Sendable {
     var agyPromptShown: Bool = false
 }
 
+/// User-tunable peak-pricing windows for the DeepSeek balance card note.
+struct DeepSeekPeakHours: Codable, Sendable {
+    /// IANA timezone id.
+    var timezone: String = "Asia/Shanghai"
+    /// Gregorian weekday numbers (1 = Sunday … 7 = Saturday).
+    var weekdays: [Int] = [2, 3, 4, 5, 6]
+    /// Half-open local hour ranges as [startHour, endHour).
+    var ranges: [[Int]] = [[9, 12], [14, 18]]
+}
+
+struct DeepSeekConfig: Codable, Sendable {
+    var peakHours: DeepSeekPeakHours = DeepSeekPeakHours()
+}
+
 struct Config: Codable {
     var language: Lang = .system
     var menuBar: MenuBarConfig = MenuBarConfig()
@@ -218,7 +232,6 @@ struct Config: Codable {
     var migration: MigrationFlags = MigrationFlags()
     /// Set during decode only: whether `intervals` contained an explicit `"agy"` key.
     var agyIntervalKeyPresent: Bool = false
-    var claudeProbeModel: String = "claude-haiku-4-5-20251001"
     /// A manual check on a Claude row whose access token has gone stale runs the
     /// real `claude` once - a local status check, then a minimal one-turn
     /// prompt - and re-reads the keychain, because the CLI making a live request
@@ -241,6 +254,7 @@ struct Config: Codable {
     /// decode time and described in loadWarnings for the Services page.
     var recipes: [Recipe] = []
     var loadWarnings: [String] = []
+    var deepseek: DeepSeekConfig = DeepSeekConfig()
 
     init() {}
 
@@ -272,7 +286,6 @@ struct Config: Codable {
         agyBinary = (try? c.decode(String.self, forKey: .agyBinary)) ?? def.agyBinary
         let decodedColours = (try? c.decode([String: String].self, forKey: .colours)) ?? def.colours
         colours = Self.migratedColours(decodedColours)
-        claudeProbeModel = (try? c.decode(String.self, forKey: .claudeProbeModel)) ?? def.claudeProbeModel
         claudeRefreshViaCLI = (try? c.decode(Bool.self, forKey: .claudeRefreshViaCLI))
             ?? def.claudeRefreshViaCLI
         claudeBinary = (try? c.decode(String.self, forKey: .claudeBinary)) ?? def.claudeBinary
@@ -294,13 +307,14 @@ struct Config: Codable {
             }
             return true
         }
+        deepseek = (try? c.decode(DeepSeekConfig.self, forKey: .deepseek)) ?? def.deepseek
     }
 
     enum CodingKeys: String, CodingKey {
         case language, menuBar, history, refreshSeconds, enabled
         case agyQuotaViaPrint, agyQuotaViaTUI, agyBinary, colours, intervals
-        case agyIntervalMigrated, migration, claudeProbeModel, claudeRefreshViaCLI, claudeBinary
-        case accounts, recipes
+        case agyIntervalMigrated, migration, claudeRefreshViaCLI, claudeBinary
+        case accounts, recipes, deepseek
     }
 
     static var dir: String { expand("~/.config/aimeter") }
@@ -436,7 +450,7 @@ enum Discovery {
         [AccountSpec(name: "Claude Code", keychainService: "Claude Code-credentials")]
     }
 
-    /// ~/.codex, whatever CODEX_HOME points at, plus any pooled HOMEs.
+    /// ~/.codex under $HOME, the CODEX_HOME state directory when set, plus pooled HOMEs.
     static func codex() -> [AccountSpec] {
         var out: [AccountSpec] = []
         let fm = FileManager.default
@@ -444,9 +458,9 @@ enum Discovery {
             out.append(AccountSpec(name: "Default", home: expand("~")))
         }
         if let ch = ProcessInfo.processInfo.environment["CODEX_HOME"] {
-            let home = (ch as NSString).deletingLastPathComponent
-            if !home.isEmpty, home != expand("~") {
-                out.append(AccountSpec(name: "CODEX_HOME", home: home))
+            let state = expand(ch)
+            if !state.isEmpty, state != expand("~/.codex"), fm.fileExists(atPath: state) {
+                out.append(AccountSpec(name: "CODEX_HOME", home: state))
             }
         }
         for p in poolDirs("codex") where fm.fileExists(atPath: p.path + "/.codex") {

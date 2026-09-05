@@ -41,6 +41,10 @@ final class PanelState: ObservableObject {
     var onContentHeight: (CGFloat) -> Void = { _ in }
 }
 
+private let panelWidth: CGFloat = 372
+private let panelHorizontalPadding: CGFloat = 12
+private var chipMaxWidth: CGFloat { panelWidth - panelHorizontalPadding * 4 }
+
 private var panelAppVersion: String {
     Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
 }
@@ -85,7 +89,7 @@ struct PanelView: View {
             if let page = nav.stack.last { settingsPage(page) }
             else { usagePage }
         }
-        .frame(width: 372)
+        .frame(width: panelWidth)
         .background(opaqueBackground ? Color(nsColor: .windowBackgroundColor) : Color.clear)
         .background(shortcuts)
         .onPreferenceChange(PanelContentHeightKey.self) {
@@ -375,13 +379,15 @@ private struct ExpandedCardView: View {
                 if !card.notices.isEmpty {
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(Array(card.notices.enumerated()), id: \.offset) { _, notice in
-                            Text(notice).font(.system(size: 9))
+                            let shown = DisplayLimit.truncate(notice, max: DisplayLimit.notice)
+                            Text(shown.display).font(.system(size: 9))
                                 .foregroundStyle(Color(nsColor: Palette.colour(Palette.warn)))
+                                .accessibilityLabel(shown.full)
                         }
                     }
                 }
                 if !card.chips.isEmpty {
-                    ChipsFlow(chips: card.chips)
+                    ChipsFlow(chips: card.chips, maxChipWidth: chipMaxWidth)
                 }
                 if let samples = card.sparkline, samples.count >= 2 {
                     SparklineView(samples: samples.map { ($0.date, $0.value) },
@@ -438,11 +444,12 @@ private struct ExpandedCardView: View {
 /// wraps whole chips instead, never breaking one across two lines.
 private struct ChipsFlow: View {
     var chips: [PanelModel.Chip]
+    var maxChipWidth: CGFloat
 
     var body: some View {
-        FlowLayout(spacing: 12, lineSpacing: 6) {
+        FlowLayout(spacing: 12, lineSpacing: 6, maxItemWidth: maxChipWidth) {
             ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
-                ChipView(chip: chip)
+                ChipView(chip: chip, maxWidth: maxChipWidth)
             }
         }
     }
@@ -457,12 +464,14 @@ private struct ChipsFlow: View {
 struct FlowLayout: Layout {
     var spacing: CGFloat = 8
     var lineSpacing: CGFloat = 6
+    var maxItemWidth: CGFloat = .infinity
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let maxWidth = proposal.width ?? .infinity
         var x: CGFloat = 0, y: CGFloat = 0, lineHeight: CGFloat = 0
         for (i, subview) in subviews.enumerated() {
-            let size = subview.sizeThatFits(.unspecified)
+            let cap = maxItemWidth.isFinite ? min(maxItemWidth, maxWidth) : maxWidth
+            let size = subview.sizeThatFits(.init(width: cap, height: nil))
             if i > 0, x + size.width > maxWidth {
                 x = 0
                 y += lineHeight + lineSpacing
@@ -477,13 +486,15 @@ struct FlowLayout: Layout {
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         var x = bounds.minX, y = bounds.minY, lineHeight: CGFloat = 0
         for (i, subview) in subviews.enumerated() {
-            let size = subview.sizeThatFits(.unspecified)
+            let cap = maxItemWidth.isFinite ? min(maxItemWidth, bounds.width) : bounds.width
+            let size = subview.sizeThatFits(.init(width: cap, height: nil))
             if i > 0, x + size.width > bounds.maxX {
                 x = bounds.minX
                 y += lineHeight + lineSpacing
                 lineHeight = 0
             }
-            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(size))
+            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading,
+                          proposal: ProposedViewSize(width: cap, height: size.height))
             x += size.width + spacing
             lineHeight = max(lineHeight, size.height)
         }
@@ -492,22 +503,37 @@ struct FlowLayout: Layout {
 
 private struct ChipView: View {
     var chip: PanelModel.Chip
+    var maxWidth: CGFloat
+
+    private var labelParts: (display: String, full: String) {
+        DisplayLimit.truncate(chip.label, max: DisplayLimit.label)
+    }
+
+    private var valueParts: (display: String, full: String) {
+        DisplayLimit.truncate(chip.value, max: DisplayLimit.value)
+    }
+
+    private var accessibilityText: String {
+        [chip.label, chip.value, chip.resetText].compactMap { $0?.isEmpty == false ? $0 : nil }
+            .joined(separator: " · ")
+    }
 
     var body: some View {
         HStack(spacing: 5) {
             MiniRing(percent: chip.percent)
             HStack(spacing: 3) {
-                Text(chip.label).font(.system(size: 10)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                Text(labelParts.display).font(.system(size: 10)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                 Text("·").font(.system(size: 10)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
-                Text(chip.value).font(.system(size: 11, weight: .semibold)).monospacedDigit()
+                Text(valueParts.display).font(.system(size: 11, weight: .semibold)).monospacedDigit()
                 if let r = chip.resetText {
                     Text(r).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.42)))
                 }
             }
         }
         .lineLimit(1)
-        .fixedSize()
-        .help(chip.resetsAt.map(exactDateTime) ?? chip.label)
+        .frame(maxWidth: maxWidth, alignment: .leading)
+        .accessibilityLabel(accessibilityText)
+        .help(chip.resetsAt.map(exactDateTime) ?? accessibilityText)
     }
 }
 
@@ -624,8 +650,10 @@ private struct CompactCardView: View {
                     if !card.notices.isEmpty {
                         VStack(alignment: .leading, spacing: 2) {
                             ForEach(Array(card.notices.enumerated()), id: \.offset) { _, notice in
-                                Text(notice).font(.system(size: 9))
+                                let shown = DisplayLimit.truncate(notice, max: DisplayLimit.notice)
+                                Text(shown.display).font(.system(size: 9))
                                     .foregroundStyle(Color(nsColor: Palette.colour(Palette.warn)))
+                                    .accessibilityLabel(shown.full)
                             }
                         }
                     }

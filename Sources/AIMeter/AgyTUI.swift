@@ -174,9 +174,17 @@ enum AgyTUI {
         var groups: [Group] = []
         var current: Group?
         var pending: String?      // which limit the next percentage belongs to
+        var pendingReset: String? // which window the next "Refreshes in" belongs to
 
         func flush() {
-            if let c = current, c.weeklyUsed != nil || c.fiveHourUsed != nil { groups.append(c) }
+            if let c = current, c.weeklyUsed != nil || c.fiveHourUsed != nil {
+                if let last = groups.last, last.name == c.name,
+                   last.weeklyUsed == c.weeklyUsed, last.fiveHourUsed == c.fiveHourUsed,
+                   last.weeklyResets == c.weeklyResets, last.fiveHourResets == c.fiveHourResets {
+                    return
+                }
+                groups.append(c)
+            }
         }
 
         for line in lines {
@@ -195,8 +203,8 @@ enum AgyTUI {
                 pending = nil
                 continue
             }
-            if t.contains("Weekly Limit Remaining") { pending = "weekly"; continue }
-            if t.contains("Five Hour Limit Remaining") { pending = "fivehour"; continue }
+            if t.contains("Weekly Limit Remaining") { pending = "weekly"; pendingReset = "weekly"; continue }
+            if t.contains("Five Hour Limit Remaining") { pending = "fivehour"; pendingReset = "fivehour"; continue }
 
             if let which = pending,
                let m = t.range(of: #"(\d{1,3}(\.\d+)?)%"#, options: .regularExpression) {
@@ -208,8 +216,14 @@ enum AgyTUI {
                 pending = nil
                 continue
             }
-            if t.contains("Refreshes in"), current?.weeklyResets == nil {
-                current?.weeklyResets = parseRefresh(t)
+            if t.contains("Refreshes in") {
+                let which = pendingReset ?? pending
+                if which == "fivehour" {
+                    current?.fiveHourResets = parseRefresh(t)
+                } else if which == "weekly" {
+                    current?.weeklyResets = parseRefresh(t)
+                }
+                continue
             }
         }
         flush()

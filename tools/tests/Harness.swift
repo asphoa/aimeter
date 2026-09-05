@@ -6,11 +6,26 @@ import Foundation
 /// calls `swiftc` directly instead of `swift build`. Test code has to be
 /// compiled and run the same way as everything else in this project.
 enum T {
+    nonisolated(unsafe) static var tests = 0
+    nonisolated(unsafe) static var assertions = 0
     nonisolated(unsafe) static var passed = 0
     nonisolated(unsafe) static var failed = 0
+    nonisolated(unsafe) static var skipped = 0
+    nonisolated(unsafe) private static var skipReasons: [(String, String)] = []
+
+    static func beginTest(_ name: String) {
+        tests += 1
+    }
+
+    static func skip(_ name: String, _ reason: String) {
+        skipped += 1
+        skipReasons.append((name, reason))
+        print("SKIP  \(name)  — \(reason)")
+    }
 
     static func check(_ name: String, _ ok: Bool, _ detail: String = "",
                       file: StaticString = #file, line: UInt = #line) {
+        assertions += 1
         if ok {
             passed += 1
         } else {
@@ -41,7 +56,11 @@ enum T {
     }
 
     static func summary() -> Int32 {
-        print("\n\(passed) passed, \(failed) failed")
+        for (name, reason) in skipReasons {
+            print("skipped: \(name): \(reason)")
+        }
+        print("\n\(tests) tests, \(assertions) assertions, \(skipped) skipped")
+        print("\(passed) passed, \(failed) failed")
         return failed == 0 ? 0 : 1
     }
 }

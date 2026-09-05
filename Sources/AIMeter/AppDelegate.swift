@@ -100,6 +100,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastFetched: [String: Date] = [:]
     private var coordinatorNotices: [String: [String]] = [:]
     private var timer: Timer?
+    private var lastHistorySettings: History.RecordSettings?
+    private var lastRetentionCalendarDay: String?
     /// Owns the floating card panel when `menuBar.panel == "cards"` (the
     /// default, v1.0.27). Left nil for the "menu" fallback, which keeps using
     /// `statusItem.menu` exactly as before.
@@ -115,7 +117,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         L.current = cfg.language
         Palette.overrides = cfg.colours
         providers = buildProviders(cfg)
-        History.applyRetention(months: cfg.history.retentionMonths)
+        lastHistorySettings = History.RecordSettings(cfg.history)
+        lastRetentionCalendarDay = Self.todayUTC()
+        History.applyRetention(dir: Config.dir, months: cfg.history.retentionMonths)
         Task { await refreshCoordinator.setGeneration(configStore.revision) }
         NotificationCenter.default.addObserver(
             forName: SettingsStore.changed, object: nil, queue: .main) { [weak self] _ in
@@ -187,7 +191,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// refetches so the panel/menu reflects the new set immediately.
     private func reload() {
         let oldPanelStyle = cfg.menuBar.panel
+        let oldHistory = lastHistorySettings
         configStore.reloadFromDisk()
+        let newHistory = History.RecordSettings(cfg.history)
+        if oldHistory?.enabled != newHistory.enabled
+            || oldHistory?.retentionMonths != newHistory.retentionMonths {
+            History.applyRetention(dir: Config.dir, months: newHistory.retentionMonths)
+        }
+        lastHistorySettings = newHistory
         providers = buildProviders(cfg)
         readings = readings.filter { key, _ in providers.contains { $0.id == key } }
         Task { await refreshCoordinator.setGeneration(configStore.revision) }
@@ -201,20 +212,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh(.reload)
     }
 
-    /// One short tick drives every provider; each is fetched only when its own
-    /// interval has elapsed, so a service set to a slow cadence - or to manual -
-    /// is not dragged along by a fast one.
+    /// Schedules the nearest provider refresh deadline with 10% tolerance.
     private func restartTimer() {
         timer?.invalidate()
-        let anyScheduled = providers.contains { cfg.interval($0.id) > 0 }
-        guard anyScheduled else { timer = nil; return }
-        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshDue() }
+        let now = Date()
+        var next: TimeInterval?
+        for p in providers {
+            let secs = cfg.interval(p.id)
+            guard secs > 0 else { continue }
+            let elapsed = lastFetched[p.id].map { now.timeIntervalSince($0) } ?? Double(secs)
+            let remaining = max(0, Double(secs) - elapsed)
+            if next == nil || remaining < next! { next = remaining }
         }
+        guard let interval = next, interval > 0 else { timer = nil; return }
+        let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshDue()
+                self?.restartTimer()
+            }
+        }
+        t.tolerance = interval * 0.1
+        timer = t
     }
 
     /// Fetches only the providers whose interval has come round.
     private func refreshDue() {
+        maybeRunDailyRetention()
         let now = Date()
         let due = providers.filter { p in
             let secs = cfg.interval(p.id)
@@ -268,7 +291,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             readings[event.providerID] = event.readings
         }
         lastFetched[event.providerID] = Date()
-        History.record(event.readings)
+        let historySettings = History.RecordSettings(cfg.history)
+        Task { await HistoryService.shared.record(event.readings, settings: historySettings) }
         ReadingsBox.shared.current = readings
         lastRefresh = Date()
         refreshUI()
@@ -291,14 +315,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updatePanelModel(_ state: PanelState, config: Config? = nil) {
-        var model = PanelModelBuilder.build(readings: readings, cfg: config ?? cfg,
+        let active = config ?? cfg
+        var model = PanelModelBuilder.build(readings: readings, cfg: active,
                                             coordinatorNotices: coordinatorNotices)
-        for index in model.cards.indices where model.cards[index].expanded {
-            let samples = Sparkline.recentSamples(historyDir: Config.dir + "/history",
-                                                  provider: model.cards[index].id)
-            if samples.count >= 2 {
-                model.cards[index].sparkline = samples.map { PanelModel.SparkPoint(date: $0.0, value: $0.1) }
+        let expanded = model.cards.indices.filter { model.cards[$0].expanded }
+        guard !expanded.isEmpty else {
+            state.model = model
+            return
+        }
+        Task { @MainActor in
+            var updated = model
+            for index in expanded {
+                guard let hero = updated.cards[index].hero else { continue }
+                let account = hero.account ?? ""
+                let gaugeId = Parse.gaugeId(label: hero.label, kind: hero.kind)
+                let segments = await HistoryService.shared.sparkline(
+                    provider: updated.cards[index].id, account: account, gaugeId: gaugeId,
+                    refreshInterval: active.interval(updated.cards[index].id))
+                let flat = Sparkline.flatten(segments)
+                if flat.count >= 2 {
+                    updated.cards[index].sparkline = flat.map {
+                        PanelModel.SparkPoint(date: $0.date, value: $0.value)
+                    }
+                }
             }
+            state.model = updated
         }
         state.model = model
     }
@@ -558,7 +599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func openHistory() {
-        let (_, htmlPath) = HistoryReport.export()
+        guard let (_, htmlPath) = try? HistoryReport.export() else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: htmlPath))
     }
 
@@ -580,5 +621,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func saveFailureReason(_ error: Error) -> String {
         if case PrivateWriteError.failed(let path) = error { return path }
         return error.localizedDescription
+    }
+
+    /// UTC calendar day stamp for at-most-once daily retention passes.
+    private static func todayUTC() -> String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let c = cal.dateComponents([.year, .month, .day], from: Date())
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    private func maybeRunDailyRetention() {
+        let day = Self.todayUTC()
+        guard day != lastRetentionCalendarDay else { return }
+        lastRetentionCalendarDay = day
+        History.applyRetention(dir: Config.dir, months: cfg.history.retentionMonths)
     }
 }

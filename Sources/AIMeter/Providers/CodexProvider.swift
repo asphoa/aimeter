@@ -36,35 +36,40 @@ final class CodexProvider: Provider, @unchecked Sendable {
     }
 
     private func read(_ account: AccountSpec) -> Reading {
-        let root = expand(account.home ?? "~") + "/.codex/sessions"
+        let root = sessionsRoot(account)
         guard FileManager.default.fileExists(atPath: root) else {
             return .off(id, title, account.name, L.t("e.notfound", root))
         }
-        guard let (payload, when) = newestSnapshot(root),
+        guard let (payload, when, partial) = newestSnapshot(root),
               let limits = payload["rate_limits"] as? [String: Any] else {
             return .off(id, title, account.name, L.t("x.nosnapshot"))
         }
 
         var r = Reading(id: id, title: title, account: account.name)
         r.snapshotAt = when
+        if partial { r.lines.append(L.t("x.partial")) }
 
         for key in ["primary", "secondary"] {
-            guard let w = limits[key] as? [String: Any],
-                  let used = findNumber(in: w, names: ["used_percent"]) else { continue }
-            let minutes = findNumber(in: w, names: ["window_minutes"]) ?? 0
-            let label: String
-            switch minutes {
-            case 0: label = L.t(key == "primary" ? "g.limit.main" : "g.limit.sec")
-            case ..<61: label = L.t("g.window.min", Int(minutes))
-            case ..<1440: label = L.t("g.window.hour", Int(minutes / 60))
-            case 10080: label = L.t("g.week")
-            default: label = L.t("g.window.day", Int(minutes / 1440))
+            guard let w = limits[key] as? [String: Any] else { continue }
+            switch Parse.findNumber(in: w, names: ["used_percent"]) {
+            case .value(let used):
+                let minutes = parseNumber(in: w, names: ["window_minutes"]) ?? 0
+                let label: String
+                switch minutes {
+                case 0: label = L.t(key == "primary" ? "g.limit.main" : "g.limit.sec")
+                case ..<61: label = L.t("g.window.min", Int(minutes))
+                case ..<1440: label = L.t("g.window.hour", Int(minutes / 60))
+                case 10080: label = L.t("g.week")
+                default: label = L.t("g.window.day", Int(minutes / 1440))
+                }
+                let resets = parseNumber(in: w, names: ["resets_at"]).map { Date(timeIntervalSince1970: $0) }
+                let kind: GaugeKind = minutes > 0 && minutes <= 300 ? .shortWindow
+                                    : (minutes >= 1440 ? .longWindow : .other)
+                r.gauges.append(Gauge(label: label, percent: used,
+                                      text: String(format: "%.0f%%", used), resetsAt: resets, kind: kind))
+            case .missing, .invalid:
+                continue
             }
-            let resets = findNumber(in: w, names: ["resets_at"]).map { Date(timeIntervalSince1970: $0) }
-            let kind: GaugeKind = minutes > 0 && minutes <= 300 ? .shortWindow
-                                : (minutes >= 1440 ? .longWindow : .other)
-            r.gauges.append(Gauge(label: label, percent: used,
-                                  text: String(format: "%.0f%%", used), resetsAt: resets, kind: kind))
         }
         if r.gauges.isEmpty { return .off(id, title, account.name, L.t("x.nopercent")) }
 
@@ -72,8 +77,13 @@ final class CodexProvider: Provider, @unchecked Sendable {
         if let credits = limits["credits"] as? [String: Any] {
             if (credits["unlimited"] as? Bool) == true {
                 r.lines.append(L.t("x.credits.unl"))
-            } else if let bal = findString(in: credits, names: ["balance"]), bal != "0" {
-                r.lines.append(L.t("x.credits", bal))
+            } else {
+                switch Parse.findString(in: credits, names: ["balance"]) {
+                case .value(let bal) where bal != "0":
+                    r.lines.append(L.t("x.credits", bal))
+                default:
+                    break
+                }
             }
         }
         if let rawStatus = limits["rate_limit_reached_type"] as? String,
@@ -83,6 +93,13 @@ final class CodexProvider: Provider, @unchecked Sendable {
         }
         r.state = max(r.state, worstState(r.gauges))
         return r
+    }
+
+    private func sessionsRoot(_ account: AccountSpec) -> String {
+        let home = expand(account.home ?? "~")
+        let nested = home + "/.codex/sessions"
+        if FileManager.default.fileExists(atPath: nested) { return nested }
+        return home + "/sessions"
     }
 
     /// This field is an implementation enum from Codex's local snapshot, not
@@ -120,26 +137,37 @@ final class CodexProvider: Provider, @unchecked Sendable {
     /// private so the test suite can hold it against real captured shapes.
     static func hasUsableWindow(_ rateLimits: [String: Any]) -> Bool {
         for key in ["primary", "secondary"] {
-            if let w = rateLimits[key] as? [String: Any],
-               findNumber(in: w, names: ["used_percent"]) != nil {
-                return true
+            if let w = rateLimits[key] as? [String: Any] {
+                switch Parse.findNumber(in: w, names: ["used_percent"]) {
+                case .value: return true
+                case .missing, .invalid: break
+                }
             }
         }
         return false
     }
 
-    private func newestSnapshot(_ root: String) -> ([String: Any], Date)? {
+    private func parseNumber(in obj: Any, names: [String]) -> Double? {
+        switch Parse.findNumber(in: obj, names: names) {
+        case .value(let n): return n
+        case .missing, .invalid: return nil
+        }
+    }
+
+    private func newestSnapshot(_ root: String) -> ([String: Any], Date, Bool)? {
         let fm = FileManager.default
         func children(_ p: String) -> [String] {
             ((try? fm.contentsOfDirectory(atPath: p)) ?? []).sorted(by: >).map { p + "/" + $0 }
         }
         var dayDirs: [String] = []
+        var truncatedDays = false
         outer: for year in children(root) {
             for month in children(year) {
                 dayDirs.append(contentsOf: children(month))
-                if dayDirs.count > 6 { break outer }
+                if dayDirs.count > 6 { truncatedDays = true; break outer }
             }
         }
+        var partial = truncatedDays
         for day in dayDirs.prefix(6) {
             let files = ((try? fm.contentsOfDirectory(atPath: day)) ?? [])
                 .filter { $0.hasSuffix(".jsonl") }
@@ -149,8 +177,9 @@ final class CodexProvider: Provider, @unchecked Sendable {
                     return (full, d ?? .distantPast)
                 }
                 .sorted { $0.date > $1.date }
+            if files.count > 9 { partial = true }
             var best: ([String: Any], Date)?
-            for f in files.prefix(8) {
+            for f in files.prefix(9) {
                 guard let text = tailBytes(f.path) else { continue }
                 for line in text.split(separator: "\n").reversed() {
                     guard line.contains("\"rate_limits\"") ,
@@ -158,28 +187,29 @@ final class CodexProvider: Provider, @unchecked Sendable {
                           let dict = obj as? [String: Any],
                           let payload = dict["payload"] as? [String: Any],
                           let rateLimits = payload["rate_limits"] as? [String: Any] else { continue }
-                    // Codex now writes more than one rate_limits shape per
-                    // session - a "premium"/other limit_id with both windows
-                    // null has been observed sitting *after* a normal "codex"
-                    // entry that does carry real numbers. Taking whichever is
-                    // textually last, as this used to, reported "no
-                    // percentage field" with a usable reading one line above
-                    // it. Keep scanning backward within the file past an
-                    // entry with nothing to show, rather than accepting the
-                    // newest line unconditionally.
                     guard Self.hasUsableWindow(rateLimits) else { continue }
                     var when = f.date
-                    if let ts = dict["timestamp"] as? String,
-                       let d = ISO8601DateFormatter.withFractional.date(from: ts) { when = d }
+                    if let parsed = Self.eventTimestamp(dict["timestamp"]) { when = parsed }
                     if best == nil || when > best!.1 { best = (payload, when) }
-                    // The last such usable line in this file is its newest;
-                    // the rest of the file cannot beat it, so move on.
                     break
                 }
             }
-            if let best { return best }
+            if let best { return (best.0, best.1, partial) }
         }
         return nil
+    }
+
+    /// Parses rollout event timestamps: ISO-8601 strings (with or without
+    /// fractional seconds) or unix epoch numbers.
+    static func eventTimestamp(_ raw: Any?) -> Date? {
+        if let s = raw as? String {
+            return ISO8601DateFormatter.withFractional.date(from: s)
+                ?? ISO8601DateFormatter().date(from: s)
+        }
+        switch Parse.number(raw) {
+        case .value(let n): return Date(timeIntervalSince1970: n)
+        case .missing, .invalid: return nil
+        }
     }
 }
 
