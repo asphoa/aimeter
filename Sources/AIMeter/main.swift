@@ -56,8 +56,29 @@ func expiredWindowDemo(_ cfg: inout Config) -> [String: [Reading]] {
 func diagnosticDemo(_ cfg: inout Config) -> [String: [Reading]]? {
     if CommandLine.arguments.contains("--demo-expired") { return expiredWindowDemo(&cfg) }
     if CommandLine.arguments.contains("--demo-contrast") { return contrastUsageDemo(&cfg) }
+    if CommandLine.arguments.contains("--demo-notice") { return noticeUsageDemo(&cfg) }
     if CommandLine.arguments.contains("--demo-high") { return highUsageDemo(&cfg) }
     return nil
+}
+
+/// Claude card with a 429 rate-limit notice under the hero gauge.
+func noticeUsageDemo(_ cfg: inout Config) -> [String: [Reading]] {
+    cfg.menuBar.lines = [MenuLine(provider: "claude")]
+    cfg.menuBar.expanded = ["claude"]
+    var reading = Reading(id: "claude", title: ProviderKind.find("claude")?.title ?? "Claude")
+    let now = Date()
+    reading.gauges = [
+        Gauge(label: L.t("g.5h"), percent: 42, text: "42%",
+              resetsAt: now.addingTimeInterval(3600), kind: .shortWindow,
+              observedAt: now.addingTimeInterval(-300), source: "api"),
+        Gauge(label: L.t("g.week"), percent: 18, text: "18%",
+              resetsAt: now.addingTimeInterval(86_400), kind: .longWindow,
+              observedAt: now.addingTimeInterval(-300), source: "api")
+    ]
+    reading.lines = [L.t("c.ratelimited", Fmt.relative(now.addingTimeInterval(300)))]
+    reading.state = .warn
+    reading.snapshotAt = now.addingTimeInterval(-300)
+    return ["claude": [reading]]
 }
 
 private func applyExpandedArgument(to cfg: inout Config) {
@@ -547,7 +568,7 @@ if let idx = CommandLine.arguments.firstIndex(of: "--panel"),
     // that they render the real `PanelView`, not a bare NSView.
     NSApplication.shared.setActivationPolicy(.accessory)
     if CommandLine.arguments.contains("--demo-high") || CommandLine.arguments.contains("--demo-contrast") ||
-       CommandLine.arguments.contains("--demo-expired") {
+       CommandLine.arguments.contains("--demo-expired") || CommandLine.arguments.contains("--demo-notice") {
         // No fetch is involved in a fixture.  Calling it synchronously avoids
         // depending on an application run loop merely to render an NSBitmap.
         MainActor.assumeIsolated { renderPanelDemo(to: path, page: page) }

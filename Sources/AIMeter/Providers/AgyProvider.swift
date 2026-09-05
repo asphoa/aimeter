@@ -19,16 +19,34 @@ import Foundation
 struct AgyFileLocations: Sendable {
     let configDir: String
 
-    var snapshotPath: String { configDir + "/agy-print-last.json" }
+    func snapshotPath(_ account: String) -> String {
+        configDir + "/agy-print-" + slug(account) + ".json"
+    }
+
+    func attemptPath(_ account: String) -> String {
+        configDir + "/agy-print-attempt-" + slug(account) + ".json"
+    }
+
+    func backoffPath(_ account: String) -> String {
+        configDir + "/agy-print-backoff-" + slug(account) + ".json"
+    }
 
     func pauseMarkerPath(_ account: String) -> String {
-        let slug = String(account.unicodeScalars.map {
+        configDir + "/agy-print-paused-" + slug(account) + ".marker"
+    }
+
+    private func slug(_ account: String) -> String {
+        String(account.unicodeScalars.map {
             CharacterSet.alphanumerics.contains($0) ? Character($0) : "_"
         })
-        return configDir + "/agy-print-paused-" + slug + ".marker"
     }
 
     static let `default` = AgyFileLocations(configDir: Config.dir)
+}
+
+struct AgyBackoffState: Codable {
+    var failures: Int
+    var until: Date
 }
 
 final class AgyProvider: Provider, @unchecked Sendable {
@@ -52,45 +70,41 @@ final class AgyProvider: Provider, @unchecked Sendable {
 
     private func fetch(_ a: AccountSpec, manual: Bool) async -> Reading {
         let dir = expand(a.home ?? "~") + "/.gemini/antigravity-cli"
+        let home = trustedHome(a.home ?? "~", marker: ".gemini/antigravity-cli")
         let marker = files.pauseMarkerPath(a.name)
         var paused = FileManager.default.fileExists(atPath: marker)
 
-        // print-mode is attempted on a timer as well as by hand - the whole
-        // point of it costing nothing is that it no longer needs to be
-        // manual-only. A paused account is skipped by the timer (that is
-        // what "paused" means) but never by a manual click: "Check now" is
-        // exactly the escape hatch a pause exists to wait for.
         let approvedBinary = AgyTUI.binary(cfg.agyBinary.isEmpty ? nil : cfg.agyBinary)
         let skipForConcurrency = !manual && approvedBinary.map(CommandRun.isRunning(binary:)) == true
+        let inBackoff = !manual && backoffActive(a.name)
+
         var livePrint: Reading?
-        if cfg.agyQuotaViaPrint, manual || !paused, !skipForConcurrency,
-           let bin = approvedBinary,
-           let home = trustedHome(a.home ?? "~", marker: ".gemini/antigravity-cli") {
+        var unsavedNotice = false
+        if cfg.agyQuotaViaPrint, manual || (!paused && !inBackoff), !skipForConcurrency,
+           let bin = approvedBinary, let home {
             if let reading = await printQuota(binary: bin, home: home, account: a.name) {
                 clearPause(a.name)
+                clearBackoff(a.name)
+                paused = false
+                if manual { return reading }
                 livePrint = reading
-            } else {
-                // Any of rc≠0, status != "SUCCESS", or a 403/PERMISSION_DENIED
-                // in this run's own stderr counts as a refusal or a failure,
-                // and either way this project's rule is that a failure must be
-                // visible rather than quietly retried forever - so future
-                // scheduled checks stop asking until a person presses "Check
-                // now" again. See `refused` for why this checks only stderr,
-                // not the CLI's log file.
-                markPaused(a.name)
+            } else if let stderr = lastAttemptStderr(a.name), AgyProvider.refused(stderr) {
+                if !markPaused(a.name) { unsavedNotice = true }
                 paused = true
+            } else {
+                if !markBackoff(a.name) { unsavedNotice = true }
             }
         }
 
         var tuiReading: Reading?
-        if manual, cfg.agyQuotaViaTUI,
-           let home = trustedHome(a.home ?? "~", marker: ".gemini/antigravity-cli"),
-           let panel = await tuiQuota(home: home, account: a.name) {
+        if manual, livePrint == nil, cfg.agyQuotaViaTUI, let home,
+           let panel = await tuiQuota(home: home, account: a.name),
+           panel.state != .failure {
             tuiReading = panel
         }
 
         let logReading = fromLog(dir: dir, account: a.name)
-        let cachedPrint = cachedPrintSnapshot(account: a.name)
+        let cachedPrint = cachedPrintSnapshot(account: a.name, home: home ?? expand(a.home ?? "~"))
         let printCandidate = livePrint ?? cachedPrint
         let fallback = tuiReading ?? logReading
         let printInterval = TimeInterval(cfg.interval(id))
@@ -102,13 +116,22 @@ final class AgyProvider: Provider, @unchecked Sendable {
                 if let snap = print.snapshotAt {
                     out.lines.insert(L.t("a.paused.cached", Fmt.relative(snap)), at: 0)
                 }
+                if unsavedNotice { out.lines.append(L.t("a.state.unsaved")) }
                 return out
             }
-            return .failed(id, title, a.name, L.t("a.print.paused"))
+            var failed = Reading.failed(id, title, a.name, L.t("a.print.paused"))
+            if unsavedNotice { failed.lines.append(L.t("a.state.unsaved")) }
+            return failed
         }
 
-        return AgyProvider.mergePrintAndFallback(print: printCandidate, fallback: fallback,
-                                                 printInterval: printInterval)
+        let merged = AgyProvider.mergePrintAndFallback(print: printCandidate, fallback: fallback,
+                                                     printInterval: printInterval)
+        if unsavedNotice {
+            var out = merged
+            out.lines.append(L.t("a.state.unsaved"))
+            return out
+        }
+        return merged
     }
 
     /// Drives `agy -p "/usage" --output-format json` and turns a successful
@@ -119,7 +142,7 @@ final class AgyProvider: Provider, @unchecked Sendable {
     /// whether the run answered.
     private func printQuota(binary: String, home: String, account: String) async -> Reading? {
         let attempt: AgyPrint.Attempt = await Task.detached(priority: .utility) {
-            AgyPrint.attempt(binary: binary, home: home)
+            AgyPrint.attempt(binary: binary, home: home, locations: self.files, account: account)
         }.value
 
         guard attempt.exitCode == 0 else { return nil }
@@ -128,12 +151,13 @@ final class AgyProvider: Provider, @unchecked Sendable {
 
         var r = reading(from: result, account: result.account ?? account)
         guard !r.gauges.isEmpty else { return nil }
-        // Fetched fresh this refresh, but not re-checked until the next one
-        // - the same reasoning as tuiQuota's snapshotAt, so a window that
-        // rolls over between two hourly checks is withdrawn by Reading.asOf
-        // rather than shown stale.
-        r.snapshotAt = Date()
+        let now = Date()
+        r.snapshotAt = now
         r.source = "print"
+        for i in r.gauges.indices {
+            r.gauges[i].observedAt = now
+            r.gauges[i].source = "print"
+        }
         r.state = worstState(r.gauges)
         return r
     }
@@ -161,15 +185,18 @@ final class AgyProvider: Provider, @unchecked Sendable {
     }
 
     /// Reads the last on-disk print-mode snapshot written by `AgyPrint.attempt`.
-    func cachedPrintSnapshot(account: String) -> Reading? {
-        let path = files.snapshotPath
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let result = AgyPrint.parse(data), !result.groups.isEmpty else { return nil }
+    func cachedPrintSnapshot(account: String, home: String) -> Reading? {
+        let path = files.snapshotPath(account)
+        guard let loaded = AgyPrint.loadSnapshot(at: path, account: account, home: home),
+              let result = AgyPrint.parse(loaded.data), !result.groups.isEmpty else { return nil }
         var r = reading(from: result, account: result.account ?? account)
         guard !r.gauges.isEmpty else { return nil }
-        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
-        r.snapshotAt = mtime ?? Date()
+        r.snapshotAt = loaded.observedAt
         r.source = "print"
+        for i in r.gauges.indices {
+            r.gauges[i].observedAt = loaded.observedAt
+            r.gauges[i].source = "print"
+        }
         r.state = worstState(r.gauges)
         return r
     }
@@ -239,12 +266,60 @@ final class AgyProvider: Provider, @unchecked Sendable {
     // a pause the moment either happened. The file carries no data worth
     // reading - its existence is the whole signal - so it is written empty.
 
-    private func markPaused(_ account: String) {
-        writePrivate(Data(), to: files.pauseMarkerPath(account))
+    @discardableResult
+    private func markPaused(_ account: String) -> Bool {
+        do {
+            try writePrivate(Data(), to: files.pauseMarkerPath(account))
+            return true
+        } catch {
+            Diagnostics.warn("agy pause marker write failed: \(files.pauseMarkerPath(account)): \(error)")
+            return false
+        }
     }
 
     private func clearPause(_ account: String) {
         try? FileManager.default.removeItem(atPath: files.pauseMarkerPath(account))
+    }
+
+    private func lastAttemptStderr(_ account: String) -> String? {
+        let path = files.attemptPath(account)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let diag = try? JSONDecoder().decode(AgyAttemptDiag.self, from: data) else { return nil }
+        return diag.stderr
+    }
+
+    private struct AgyAttemptDiag: Codable { var stderr: String }
+
+    private func backoffActive(_ account: String, now: Date = Date()) -> Bool {
+        let path = files.backoffPath(account)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let state = try? JSONDecoder().decode(AgyBackoffState.self, from: data) else { return false }
+        return now < state.until
+    }
+
+    @discardableResult
+    private func markBackoff(_ account: String, now: Date = Date()) -> Bool {
+        let path = files.backoffPath(account)
+        var failures = 1
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+           let old = try? JSONDecoder().decode(AgyBackoffState.self, from: data),
+           old.until > now {
+            failures = old.failures + 1
+        }
+        let minutes = min(60, 5 * Int(pow(2.0, Double(failures - 1))))
+        let state = AgyBackoffState(failures: failures, until: now.addingTimeInterval(Double(minutes * 60)))
+        guard let data = try? JSONEncoder().encode(state) else { return false }
+        do {
+            try writePrivate(data, to: path)
+            return true
+        } catch {
+            Diagnostics.warn("agy backoff write failed: \(path): \(error)")
+            return false
+        }
+    }
+
+    private func clearBackoff(_ account: String) {
+        try? FileManager.default.removeItem(atPath: files.backoffPath(account))
     }
 
     // MARK: - manual-only fallback: the pty screen-scrape

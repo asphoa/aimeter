@@ -281,6 +281,7 @@ struct RecipeDraft {
     var bodyJSON = ""
     var binary = ""
     var args = ""
+    var environmentLines = ""
     var folder = ""
     var glob = "**/*.jsonl"
     var gaugeLabel = "Balance"
@@ -304,6 +305,12 @@ struct RecipeDraft {
                                     name: credentialName.isEmpty ? nil : credentialName,
                                     service: appKeychainService.isEmpty ? nil : appKeychainService)
         let argv = args.split(whereSeparator: \.isWhitespace).map(String.init)
+        var environment: [String: String] = [:]
+        for line in environmentLines.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2, !parts[0].isEmpty else { continue }
+            environment[parts[0]] = parts[1]
+        }
         let body = bodyJSON.isEmpty ? nil : try? JSONDecoder().decode(JSONValue.self,
                                                                       from: Data(bodyJSON.utf8))
         let fetch = FetchSpec(method: method, verb: verb,
@@ -313,6 +320,7 @@ struct RecipeDraft {
                               body: body,
                               binary: binary.isEmpty ? nil : binary, args: argv,
                               homeFromAccount: true,
+                              environment: environment,
                               folder: folder.isEmpty ? nil : folder,
                               glob: glob.isEmpty ? nil : glob)
         let gauge: GaugeSpec
@@ -332,5 +340,19 @@ struct RecipeDraft {
         return Recipe(id: id, name: name, colour: colour,
                       symbol: symbol.isEmpty ? nil : symbol, credential: cred, fetch: fetch,
                       map: MapSpec(gauges: [gauge], lines: lines), interval: interval)
+    }
+
+    /// True when env/method/path/body differ from an approved baseline draft.
+    func needsReapproval(comparedTo baseline: RecipeDraft) -> Bool {
+        if method != baseline.method { return true }
+        switch method {
+        case "http":
+            return verb != baseline.verb || path != baseline.path || bodyJSON != baseline.bodyJSON
+        case "cli":
+            return binary != baseline.binary || args != baseline.args
+                || environmentLines != baseline.environmentLines
+        default:
+            return false
+        }
     }
 }

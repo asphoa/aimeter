@@ -119,6 +119,11 @@ struct PanelView: View {
                 })
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
+                    if let notice = state.store.saveNotice {
+                        Text(notice).font(.system(size: 9))
+                            .foregroundStyle(Color(nsColor: Palette.colour(Palette.warn)))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     ForEach(state.model.cards, id: \.id) { card in
                         if card.expanded {
                             ExpandedCardView(card: card, animated: animated,
@@ -362,6 +367,14 @@ private struct ExpandedCardView: View {
                         }
                         Spacer(minLength: 0)
                     }
+                    if !card.notices.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(Array(card.notices.enumerated()), id: \.offset) { _, notice in
+                                Text(notice).font(.system(size: 9))
+                                    .foregroundStyle(Color(nsColor: Palette.colour(Palette.warn)))
+                            }
+                        }
+                    }
                 } else {
                     ForEach(Array(card.compact.enumerated()), id: \.offset) { _, row in
                         RowView(row: row)
@@ -593,8 +606,18 @@ private struct CompactCardView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { onCursorOpen() }
             } else {
-                ForEach(Array(card.compact.enumerated()), id: \.offset) { _, row in
-                    RowView(row: row)
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(card.compact.enumerated()), id: \.offset) { _, row in
+                        RowView(row: row)
+                    }
+                    if !card.notices.isEmpty {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(Array(card.notices.enumerated()), id: \.offset) { _, notice in
+                                Text(notice).font(.system(size: 9))
+                                    .foregroundStyle(Color(nsColor: Palette.colour(Palette.warn)))
+                            }
+                        }
+                    }
                 }
                 .contentShape(Rectangle())
                 .onTapGesture { check() }
@@ -637,6 +660,11 @@ private struct RowView: View {
                 if let pct = row.percent {
                     Meter(percent: pct)
                     Text(String(format: "%.0f%%", pct)).font(.system(size: 11)).monospacedDigit()
+                    if !row.value.isEmpty {
+                        Spacer(minLength: 4)
+                        Text(row.value).font(.system(size: 10)).monospacedDigit()
+                            .foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                    }
                 } else {
                     Spacer(minLength: 0)
                     Text(row.value).font(.system(size: 11)).monospacedDigit()

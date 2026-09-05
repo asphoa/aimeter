@@ -72,6 +72,38 @@ final class TokenCache: @unchecked Sendable {
 }
 
 enum Credential {
+    /// Incremented by tests when `read` would touch the login keychain.
+    static var readTestHook: (() -> Void)?
+
+    /// Services that recipes may never read, regardless of source spelling.
+    static func isForbiddenForRecipes(service: String?) -> Bool {
+        guard let service else { return false }
+        if service == ClaudeCLI.credentialService { return true }
+        return Keychain.securityToolServices.contains(service)
+    }
+
+    /// Validates recipe credential configuration at save time and before fetch.
+    static func validateRecipeCredential(_ recipe: Recipe, account: AccountSpec) -> String? {
+        switch recipe.credential.source {
+        case "none": return nil
+        case "keychain":
+            if isForbiddenForRecipes(service: account.keychainService) {
+                return L.t("rc.forbidden.keychain")
+            }
+        case "appKeychain":
+            if isForbiddenForRecipes(service: recipe.credential.service) {
+                return L.t("rc.forbidden.keychain")
+            }
+        case "keyFile", "env":
+            break
+        default:
+            break
+        }
+        if recipe.fetch.method == "cli", !CommandRun.validateEnvironment(recipe.fetch.environment) {
+            return L.t("rc.envdenied")
+        }
+        return nil
+    }
     /// Drops a cached keychain read, and any remembered refusal, so the next
     /// fetch goes back to the keychain. This is the "a person asked for it"
     /// door: it is what makes "Check now" able to put the authorisation panel
@@ -135,6 +167,12 @@ enum Credential {
             if holdsBlankToken(json: obj, field: a.keyJSONField) {
                 return .failure(Fail(message: L.t("e.blanktoken"), blank: true))
             }
+            if let field = a.keyJSONField, !field.isEmpty {
+                return .failure(Fail(message: L.t("k.field.missing")))
+            }
+            if let d = obj as? [String: Any], d["mcpOAuth"] != nil, d["claudeAiOauth"] == nil {
+                return .failure(Fail(message: L.t("k.field.missing")))
+            }
             return .failure(Fail(message: L.t("e.notoken")))
         }
         return .success(found)
@@ -169,6 +207,7 @@ enum Credential {
             if TokenCache.shared.refused(svc, stamp: stamp) {
                 return .failure(Fail(message: L.t("k.denied"), denied: true))
             }
+            readTestHook?()
             switch Keychain.read(service: svc) {
             case .success(let s):
                 TokenCache.shared.set(svc, s, stamp: stamp)
@@ -192,6 +231,7 @@ enum Credential {
     /// Pulls the credential out of a parsed JSON blob.
     static func unwrap(json obj: Any, field: String?) -> String? {
         let node = container(obj, field: field)
+        if node is NSNull { return nil }
         if let s = node as? String { return s.isEmpty ? nil : s }
         return findString(in: node, names: tokenFields)
     }
@@ -217,8 +257,14 @@ enum Credential {
     /// makes the failure reproducible, it does not prevent it.
     static func container(_ obj: Any, field: String?) -> Any {
         guard let d = obj as? [String: Any] else { return obj }
-        if let field { return d[field] ?? obj }
-        if let own = d["claudeAiOauth"] { return own }
+        if let field {
+            guard let narrowed = d[field] else { return NSNull() }
+            return narrowed
+        }
+        if d["claudeAiOauth"] != nil || d["mcpOAuth"] != nil {
+            guard let own = d["claudeAiOauth"] else { return NSNull() }
+            return own
+        }
         return obj
     }
 

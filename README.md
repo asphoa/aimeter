@@ -218,12 +218,15 @@ This is the part worth reading before you trust it with your credentials.
   HTTP request, a fixed command invocation, or a read-only snapshot file, but
   the part that decides *where* it can send or read is approved separately when
   you press **Save** and stored in AIMeter's keychain under
-  `AIMeter · recipe · <id>`. HTTP recipes pin scheme + host, command recipes pin
-  the executable plus a SHA-256 of the fixed argument array, and file recipes
-  pin the folder. Editing `config.json` afterwards can change an HTTP path, but
-  it cannot change the host; changing a pinned command or folder makes the
-  recipe stop with **Re-approve this recipe**. Public HTTP destinations must be
-  HTTPS; plain HTTP is accepted only for `127.0.0.1` and `localhost`.
+  `AIMeter · recipe · <id>`. HTTP recipes pin scheme + host, HTTP method,
+  normalized path/query-key policy, body digest, and credential source plus
+  auth placement; command recipes pin the executable, argument hash, permitted
+  environment hash, HOME mode, and credential source; file recipes pin the
+  folder and credential source. Editing `config.json` afterwards cannot change
+  an approved host, credential source, command environment, or HTTP operation;
+  any mismatch makes the recipe stop with **Re-approval required after you
+  save**. Public HTTP destinations must be HTTPS; plain HTTP is accepted only
+  for `127.0.0.1` and `localhost`. Recipe HTTP requests reject all redirects.
 - **Recipe credentials can come from a pasted key, a key file, an environment
   variable, another app's keychain item, or nowhere at all.** A pasted key is
   stored in AIMeter's own keychain item and never in `config.json`. A key file
@@ -233,12 +236,15 @@ This is the part worth reading before you trust it with your credentials.
   environment variable is itself trustworthy. An `appKeychain` source always
   uses the normal in-process Keychain API, so macOS may show its authorization
   panel. Recipes can never opt into the special `/usr/bin/security` silent-read
-  allowlist reserved in code for `Claude Code-credentials`.
+  allowlist reserved in code for `Claude Code-credentials`, and that service is
+  rejected for recipes regardless of source spelling.
 - **Recipes do not run a shell or interpolate strings.** HTTP supports GET or
   POST with a fixed JSON body; the only credential-in-query form is the explicit
-  `auth: query` setting. Redirects are followed only when the destination host
-  is unchanged. Command recipes use `Process.executableURL` directly, a fresh
-  minimal environment, closed stdin, a 30-second ceiling and a 1 MB output
+  `auth: query` setting. Non-recipe HTTP redirects must stay on the same origin
+  (scheme, host, and port); HTTPS downgrades are rejected. Command recipes use
+  `Process.executableURL` directly, a fixed allowlisted environment (PATH, HOME,
+  LANG, TERM, plus approved custom keys — never `NODE_OPTIONS`, `DYLD_*`, or
+  other injection variables), closed stdin, a 30-second ceiling and a 1 MB output
   limit; executable paths are restricted to the documented install roots and
   `/usr/bin/security` is explicitly excluded. File recipes are read-only, their
   glob may not contain `..`, and the resolved file must remain under the pinned

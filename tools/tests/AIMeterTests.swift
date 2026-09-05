@@ -95,9 +95,13 @@ func testRecipePinMatchHTTP() {
     var recipe = Recipe(id: "typhoon", name: "Typhoon",
         fetch: FetchSpec(method: "http", baseURL: "https://api.example.com", path: "/v1"))
     let pin = RecipePin.proposed(recipe)!
-    T.check("matching HTTP host", RecipePin.matches(recipe, pin))
+    T.check("matching HTTP pin", RecipePin.matches(recipe, pin))
     recipe.fetch.path = "/v2"
-    T.check("HTTP path is not pinned", RecipePin.matches(recipe, pin))
+    T.check("HTTP path change does not match", !RecipePin.matches(recipe, pin))
+    recipe.fetch.verb = "POST"
+    recipe.fetch.path = "/v1"
+    T.check("HTTP verb change does not match", !RecipePin.matches(recipe, pin))
+    recipe.fetch.verb = "GET"
     recipe.fetch.baseURL = "https://evil.example"
     T.check("different HTTP host does not match", !RecipePin.matches(recipe, pin))
 }
@@ -191,10 +195,15 @@ func testRedactRawPreview() {
 }
 
 func testNetRefusesCrossHostRedirect() {
+    let origin = URL(string: "https://api.example.com/v1")!
     let same = URLRequest(url: URL(string: "https://api.example.com/next")!)
     let other = URLRequest(url: URL(string: "https://evil.example/collect")!)
-    T.notNil("same-host redirect accepted", Net.redirectTarget(originalHost: "api.example.com", proposed: same))
-    T.isNil("cross-host redirect rejected", Net.redirectTarget(originalHost: "api.example.com", proposed: other))
+    T.notNil("same-origin redirect accepted", Net.redirectTarget(originalURL: origin, proposed: same))
+    T.isNil("cross-host redirect rejected", Net.redirectTarget(originalURL: origin, proposed: other))
+    let downgrade = URLRequest(url: URL(string: "http://api.example.com/next")!)
+    T.isNil("https to http downgrade rejected", Net.redirectTarget(originalURL: origin, proposed: downgrade))
+    let otherPort = URLRequest(url: URL(string: "https://api.example.com:8443/next")!)
+    T.isNil("different port rejected", Net.redirectTarget(originalURL: origin, proposed: otherPort))
 }
 
 // MARK: - AgyTUI: three bugs found only by driving the real client
@@ -2275,17 +2284,22 @@ private func agyFetchAwait(_ provider: AgyProvider, manual: Bool) -> Reading? {
     return readings.first
 }
 
-private func agyWriteSnapshot(at path: String, mtime: Date) {
-    try? Data(agyUsageFixture.utf8).write(to: URL(fileURLWithPath: path))
-    try? FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: path)
+private func agyWriteSnapshot(at path: String, account: String, home: String, observedAt: Date) {
+    let envelope = AgyPrint.SnapshotEnvelope(account: account, home: home,
+                                             observedAt: observedAt,
+                                             stdout: Data(agyUsageFixture.utf8))
+    if let data = try? JSONEncoder().encode(envelope) {
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
 }
 
 func testAgyFetchPausedWithFreshSnapshotShowsGauges() {
     let dirs = agyFetchFixtureDirs()
     defer { try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent) }
     let now = Date()
-    agyWriteSnapshot(at: dirs.config + "/agy-print-last.json", mtime: now.addingTimeInterval(-300))
-    writePrivate(Data(), to: dirs.config + "/agy-print-paused-test.marker")
+    agyWriteSnapshot(at: dirs.config + "/agy-print-test.json", account: "test", home: dirs.home,
+                     observedAt: now.addingTimeInterval(-300))
+    try? writePrivate(Data(), to: dirs.config + "/agy-print-paused-test.marker")
     let reading = agyFetchAwait(agyFetchProvider(config: dirs.config, home: dirs.home), manual: false)
     guard let r = reading else { T.check("paused+fresh snapshot yields a reading", false); return }
     T.eq("paused+fresh snapshot keeps four gauges", r.gauges.count, 4)
@@ -2297,7 +2311,7 @@ func testAgyFetchPausedWithFreshSnapshotShowsGauges() {
 func testAgyFetchPausedWithoutSnapshotFails() {
     let dirs = agyFetchFixtureDirs()
     defer { try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent) }
-    writePrivate(Data(), to: dirs.config + "/agy-print-paused-test.marker")
+    try? writePrivate(Data(), to: dirs.config + "/agy-print-paused-test.marker")
     let reading = agyFetchAwait(agyFetchProvider(config: dirs.config, home: dirs.home), manual: false)
     guard let r = reading else { T.check("paused+no snapshot yields a reading", false); return }
     T.eq("paused+no snapshot is failure", r.state, .failure)
@@ -2308,7 +2322,8 @@ func testAgyFetchStaleSnapshotFallsBackToLog() {
     let dirs = agyFetchFixtureDirs()
     defer { try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent) }
     let now = Date()
-    agyWriteSnapshot(at: dirs.config + "/agy-print-last.json", mtime: now.addingTimeInterval(-3 * 3600))
+    agyWriteSnapshot(at: dirs.config + "/agy-print-test.json", account: "test", home: dirs.home,
+                     observedAt: now.addingTimeInterval(-3 * 3600))
     let logPath = dirs.home + "/.gemini/antigravity-cli/cli.log"
     let logLine = "INFO retrieveUserQuotaSummary ok quota 42% left\n"
     try? Data(logLine.utf8).write(to: URL(fileURLWithPath: logPath))
@@ -2577,6 +2592,326 @@ func testSparklineSamplesDownsamplesToAtMostNinetySixAndStaysChronological() {
     T.check("samples stay in chronological order after downsampling", chronological)
 }
 
+// MARK: - v1.0.33 security adversarial tests
+
+func testRecipeCLIEnvPinMismatchBlocksCommand() {
+    var recipe = Recipe(id: "cmd", name: "Cmd",
+        fetch: FetchSpec(method: "cli", binary: "/opt/homebrew/bin/echo", args: ["ok"],
+                         environment: ["MY_TOKEN_FILE": "/tmp/token"]))
+    let account = AccountSpec(name: "a", home: expand("~"))
+    let pin = RecipePin.proposed(recipe, account: account)!
+    recipe.fetch.environment["NODE_OPTIONS"] = "--import=data:text/javascript,throw 1"
+    T.check("env tamper breaks pin", !RecipePin.matches(recipe, pin, account: account))
+    var launches = 0
+    CommandRun.testHook = { _, _, _, _, _ in launches += 1; return CommandRun.Attempt(exitCode: 0, stdout: Data("{}".utf8), stderr: "") }
+    defer { CommandRun.testHook = nil }
+    let sem = DispatchSemaphore(value: 0)
+    var result: Result<RecipeFetch.Output, Fail>?
+    Task {
+        result = await RecipeFetch.run(recipe, account: account, pin: pin)
+        sem.signal()
+    }
+    sem.wait()
+    guard case .failure(let fail) = result else { T.check("tampered env is failure", false); return }
+    T.check("reapproval message", fail.message.contains(L.t("rc.reapprove")) || fail.message.contains("re-approv"))
+    T.eq("no process launched", launches, 0)
+}
+
+func testRecipeEnvDeniedAtValidation() {
+    var draft = RecipeDraft()
+    draft.id = "envtest"; draft.name = "Env"; draft.method = "cli"
+    draft.binary = "/opt/homebrew/bin/echo"; draft.environmentLines = "NODE_OPTIONS=--eval=1"
+    let recipe = draft.recipe()
+    let account = AccountSpec(name: "a", home: expand("~"))
+    T.notNil("denied env fails validation", Credential.validateRecipeCredential(recipe, account: account))
+}
+
+func testRecipeAllowedCustomEnvHashesIntoPin() {
+    var recipe = Recipe(id: "cmd", name: "Cmd",
+        fetch: FetchSpec(method: "cli", binary: "/opt/homebrew/bin/echo", args: ["ok"],
+                         environment: ["MY_TOKEN_FILE": "/tmp/token"]))
+    let account = AccountSpec(name: "a", home: expand("~"))
+    let pin = RecipePin.proposed(recipe, account: account)!
+    T.check("allowed env matches", RecipePin.matches(recipe, pin, account: account))
+    T.eq("env hash recorded", pin.envHash, RecipePin.envHash(recipe.fetch.environment))
+}
+
+func testRecipeForbiddenClaudeKeychainRejected() {
+    var recipe = Recipe(id: "evil", name: "Evil",
+        credential: CredentialSource(source: "keychain"),
+        fetch: FetchSpec(method: "http", baseURL: "https://api.example.com", path: "/v1"))
+    var account = AccountSpec(name: "a", keychainService: ClaudeCLI.credentialService)
+    T.notNil("save validation rejects Claude keychain", Credential.validateRecipeCredential(recipe, account: account))
+    var httpCalls = 0
+    var keychainReads = 0
+    RecipeFetch.httpTestHook = { _ in httpCalls += 1; return .failure(Fail(message: "should not run")) }
+    Credential.readTestHook = { keychainReads += 1 }
+    defer { RecipeFetch.httpTestHook = nil; Credential.readTestHook = nil }
+    let pin = RecipePin.Pin(host: "https://api.example.com", method: "GET",
+                            pathPolicy: RecipePin.pathPolicy("/v1"), bodyHash: "")
+    let sem = DispatchSemaphore(value: 0)
+    var result: Result<RecipeFetch.Output, Fail>?
+    Task {
+        result = await RecipeFetch.run(recipe, account: account, pin: pin)
+        sem.signal()
+    }
+    sem.wait()
+    guard case .failure = result else { T.check("forbidden credential fails fetch", false); return }
+    T.eq("no http call", httpCalls, 0)
+    T.eq("no keychain reads", keychainReads, 0)
+}
+
+func testRecipeCredentialFieldPinMismatch() {
+    var recipe = Recipe(id: "http", name: "HTTP",
+        credential: CredentialSource(source: "keyFile", path: "/tmp/k.json", jsonField: "token"),
+        fetch: FetchSpec(method: "http", baseURL: "https://api.example.com", path: "/v1"))
+    var account = AccountSpec(name: "a", keyFile: "/tmp/k.json", keyJSONField: "token")
+    let pin = RecipePin.proposed(recipe, account: account)!
+    recipe.credential.jsonField = "other"
+    account.keyJSONField = "other"
+    T.check("json field change mismatches", !RecipePin.matches(recipe, pin, account: account))
+}
+
+func testRecipeAuthModePinMismatch() {
+    var recipe = Recipe(id: "http", name: "HTTP",
+        credential: CredentialSource(source: "none"),
+        fetch: FetchSpec(method: "http", baseURL: "https://api.example.com", path: "/v1",
+                         auth: "header", authName: "X-Api-Key"))
+    let pin = RecipePin.proposed(recipe)!
+    recipe.fetch.auth = "query"
+    T.check("auth mode change mismatches", !RecipePin.matches(recipe, pin))
+}
+
+func testCredentialMissingFieldFailsClosed() {
+    let blob = #"{"mcpOAuth":{"srv":{"accessToken":"secret-mcp"}}}"#
+    let obj = try! JSONSerialization.jsonObject(with: Data(blob.utf8))
+    T.isNil("missing claudeAiOauth does not leak MCP token", Credential.unwrap(json: obj, field: nil))
+    T.isNil("explicit missing field", Credential.unwrap(json: ["token": "abc"], field: "missing"))
+}
+
+func testWritePrivateCreatesAndReplaces() {
+    let dir = NSTemporaryDirectory() + "aimeter-write-\(UUID().uuidString)"
+    let path = dir + "/out.json"
+    do {
+        try writePrivate(Data("one".utf8), to: path)
+        T.check("creates new file", FileManager.default.fileExists(atPath: path))
+        try writePrivate(Data("two".utf8), to: path)
+        let text = try String(contentsOfFile: path, encoding: .utf8)
+        T.eq("replaces existing", text, "two")
+    } catch {
+        T.check("writePrivate succeeds on temp dir", false)
+    }
+    try? FileManager.default.removeItem(atPath: dir)
+}
+
+func testWritePrivateThrowsOnUnwritableDir() {
+    let path = "/dev/null/cannot-write/out.json"
+    var threw = false
+    do { try writePrivate(Data("x".utf8), to: path) } catch { threw = true }
+    T.check("unwritable path throws", threw)
+    let dir = (path as NSString).deletingLastPathComponent
+    let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: dir))?.filter { $0.hasPrefix(".tmp-") } ?? []
+    T.eq("no tmp residue", leftovers.count, 0)
+}
+
+func testReadingMergePreservesObservedAt() {
+    let observed = Date(timeIntervalSince1970: 1_700_000_000)
+    let fresh = Date(timeIntervalSince1970: 1_800_000_000)
+    let previous = Reading(id: "claude", title: "Claude",
+                           gauges: [Gauge(label: "5h", percent: 10, text: "10%",
+                                          observedAt: observed, source: "api")])
+    var nextFresh = Reading(id: "claude", title: "Claude",
+                            gauges: [Gauge(label: "5h", percent: 80, text: "80%",
+                                           observedAt: fresh, source: "print")])
+    nextFresh.state = .ok
+    let mergedFresh = Reading.merge(previous: previous, next: nextFresh)
+    T.eq("fresh next keeps observedAt", mergedFresh.gauges.first?.observedAt, fresh)
+    T.eq("fresh next keeps source", mergedFresh.gauges.first?.source, "print")
+
+    var nextBorrowed = Reading(id: "claude", title: "Claude",
+                               gauges: [Gauge(label: "5h", percent: 80, text: "80%")])
+    nextBorrowed.state = .ok
+    let mergedBorrowed = Reading.merge(previous: previous, next: nextBorrowed)
+    T.eq("borrowed next keeps previous observedAt", mergedBorrowed.gauges.first?.observedAt, observed)
+    T.eq("borrowed next keeps previous source", mergedBorrowed.gauges.first?.source, "api")
+}
+
+func testReadingMergeKeepsNearLimitOnWarnTransport() {
+    var previous = Reading(id: "claude", title: "Claude",
+                           gauges: [Gauge(label: "5h", percent: 95, text: "95%")])
+    previous.state = .nearLimit
+    let next = Reading(id: "claude", title: "Claude",
+                       lines: [L.t("c.ratelimited", "5 m")], state: .warn)
+    let merged = Reading.merge(previous: previous, next: next)
+    T.eq("near-limit not downgraded", merged.state, ReadingState.nearLimit)
+}
+
+func testAgySnapshotAccountIsolation() {
+    let dirs = agyFetchFixtureDirs()
+    defer { try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent) }
+    let files = AgyFileLocations(configDir: dirs.config)
+    agyWriteSnapshot(at: files.snapshotPath("bob"), account: "mallory", home: dirs.home, observedAt: Date())
+    var cfgBob = Config()
+    cfgBob.accounts = ["agy": [AccountSpec(name: "bob", home: dirs.home)]]
+    let bobProvider = AgyProvider(cfg: cfgBob, files: files)
+    T.isNil("wrong envelope account rejected for bob path",
+            bobProvider.cachedPrintSnapshot(account: "bob", home: dirs.home))
+    agyWriteSnapshot(at: files.snapshotPath("alice"), account: "alice", home: dirs.home, observedAt: Date())
+    var cfgAlice = Config()
+    cfgAlice.accounts = ["agy": [AccountSpec(name: "alice", home: dirs.home)]]
+    let aliceProvider = AgyProvider(cfg: cfgAlice, files: files)
+    T.notNil("alice reads own snapshot",
+             aliceProvider.cachedPrintSnapshot(account: "alice", home: dirs.home))
+}
+
+func testAgyFailedAttemptDoesNotOverwriteSnapshot() {
+    let dirs = agyFetchFixtureDirs()
+    defer { try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent) }
+    let files = AgyFileLocations(configDir: dirs.config)
+    let now = Date()
+    agyWriteSnapshot(at: files.snapshotPath("test"), account: "test", home: dirs.home, observedAt: now)
+    CommandRun.testHook = { _, _, _, _, _ in
+        CommandRun.Attempt(exitCode: 1, stdout: Data(), stderr: "timeout")
+    }
+    defer { CommandRun.testHook = nil }
+    _ = AgyPrint.attempt(binary: "/opt/homebrew/bin/echo", home: dirs.home,
+                         locations: files, account: "test")
+    let provider = agyFetchProvider(config: dirs.config, home: dirs.home)
+    T.notNil("successful snapshot survives failed attempt",
+             provider.cachedPrintSnapshot(account: "test", home: dirs.home))
+}
+
+func testAgyTransientFailureUsesBackoffNotPause() {
+    let dirs = agyFetchFixtureDirs()
+    defer {
+        AgyTUI.binaryTestHook = nil
+        try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent)
+    }
+    let files = AgyFileLocations(configDir: dirs.config)
+    var cfg = Config()
+    cfg.accounts = ["agy": [AccountSpec(name: "test", home: dirs.home)]]
+    cfg.agyQuotaViaPrint = true
+    cfg.agyQuotaViaTUI = false
+    cfg.intervals = ["agy": 3600]
+    AgyTUI.binaryTestHook = { "/bin/echo" }
+    CommandRun.testHook = { _, _, _, _, _ in
+        CommandRun.Attempt(exitCode: 1, stdout: Data(), stderr: "timeout")
+    }
+    defer { CommandRun.testHook = nil }
+    let provider = AgyProvider(cfg: cfg, files: files)
+    _ = agyFetchAwait(provider, manual: false)
+    T.check("transient failure does not write pause marker",
+            !FileManager.default.fileExists(atPath: files.pauseMarkerPath("test")))
+    T.check("transient failure writes backoff state",
+            FileManager.default.fileExists(atPath: files.backoffPath("test")))
+}
+
+func testRecipePinBodyHashIgnoresDictionaryInsertionOrder() {
+    let first = JSONValue.object(["z": .number(1), "a": .string("x")])
+    let second = JSONValue.object(["a": .string("x"), "z": .number(1)])
+    T.eq("body hash is canonical", RecipePin.bodyHash(first), RecipePin.bodyHash(second))
+}
+
+func testAgyPrintArgvIsFourTokens() {
+    var captured: [String]?
+    CommandRun.testHook = { _, args, _, _, _ in
+        captured = args
+        return CommandRun.Attempt(exitCode: 1, stdout: Data(), stderr: "")
+    }
+    defer { CommandRun.testHook = nil }
+    _ = AgyPrint.attempt(binary: "/bin/echo", home: NSHomeDirectory())
+    T.eq("argv count", captured?.count, 4)
+    T.eq("argv tokens", captured, ["-p", "/usage", "--output-format", "json"])
+}
+
+func testConfigSaveFailureShowsNoticeAndRevertsCfg() {
+    MainActor.assumeIsolated {
+        let tmp = NSTemporaryDirectory() + "aimeter-savefail-\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        let path = tmp + "/config.json"
+        defer {
+            Config.pathOverride = nil
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tmp)
+            try? FileManager.default.removeItem(atPath: tmp)
+        }
+        var baseline = Config()
+        baseline.refreshSeconds = 120
+        Config.pathOverride = path
+        do { try baseline.save() } catch { T.check("baseline save", false); return }
+        let store = SettingsStore(config: baseline)
+        store.cfg.refreshSeconds = 999
+        try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+        let ok = store.persist()
+        T.check("persist reports failure", !ok)
+        T.notNil("save notice set", store.saveNotice)
+        T.eq("cfg reverted to disk", store.cfg.refreshSeconds, 120)
+    }
+}
+
+func testRecipeAppKeychainMalformedJSONFailsWithoutLeakingBlob() {
+    let blob = "not-json-{{secret-token}}"
+    RecipeFetch.appKeychainTestHook = { _ in .success(blob) }
+    defer { RecipeFetch.appKeychainTestHook = nil }
+    let recipe = Recipe(id: "x", name: "X",
+                        credential: CredentialSource(source: "appKeychain", jsonField: "token", service: "TestApp"),
+                        fetch: FetchSpec(method: "http", baseURL: "https://api.example.com", path: "/v1"))
+    let account = AccountSpec(name: "a")
+    let sem = DispatchSemaphore(value: 0)
+    var result: Result<RecipeFetch.Output, Fail>?
+    Task {
+        result = await RecipeFetch.run(recipe, account: account, pin: RecipePin.proposed(recipe)!)
+        sem.signal()
+    }
+    sem.wait()
+    guard case .failure(let fail) = result else { T.check("malformed appKeychain fails", false); return }
+    T.check("failure does not leak blob", !fail.message.contains("secret-token"))
+}
+
+func testPanelModelCompactAndExpandedCardsCarryNotices() {
+    var reading = Reading(id: "claude", title: "Claude")
+    let now = Date()
+    reading.gauges = [
+        Gauge(label: "5h", percent: 42, text: "42%", kind: .shortWindow, observedAt: now, source: "api"),
+        Gauge(label: "week", percent: 18, text: "18%", kind: .longWindow, observedAt: now, source: "api")
+    ]
+    reading.lines = [L.t("c.ratelimited", Fmt.relative(now.addingTimeInterval(300)))]
+    reading.state = .warn
+    var compactCfg = Config()
+    compactCfg.menuBar.expanded = []
+    let compact = PanelModelBuilder.build(readings: ["claude": [reading]], cfg: compactCfg)
+    T.check("compact card has notices", compact.cards.first?.notices.count == 1)
+    var expandedCfg = Config()
+    expandedCfg.menuBar.expanded = ["claude"]
+    let expanded = PanelModelBuilder.build(readings: ["claude": [reading]], cfg: expandedCfg)
+    T.check("expanded card has notices", expanded.cards.first?.notices.count == 1)
+}
+
+func testAgyManualPrintSuccessSkipsTUI() {
+    let dirs = agyFetchFixtureDirs()
+    defer {
+        AgyTUI.binaryTestHook = nil
+        AgyTUI.readTestHook = nil
+        CommandRun.testHook = nil
+        try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent)
+    }
+    let files = AgyFileLocations(configDir: dirs.config)
+    var cfg = Config()
+    cfg.accounts = ["agy": [AccountSpec(name: "test", home: dirs.home)]]
+    cfg.agyQuotaViaPrint = true
+    cfg.agyQuotaViaTUI = true
+    cfg.intervals = ["agy": 3600]
+    var tuiCalls = 0
+    AgyTUI.binaryTestHook = { "/bin/echo" }
+    AgyTUI.readTestHook = { tuiCalls += 1; return nil }
+    CommandRun.testHook = { _, _, _, _, _ in
+        CommandRun.Attempt(exitCode: 0, stdout: Data(agyUsageFixture.utf8), stderr: "")
+    }
+    let provider = AgyProvider(cfg: cfg, files: files)
+    let reading = agyFetchAwait(provider, manual: true)
+    T.eq("manual print success skips TUI", tuiCalls, 0)
+    T.check("manual print success returns gauges", (reading?.gauges.count ?? 0) > 0)
+}
+
 // MARK: - entry point
 //
 // @main rather than a plain main.swift: top-level executable statements are
@@ -2715,6 +3050,26 @@ struct Runner {
         testAgyFetchPausedWithFreshSnapshotShowsGauges()
         testAgyFetchPausedWithoutSnapshotFails()
         testAgyFetchStaleSnapshotFallsBackToLog()
+        testRecipeCLIEnvPinMismatchBlocksCommand()
+        testRecipeEnvDeniedAtValidation()
+        testRecipeAllowedCustomEnvHashesIntoPin()
+        testRecipeForbiddenClaudeKeychainRejected()
+        testRecipeCredentialFieldPinMismatch()
+        testRecipeAuthModePinMismatch()
+        testCredentialMissingFieldFailsClosed()
+        testWritePrivateCreatesAndReplaces()
+        testWritePrivateThrowsOnUnwritableDir()
+        testReadingMergePreservesObservedAt()
+        testReadingMergeKeepsNearLimitOnWarnTransport()
+        testAgySnapshotAccountIsolation()
+        testAgyFailedAttemptDoesNotOverwriteSnapshot()
+        testAgyTransientFailureUsesBackoffNotPause()
+        testRecipePinBodyHashIgnoresDictionaryInsertionOrder()
+        testAgyPrintArgvIsFourTokens()
+        MainActor.assumeIsolated { testConfigSaveFailureShowsNoticeAndRevertsCfg() }
+        testRecipeAppKeychainMalformedJSONFailsWithoutLeakingBlob()
+        testPanelModelCompactAndExpandedCardsCarryNotices()
+        testAgyManualPrintSuccessSkipsTUI()
         testExpandedDefaultsToPrimary()
         testCardOrderPrimaryFirst()
         testHeroPicksShortWindowFirst()

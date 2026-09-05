@@ -60,15 +60,23 @@ struct RecipeTestResult {
 enum RecipeFetch {
     typealias Output = (data: Data, meta: RecipeFetchMeta)
 
+    /// Injected by tests to count HTTP attempts without network I/O.
+    static var httpTestHook: ((URLRequest) -> Result<(Data, HTTPURLResponse), Fail>)?
+    /// Injected by tests for the appKeychain credential branch.
+    static var appKeychainTestHook: ((String) -> Result<String, Fail>)?
+
     static func run(_ recipe: Recipe, account: AccountSpec,
                     pin suppliedPin: RecipePin.Pin? = nil) async -> Result<Output, Fail> {
         let start = Date()
+        if let message = Credential.validateRecipeCredential(recipe, account: account) {
+            return .failure(Fail(message: message))
+        }
         let pin: RecipePin.Pin
         if recipe.fetch.method == "none" { pin = RecipePin.Pin() }
         else if let suppliedPin { pin = suppliedPin }
         else if let stored = RecipePin.read(recipe.id) { pin = stored }
         else { return .failure(Fail(message: L.t("rc.reapprove"))) }
-        guard recipe.legacy || RecipePin.matches(recipe, pin) else {
+        guard recipe.legacy || RecipePin.matches(recipe, pin, account: account) else {
             return .failure(Fail(message: L.t("rc.reapprove")))
         }
 
@@ -163,16 +171,26 @@ enum RecipeFetch {
             request.httpBody = data; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
-        let delegate = Net.SameHostRedirectDelegate(expectedHost: approved.host)
+        let delegate = Net.SameHostRedirectDelegate(originalURL: url, rejectAll: true)
         let config = URLSessionConfiguration.ephemeral
         config.waitsForConnectivity = false
         let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
-                return .failure(Fail(message: L.t("e.nothttp")))
+            let (data, response): (Data, HTTPURLResponse)
+            if let hook = httpTestHook {
+                switch hook(request) {
+                case .success(let pair): (data, response) = pair
+                case .failure(let fail): return .failure(fail)
+                }
+            } else {
+                let pair = try await session.data(for: request)
+                guard let http = pair.1 as? HTTPURLResponse else {
+                    return .failure(Fail(message: L.t("e.nothttp")))
+                }
+                (data, response) = (pair.0, http)
             }
+            let http = response
             let shownURL = url.absoluteString.replacingOccurrences(of: secret ?? "\u{0}", with: "••••")
             let meta = RecipeFetchMeta(request: "\(verb) \(shownURL)", status: http.statusCode,
                 bytes: data.count, elapsed: Date().timeIntervalSince(start),
@@ -188,6 +206,9 @@ enum RecipeFetch {
 
     private static func command(_ recipe: Recipe, account: AccountSpec, pin: RecipePin.Pin,
                                 start: Date) async -> Result<Output, Fail> {
+        guard CommandRun.validateEnvironment(recipe.fetch.environment) else {
+            return .failure(Fail(message: L.t("rc.envdenied")))
+        }
         guard let binary = pin.binary, let home = CommandRun.validHome(
             recipe.fetch.homeFromAccount ? (account.home ?? "~") : "~") else {
             return .failure(Fail(message: L.t("rc.reapprove")))
@@ -224,9 +245,15 @@ enum RecipeFetch {
     }
 
     private static func credential(_ recipe: Recipe, account: AccountSpec) -> Result<String?, Fail> {
+        if let message = Credential.validateRecipeCredential(recipe, account: account) {
+            return .failure(Fail(message: message))
+        }
         switch recipe.credential.source {
         case "none": return .success(nil)
         case "keychain":
+            if Credential.isForbiddenForRecipes(service: account.keychainService) {
+                return .failure(Fail(message: L.t("rc.forbidden.keychain")))
+            }
             return Credential.read(account).map(Optional.some)
         case "keyFile":
             var source = account
@@ -240,18 +267,34 @@ enum RecipeFetch {
             var source = account; source.keychainService = nil; source.keyFile = "env:\(name)"
             return Credential.read(source).map(Optional.some)
         case "appKeychain":
-            guard let service = recipe.credential.service, !Keychain.readsViaSecurityTool(service) else {
+            guard let service = recipe.credential.service,
+                  !Credential.isForbiddenForRecipes(service: service),
+                  !Keychain.readsViaSecurityTool(service) else {
                 return .failure(Fail(message: L.t("rc.forbidden.keychain")))
             }
-            switch Keychain.genericPassword(service: service) {
+            let rawResult: Result<String, Fail>
+            if let hook = appKeychainTestHook {
+                rawResult = hook(service)
+            } else {
+                rawResult = Keychain.genericPassword(service: service)
+            }
+            switch rawResult {
             case .failure(let fail): return .failure(fail)
             case .success(let raw):
                 let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let obj = try? JSONSerialization.jsonObject(with: Data(trimmed.utf8)),
-                   let found = Credential.unwrap(json: obj, field: recipe.credential.jsonField) {
+                guard let obj = try? JSONSerialization.jsonObject(with: Data(trimmed.utf8)) else {
+                    return .failure(Fail(message: L.t("e.notoken")))
+                }
+                if let field = recipe.credential.jsonField, !field.isEmpty {
+                    guard let found = Credential.unwrap(json: obj, field: field) else {
+                        return .failure(Fail(message: L.t("k.field.missing")))
+                    }
                     return .success(found)
                 }
-                return trimmed.isEmpty ? .failure(Fail(message: L.t("e.notoken"))) : .success(trimmed)
+                guard let found = Credential.unwrap(json: obj, field: nil) else {
+                    return .failure(Fail(message: L.t("k.field.missing")))
+                }
+                return .success(found)
             }
         default: return .failure(Fail(message: L.t("rc.bad.credential")))
         }

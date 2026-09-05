@@ -92,7 +92,9 @@ enum HistoryReport {
             lines.append(fields.joined(separator: ","))
         }
         let data = (lines.joined(separator: "\n") + "\n").data(using: .utf8) ?? Data()
-        writePrivate(data, to: path)
+        if (try? writePrivate(data, to: path)) == nil {
+            Diagnostics.warn("history CSV write failed: \(path)")
+        }
     }
 
     private static func writeHTML(_ records: [HistoryRecord], skipped: Int, to path: String,
@@ -158,7 +160,9 @@ enum HistoryReport {
         \(body)
         </body></html>
         """
-        writePrivate((html).data(using: .utf8) ?? Data(), to: path)
+        if (try? writePrivate((html).data(using: .utf8) ?? Data(), to: path)) == nil {
+            Diagnostics.warn("history HTML write failed: \(path)")
+        }
     }
 
     private static let palette = ["#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed", "#0891b2"]

@@ -478,7 +478,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// NSMenuItem-shaped entry point onto this.
     func setLanguage(_ lang: Lang) {
         cfg.language = lang
-        cfg.save()
+        do {
+            try cfg.save()
+            cardPanel?.state.store.saveNotice = nil
+        } catch {
+            cfg = Config.load()
+            cardPanel?.state.store.saveNotice = L.t("s.save.failed", saveFailureReason(error))
+        }
         L.current = lang
         lastRefresh = nil
         refresh()          // provider text is localised at fetch time
@@ -495,7 +501,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The menu sets the default; per-provider overrides live in the
         // Accounts window and are left alone here.
         cfg.refreshSeconds = secs
-        cfg.save()
+        do {
+            try cfg.save()
+            cardPanel?.state.store.saveNotice = nil
+        } catch {
+            cfg = Config.load()
+            cardPanel?.state.store.saveNotice = L.t("s.save.failed", saveFailureReason(error))
+        }
         restartTimer()
         refreshUI()
     }
@@ -551,5 +563,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cardPanel?.close()
         settingsPanel?.close()
         NSApp.terminate(nil)
+    }
+
+    private func saveFailureReason(_ error: Error) -> String {
+        if case PrivateWriteError.failed(let path) = error { return path }
+        return error.localizedDescription
     }
 }

@@ -26,28 +26,68 @@ enum AgyPrint {
     /// its own.
     typealias Attempt = CommandRun.Attempt
 
+    struct SnapshotEnvelope: Codable {
+        var account: String
+        var home: String
+        var observedAt: Date
+        var stdout: Data
+    }
+
     /// Runs the command and returns its raw stdout, or nil if it could not be
     /// started, timed out, or exited non-zero. For the exit code and stderr
     /// text as well, see `attempt`.
-    static func run(binary: String, home: String, timeout: TimeInterval = 30) -> Data? {
-        let result = attempt(binary: binary, home: home, timeout: timeout)
+    static func run(binary: String, home: String, timeout: TimeInterval = 30,
+                    locations: AgyFileLocations = .default, account: String = "Default") -> Data? {
+        let result = attempt(binary: binary, home: home, timeout: timeout,
+                             locations: locations, account: account)
         return result.exitCode == 0 ? result.stdout : nil
     }
 
     /// Runs `agy -p "/usage" --output-format json` and reports what happened.
-    /// Blocking; call off the main thread.
-    static func attempt(binary: String, home: String, timeout: TimeInterval = 30) -> Attempt {
+    /// Blocking; call off the main thread. Always writes a per-attempt
+    /// diagnostic file; only a successful stdout updates the account snapshot.
+    @discardableResult
+    static func attempt(binary: String, home: String, timeout: TimeInterval = 30,
+                        locations: AgyFileLocations = .default, account: String = "Default") -> Attempt {
         let result = CommandRun.attempt(
             binary: binary, args: ["-p", "/usage", "--output-format", "json"],
             home: home, timeout: timeout,
             environment: ["AGY_CLI_DISABLE_AUTO_UPDATE": "1"],
             refuseIfRunning: false)
-        // Nothing secret in this response - unlike the TUI capture, the
-        // print-mode JSON carries no account address or email at all (see
-        // the fixture in tools/tests) - so it can be dumped as-is for
-        // debugging without redaction.
-        writePrivate(result.stdout, to: Config.dir + "/agy-print-last.json")
+        let attemptPath = locations.attemptPath(account)
+        let diag = (try? JSONEncoder().encode(AttemptDiagnostic(
+            account: account, home: home, observedAt: Date(),
+            exitCode: result.exitCode, stderr: result.stderr, timedOut: result.timedOut))) ?? Data()
+        if (try? writePrivate(diag, to: attemptPath)) == nil {
+            Diagnostics.warn("agy print attempt write failed: \(attemptPath)")
+        }
+        if result.exitCode == 0, !AgyProvider.refused(result.stderr) {
+            let envelope = SnapshotEnvelope(account: account, home: home,
+                                            observedAt: Date(), stdout: result.stdout)
+            if let data = try? JSONEncoder().encode(envelope) {
+                if (try? writePrivate(data, to: locations.snapshotPath(account))) == nil {
+                    Diagnostics.warn("agy print snapshot write failed: \(locations.snapshotPath(account))")
+                }
+            }
+        }
         return result
+    }
+
+    private struct AttemptDiagnostic: Codable {
+        var account: String
+        var home: String
+        var observedAt: Date
+        var exitCode: Int32?
+        var stderr: String
+        var timedOut: Bool
+    }
+
+    static func loadSnapshot(at path: String, account: String, home: String) -> (data: Data, observedAt: Date)? {
+        guard let raw = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let envelope = try? JSONDecoder().decode(SnapshotEnvelope.self, from: raw) else { return nil }
+        guard envelope.account == account,
+              envelope.home == home else { return nil }
+        return (envelope.stdout, envelope.observedAt)
     }
 
     // MARK: - parsing

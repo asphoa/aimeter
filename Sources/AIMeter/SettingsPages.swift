@@ -473,6 +473,7 @@ struct CustomRecipeView: View {
     @ObservedObject var store: SettingsStore
     @State private var problem = ""
     @State private var testing = false
+    @State private var approvalBaseline: RecipeDraft?
 
     var body: some View {
         SettingsPageFrame(state: state, title: L.t("rc.custom.title"), back: { state.nav.pop() }) {
@@ -538,6 +539,16 @@ struct CustomRecipeView: View {
                         Text(problem).font(.system(size: 10))
                             .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
                     }
+                    if let baseline = approvalBaseline,
+                       (draft.wrappedValue.method == "http" || draft.wrappedValue.method == "cli"),
+                       draft.wrappedValue.needsReapproval(comparedTo: baseline) {
+                        Text(L.t("rc.reapprove.hint")).font(.system(size: 9))
+                            .foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                    }
+                    if draft.wrappedValue.method == "http" && draft.wrappedValue.verb != "GET" {
+                        Text(L.t("rc.mutating")).font(.system(size: 9))
+                            .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
+                    }
                     if testing { ProgressView().controlSize(.small) }
                     if let result = draft.wrappedValue.tested {
                         TestResultView(result: result) { key in state.draft?.resetsAt = "$.\(key)" }
@@ -550,7 +561,10 @@ struct CustomRecipeView: View {
                     }
                 }
             }
-        }.onAppear { if state.draft == nil { state.draft = RecipeDraft() } }
+        }.onAppear {
+            if state.draft == nil { state.draft = RecipeDraft() }
+            if approvalBaseline == nil { approvalBaseline = state.draft }
+        }
     }
 
     private var binding: Binding<RecipeDraft>? {
@@ -593,6 +607,7 @@ struct CustomRecipeView: View {
         case "cli":
             pathPicker(L.t("rc.choose.command"), path: draft.binary, directory: false)
             TextField(L.t("rc.args"), text: draft.args)
+            TextField("ENV (KEY=value per line)", text: draft.environmentLines)
         case "file":
             pathPicker(L.t("rc.choose.folder"), path: draft.folder, directory: true)
             TextField(L.t("rc.glob"), text: draft.glob)
@@ -630,16 +645,20 @@ struct CustomRecipeView: View {
         }
     }
 
-    private func validation(_ draft: RecipeDraft) -> (Recipe, RecipePin.Pin)? {
+    private func validation(_ draft: RecipeDraft) -> (Recipe, RecipePin.Pin, AccountSpec)? {
         let recipe = draft.recipe()
         guard !recipe.name.trimmingCharacters(in: .whitespaces).isEmpty else { problem = L.t("w.needname"); return nil }
         guard Recipe.validID(recipe.id), !Recipe.reservedIDs.contains(recipe.id) else { problem = L.t("rc.invalid.id"); return nil }
         guard !store.cfg.recipes.contains(where: { $0.id == recipe.id }) else { problem = L.t("w.dup"); return nil }
-        guard let pin = RecipePin.proposed(recipe) else { problem = L.t("rc.invalid.destination"); return nil }
+        let spec = account(draft, recipe: recipe)
+        if let message = Credential.validateRecipeCredential(recipe, account: spec) {
+            problem = message; return nil
+        }
+        guard let pin = RecipePin.proposed(recipe, account: spec) else { problem = L.t("rc.invalid.destination"); return nil }
         if recipe.fetch.method == "file", !RecipeFetch.fileGlobIsSafe(recipe.fetch.glob ?? "") {
             problem = L.t("rc.invalid.glob"); return nil
         }
-        return (recipe, pin)
+        return (recipe, pin, spec)
     }
 
     private func account(_ draft: RecipeDraft, recipe: Recipe, service: String? = nil) -> AccountSpec {
@@ -654,15 +673,15 @@ struct CustomRecipeView: View {
     }
 
     private func test(_ draft: RecipeDraft) {
-        guard let (recipe, pin) = validation(draft) else { return }
+        guard let (recipe, pin, spec) = validation(draft) else { return }
         problem = ""; testing = true
         let temporary = "AIMeter · recipe-test · \(UUID().uuidString)"
         let useTemporary = draft.credentialSource == "keychain"
         if useTemporary, !draft.credential.isEmpty { _ = Credential.store(draft.credential, service: temporary) }
-        let spec = account(draft, recipe: recipe, service: useTemporary ? temporary : nil)
+        let testSpec = useTemporary ? account(draft, recipe: recipe, service: temporary) : spec
         Task { @MainActor in
             defer { if useTemporary { Credential.delete(service: temporary) }; testing = false }
-            switch await RecipeFetch.test(recipe, account: spec, pin: pin) {
+            switch await RecipeFetch.test(recipe, account: testSpec, pin: pin) {
             case .success(let result): state.draft?.tested = result; problem = ""
             case .failure(let fail): problem = fail.message
             }
@@ -670,10 +689,9 @@ struct CustomRecipeView: View {
     }
 
     private func save(_ draft: RecipeDraft) {
-        guard let (recipe, _) = validation(draft) else { return }
+        guard let (recipe, _, spec) = validation(draft) else { return }
         state.onDismissalSuspended(true); defer { state.onDismissalSuspended(false) }
-        guard RecipePin.write(recipe) else { problem = L.t("k.denied"); return }
-        let spec = account(draft, recipe: recipe)
+        guard RecipePin.write(recipe, account: spec) else { problem = L.t("k.denied"); return }
         if draft.credentialSource == "keychain", !draft.credential.isEmpty,
            let service = spec.keychainService,
            !Credential.store(draft.credential, service: service) {

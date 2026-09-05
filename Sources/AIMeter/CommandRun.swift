@@ -7,12 +7,30 @@ enum CommandRun {
     static let outputLimit = 1_048_576
     static let fixedPath = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
 
+    /// Injected by tests to count process launches without running real binaries.
+    static var testHook: ((String, [String], String, TimeInterval, [String: String]) -> Attempt)?
+
+    private static let deniedEnvKeys: Set<String> = [
+        "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONSTARTUP", "PERL5OPT", "RUBYOPT",
+        "BASH_ENV", "ENV", "ZDOTDIR", "SHELL", "PATH", "HOME"
+    ]
+
     struct Attempt: Sendable {
         var exitCode: Int32?
         var stdout: Data
         var stderr: String
         var timedOut = false
         var outputTruncated = false
+    }
+
+    static func isDeniedEnvKey(_ key: String) -> Bool {
+        if deniedEnvKeys.contains(key) { return true }
+        if key.hasPrefix("DYLD_") || key.hasPrefix("LD_") { return true }
+        return false
+    }
+
+    static func validateEnvironment(_ additions: [String: String]) -> Bool {
+        !additions.keys.contains(where: isDeniedEnvKey)
     }
 
     static func allowedBinary(_ path: String) -> String? {
@@ -54,18 +72,27 @@ enum CommandRun {
                         timeout: TimeInterval = 30,
                         environment additions: [String: String] = [:],
                         refuseIfRunning: Bool = true) -> Attempt {
+        if let hook = testHook {
+            return hook(binary, args, home, timeout, additions)
+        }
         guard let binary = allowedBinary(binary), let home = validHome(home) else {
             return Attempt(exitCode: nil, stdout: Data(), stderr: "invalid command destination")
+        }
+        if !validateEnvironment(additions) {
+            return Attempt(exitCode: nil, stdout: Data(), stderr: "denied environment variable")
         }
         if refuseIfRunning, isRunning(binary: binary) {
             return Attempt(exitCode: nil, stdout: Data(), stderr: "command already running")
         }
         let validEnvName = try? NSRegularExpression(pattern: #"^[A-Z][A-Z0-9_]*$"#)
         var env = ["HOME": home, "PATH": fixedPath,
-                   "LANG": ProcessInfo.processInfo.environment["LANG"] ?? "en_US.UTF-8"]
+                   "LANG": ProcessInfo.processInfo.environment["LANG"] ?? "en_US.UTF-8",
+                   "TERM": ProcessInfo.processInfo.environment["TERM"] ?? "xterm-256color"]
         for (key, value) in additions {
             let range = NSRange(key.startIndex..<key.endIndex, in: key)
-            if validEnvName?.firstMatch(in: key, range: range) != nil { env[key] = value }
+            guard !isDeniedEnvKey(key),
+                  validEnvName?.firstMatch(in: key, range: range) != nil else { continue }
+            env[key] = value
         }
 
         let process = Process()

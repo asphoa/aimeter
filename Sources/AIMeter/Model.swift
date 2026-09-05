@@ -19,6 +19,10 @@ struct Gauge: Sendable {
     /// nothing draws a bar for it; this flag is what tells the panel to draw an
     /// empty track and a dash rather than treat it as a money balance.
     var expired = false
+    /// When this gauge was last measured, preserved across rate-limit merges.
+    var observedAt: Date?
+    /// Where the measurement came from (`print`, `log`, `api`, …).
+    var source: String?
 }
 
 struct Reading: Sendable {
@@ -42,11 +46,30 @@ struct Reading: Sendable {
             return next
         }
         if next.state == .failure { return next }
-        if !next.gauges.isEmpty { return next }
+        if !next.gauges.isEmpty {
+            var merged = next
+            merged.gauges = mergeGauges(previous: previous.gauges, next: next.gauges)
+            merged.state = max(next.state, worstState(merged.gauges))
+            return merged
+        }
         guard next.state == .warn, !previous.gauges.isEmpty else { return next }
         var merged = next
         merged.gauges = previous.gauges
+        merged.state = max(max(next.state, worstState(merged.gauges)), previous.state)
         return merged
+    }
+
+    private static func mergeGauges(previous: [Gauge], next: [Gauge]) -> [Gauge] {
+        guard !previous.isEmpty else { return next }
+        return next.map { gauge in
+            if let old = previous.first(where: { $0.label == gauge.label && $0.kind == gauge.kind }) {
+                var merged = gauge
+                if merged.observedAt == nil { merged.observedAt = old.observedAt }
+                if merged.source == nil { merged.source = old.source }
+                return merged
+            }
+            return gauge
+        }
     }
 }
 
@@ -279,24 +302,45 @@ enum RateLimit {
 
 enum Net {
     final class SameHostRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-        let expectedHost: String?
-        init(expectedHost: String? = nil) { self.expectedHost = expectedHost }
+        let originalURL: URL?
+        let rejectAll: Bool
+        init(originalURL: URL? = nil, rejectAll: Bool = false) {
+            self.originalURL = originalURL
+            self.rejectAll = rejectAll
+        }
 
         func urlSession(_ session: URLSession, task: URLSessionTask,
                         willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest,
                         completionHandler: @escaping (URLRequest?) -> Void) {
-            let original = expectedHost ?? task.originalRequest?.url?.host
-            completionHandler(Net.redirectTarget(originalHost: original, proposed: request))
+            if rejectAll { completionHandler(nil); return }
+            let original = originalURL ?? task.originalRequest?.url
+            completionHandler(Net.redirectTarget(originalURL: original, proposed: request))
         }
     }
 
     /// Pure redirect decision shared by the live delegate and its attack-case
-    /// test. A response may move paths, never credentials to another host.
-    static func redirectTarget(originalHost: String?, proposed request: URLRequest) -> URLRequest? {
-        guard let originalHost, let host = request.url?.host,
-              host.caseInsensitiveCompare(originalHost) == .orderedSame else { return nil }
+    /// test. A response may move paths on the same origin, never credentials
+    /// to another host, port, or scheme.
+    static func redirectTarget(originalURL: URL?, proposed request: URLRequest) -> URLRequest? {
+        guard let originalURL, let proposedURL = request.url else { return nil }
+        guard sameOrigin(originalURL, proposedURL) else { return nil }
+        if originalURL.scheme?.lowercased() == "https",
+           proposedURL.scheme?.lowercased() == "http" { return nil }
         return request
+    }
+
+    static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
+        guard let aHost = a.host, let bHost = b.host,
+              aHost.caseInsensitiveCompare(bHost) == .orderedSame else { return false }
+        let aScheme = (a.scheme ?? "https").lowercased()
+        let bScheme = (b.scheme ?? "https").lowercased()
+        return aScheme == bScheme && effectivePort(a) == effectivePort(b)
+    }
+
+    static func effectivePort(_ url: URL) -> Int {
+        if let port = url.port { return port }
+        return (url.scheme ?? "https").lowercased() == "https" ? 443 : 80
     }
 
     static let session: URLSession = {
@@ -393,18 +437,49 @@ func trustedHome(_ path: String, marker: String) -> String? {
 /// Everything this app writes describes which services an account has and where
 /// its credentials live - the sort of thing that gets pasted into a chat window
 /// while debugging. None of it should be readable by other local accounts.
-func writePrivate(_ data: Data, to path: String) {
+enum PrivateWriteError: Error {
+    case failed(String)
+}
+
+/// Append-only warnings for failed diagnostic writes under `Config.dir`.
+enum Diagnostics {
+    static func warn(_ message: String, dir: String = Config.dir) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let line = "\(stamp) \(message)\n"
+        let path = dir + "/diagnostics.log"
+        if FileManager.default.fileExists(atPath: path),
+           let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            try? handle.close()
+        } else {
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                     attributes: [.posixPermissions: 0o700])
+            try? Data(line.utf8).write(to: URL(fileURLWithPath: path))
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        }
+    }
+}
+
+func writePrivate(_ data: Data, to path: String) throws {
     let dir = (path as NSString).deletingLastPathComponent
-    try? FileManager.default.createDirectory(
+    try FileManager.default.createDirectory(
         atPath: dir, withIntermediateDirectories: true,
         attributes: [.posixPermissions: 0o700])
-    try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir)
-    // Written to a temporary neighbour first: a crash mid-write must not leave
-    // a half-parsed settings file behind.
-    let tmp = path + ".tmp"
-    guard (try? data.write(to: URL(fileURLWithPath: tmp), options: .atomic)) != nil else { return }
-    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp)
-    _ = try? FileManager.default.replaceItemAt(URL(fileURLWithPath: path),
-                                               withItemAt: URL(fileURLWithPath: tmp))
-    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir)
+    let tmp = dir + "/.tmp-" + UUID().uuidString
+    do {
+        try data.write(to: URL(fileURLWithPath: tmp), options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp)
+        let dest = URL(fileURLWithPath: path)
+        if FileManager.default.fileExists(atPath: path) {
+            _ = try FileManager.default.replaceItemAt(dest, withItemAt: URL(fileURLWithPath: tmp))
+        } else {
+            try FileManager.default.moveItem(atPath: tmp, toPath: path)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+    } catch {
+        try? FileManager.default.removeItem(atPath: tmp)
+        throw PrivateWriteError.failed(path)
+    }
 }

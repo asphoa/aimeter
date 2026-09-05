@@ -53,8 +53,18 @@ final class SettingsStore: ObservableObject {
     @Published var cfg: Config
     @Published var results: [String: String] = [:]
     @Published var busy: Set<String> = []
+    @Published var saveNotice: String?
 
-    init(config: Config? = nil) { cfg = config ?? Config.load() }
+    /// The last configuration known to be on disk. A failed save reverts to
+    /// this in-memory copy rather than re-reading the file, because the very
+    /// failure that stopped the write (permissions, full disk) usually stops
+    /// the read too.
+    private var lastSaved: Config
+    init(config: Config? = nil) {
+        let c = config ?? Config.load()
+        cfg = c
+        lastSaved = c
+    }
 
     static func key(_ provider: String, _ name: String) -> String {
         provider + "\u{1}" + name
@@ -62,10 +72,25 @@ final class SettingsStore: ObservableObject {
 
     func accounts(_ provider: String) -> [AccountSpec] { cfg.accounts[provider] ?? [] }
 
-    func persist(cosmetic: Bool = false) {
-        cfg.save()
-        if cosmetic { Palette.overrides = cfg.colours }
-        NotificationCenter.default.post(name: cosmetic ? Self.restyled : Self.changed, object: nil)
+    @discardableResult
+    func persist(cosmetic: Bool = false) -> Bool {
+        do {
+            try cfg.save()
+            lastSaved = cfg
+            saveNotice = nil
+            if cosmetic { Palette.overrides = cfg.colours }
+            NotificationCenter.default.post(name: cosmetic ? Self.restyled : Self.changed, object: nil)
+            return true
+        } catch {
+            cfg = lastSaved
+            saveNotice = L.t("s.save.failed", saveFailureReason(error))
+            return false
+        }
+    }
+
+    private func saveFailureReason(_ error: Error) -> String {
+        if case PrivateWriteError.failed(let path) = error { return path }
+        return error.localizedDescription
     }
 
     func setEnabled(_ provider: String, _ index: Int, _ on: Bool) {

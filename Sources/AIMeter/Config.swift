@@ -285,7 +285,9 @@ struct Config: Codable {
     }
 
     static var dir: String { expand("~/.config/aimeter") }
-    static var path: String { dir + "/config.json" }
+    /// Tests may point saves at a temp file without touching the real settings.
+    static var pathOverride: String?
+    static var path: String { pathOverride ?? dir + "/config.json" }
 
     static func load() -> Config {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -298,11 +300,11 @@ struct Config: Codable {
         }
         if !cfg.agyIntervalMigrated {
             cfg = migratingAgyInterval(cfg)
-            cfg.save()
+            do { try cfg.save() } catch { Diagnostics.warn("config save failed during agy migration: \(error)") }
         }
         if cfg.accounts.isEmpty {
             cfg.accounts = Discovery.all()
-            cfg.save()
+            do { try cfg.save() } catch { Diagnostics.warn("config save failed during discovery: \(error)") }
         }
         // Applied here rather than at each call site: one of those call sites
         // was missed, and the only symptom was colours silently not applying.
@@ -337,11 +339,11 @@ struct Config: Codable {
         return out
     }
 
-    func save() {
+    func save() throws {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? enc.encode(self) else { return }
-        writePrivate(data, to: Config.path)
+        let data = try enc.encode(self)
+        try writePrivate(data, to: Config.path)
     }
 
     func isEnabled(_ id: String) -> Bool { enabled[id] ?? true }

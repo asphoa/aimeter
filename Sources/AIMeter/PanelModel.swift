@@ -61,6 +61,7 @@ struct PanelModel: Equatable {
         var ageText: String?
         var badge: String?
         var failureMessage: String?
+        var notices: [String] = []
         var linkOnly: Bool
         var expanded: Bool
         var compact: [Row]
@@ -125,8 +126,8 @@ struct PanelModel: Equatable {
 
     private static func emptyCard(primaryId: String) -> Card {
         Card(id: primaryId, title: PanelModelBuilder.title(for: primaryId), state: .off,
-             ageText: nil, badge: nil, failureMessage: nil, linkOnly: false,
-             expanded: true, compact: [], hero: nil, chips: [], sparkline: nil,
+             ageText: nil, badge: nil, failureMessage: nil, notices: [],
+             linkOnly: false, expanded: true, compact: [], hero: nil, chips: [], sparkline: nil,
              hasData: false)
     }
 }
@@ -174,34 +175,38 @@ enum PanelModelBuilder {
         let fallbackTitle = title(for: id)
         guard !raw.isEmpty else {
             return PanelModel.Card(id: id, title: fallbackTitle, state: .off, ageText: nil,
-                                   badge: nil, failureMessage: nil, linkOnly: false,
-                                   expanded: expanded, compact: [], hero: nil, chips: [],
-                                   sparkline: nil, hasData: false)
+                                   badge: nil, failureMessage: nil, notices: [],
+                                   linkOnly: false, expanded: expanded, compact: [], hero: nil,
+                                   chips: [], sparkline: nil, hasData: false)
         }
 
         let readings = Reading.asOfNow(raw)
         let title = readings.first?.title ?? fallbackTitle
         let state = readings.map(\.state).max() ?? .off
-        let badge = readings.first?.snapshotAt.map { L.t("m.snapshot", Fmt.relative($0)) }
+        let gauges = readings.flatMap(\.gauges)
+        let observed = gauges.compactMap(\.observedAt).min()
+            ?? readings.compactMap(\.snapshotAt).min()
+        let badge = observed.map { L.t("m.snapshot", Fmt.relative($0)) }
         let ageText = id == "claude" ? L.t("pn.free") : badge
         let opacity: Double = (id == "local" && state == .off) ? 0.6 : 1.0
+        let notices = readings.flatMap(\.lines)
 
         if let failed = readings.first(where: { $0.state == .failure }) {
             return PanelModel.Card(id: id, title: title, state: .failure, ageText: ageText,
                                    badge: badge,
                                    failureMessage: failed.lines.first ?? L.t("e.connplain"),
-                                   linkOnly: false, expanded: expanded, compact: [], hero: nil,
-                                   chips: [], sparkline: nil, hasData: true, opacity: opacity)
+                                   notices: notices, linkOnly: false, expanded: expanded,
+                                   compact: [], hero: nil, chips: [], sparkline: nil,
+                                   hasData: true, opacity: opacity)
         }
 
         if id == "cursor" {
             return PanelModel.Card(id: id, title: title, state: state, ageText: nil, badge: nil,
-                                   failureMessage: readings.first?.lines.first, linkOnly: true,
-                                   expanded: false, compact: [], hero: nil, chips: [],
-                                   sparkline: nil, hasData: true, opacity: opacity)
+                                   failureMessage: readings.first?.lines.first, notices: notices,
+                                   linkOnly: true, expanded: false, compact: [], hero: nil,
+                                   chips: [], sparkline: nil, hasData: true, opacity: opacity)
         }
 
-        let gauges = readings.flatMap(\.gauges)
         let heroIndex = heroGaugeIndex(in: gauges)
         let hero: PanelModel.Hero? = heroIndex.map { index in
             let gauge = gauges[index]
@@ -213,16 +218,12 @@ enum PanelModelBuilder {
         let remaining = gauges.enumerated().compactMap { index, gauge in
             index == heroIndex ? nil : gauge
         }
-        var compact = gauges.map { toRow($0, now: now) }
-        for reading in readings {
-            compact.append(contentsOf: reading.lines.map {
-                PanelModel.Row(label: "", percent: nil, value: $0, resetText: nil, resetsAt: nil)
-            })
-        }
+        let compact = gauges.map { toRow($0, now: now) }
         return PanelModel.Card(id: id, title: title, state: state, ageText: ageText, badge: badge,
-                               failureMessage: nil, linkOnly: false, expanded: expanded,
-                               compact: compact, hero: hero, chips: buildChips(remaining, now: now),
-                               sparkline: nil, hasData: true, opacity: opacity)
+                               failureMessage: nil, notices: notices, linkOnly: false,
+                               expanded: expanded, compact: compact, hero: hero,
+                               chips: buildChips(remaining, now: now), sparkline: nil,
+                               hasData: true, opacity: opacity)
     }
 
     private static func heroGaugeIndex(in gauges: [Gauge]) -> Int? {

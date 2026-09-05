@@ -49,7 +49,13 @@ enum AgyTUI {
     /// symlinked into one of these instead.
     static let allowedBinaries = ["~/.local/bin/agy", "/usr/local/bin/agy", "/opt/homebrew/bin/agy"]
 
+    /// When set, tests supply a binary path without touching the allowlist.
+    static var binaryTestHook: (() -> String?)?
+    /// When set, tests count TUI invocations without starting a pty.
+    static var readTestHook: (() -> Result?)?
+
     static func binary(_ configured: String?) -> String? {
+        if let hook = binaryTestHook { return hook() }
         let allowed = allowedBinaries.map(expand)
         if let configured {
             let wanted = expand(configured)
@@ -61,6 +67,7 @@ enum AgyTUI {
     }
 
     static func read(binary path: String, home: String, timeout: TimeInterval = 90) -> Result? {
+        if let hook = readTestHook { return hook() }
         var master: Int32 = 0, slave: Int32 = 0
         // The panel is only drawn if the terminal claims a usable size.
         var size = winsize(ws_row: 50, ws_col: 160, ws_xpixel: 0, ws_ypixel: 0)
@@ -154,7 +161,9 @@ enum AgyTUI {
             with: "<redacted>", options: .regularExpression)
         redacted = redacted.replacingOccurrences(
             of: #"(Account:\s*)\S+"#, with: "$1<redacted>", options: .regularExpression)
-        writePrivate(Data(redacted.utf8), to: Config.dir + "/agy-tui-last.txt")
+        if (try? writePrivate(Data(redacted.utf8), to: Config.dir + "/agy-tui-last.txt")) == nil {
+            Diagnostics.warn("agy TUI capture write failed")
+        }
         return parse(text)
     }
 

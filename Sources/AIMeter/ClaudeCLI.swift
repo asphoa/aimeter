@@ -377,7 +377,9 @@ enum ClaudeCLI {
         _ = drained.wait(timeout: .now() + 5)
 
         let text = String(decoding: out.data, as: UTF8.self)
-        writePrivate(Data(redact(text).utf8), to: Config.dir + "/" + file)
+        if (try? writePrivate(Data(redact(text).utf8), to: Config.dir + "/" + file)) == nil {
+            Diagnostics.warn("claude CLI capture write failed: \(file)")
+        }
         return .ran(Completed(output: text,
                               error: String(decoding: err.data, as: UTF8.self),
                               code: process.terminationStatus))

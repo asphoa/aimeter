@@ -155,9 +155,15 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
 
         let (gauges, lines, parsedState) = ClaudeProvider.readings(fromUsage: obj)
         var r = Reading(id: id, title: title, account: account.name)
-        r.gauges = gauges
+        let now = Date()
+        r.gauges = gauges.map { gauge in
+            var g = gauge
+            g.observedAt = now
+            g.source = "api"
+            return g
+        }
         r.lines = lines
-        r.state = max(parsedState, worstState(gauges))
+        r.state = max(parsedState, worstState(r.gauges))
         return r
     }
 
@@ -383,7 +389,9 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
         let safe = account.replacingOccurrences(of: "/", with: "_")
         guard let data = try? JSONSerialization.data(withJSONObject: payload,
                                                      options: [.prettyPrinted, .sortedKeys]) else { return }
-        writePrivate(data, to: Config.dir + "/last-usage-\(safe).json")
+        if (try? writePrivate(data, to: Config.dir + "/last-usage-\(safe).json")) == nil {
+            Diagnostics.warn("claude usage snapshot write failed: \(safe)")
+        }
     }
 }
 
