@@ -57,25 +57,44 @@ private func settingsIntervalLabel(_ seconds: Int) -> String {
 }
 
 private struct SettingsPageFrame<Content: View>: View {
+    @ObservedObject var state: PanelState
     let title: String
     let back: () -> Void
     @ViewBuilder let content: () -> Content
+    @State private var contentHeight: CGFloat = 0
+    @State private var chromeHeight: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
-            PanelHeader(title: title, back: back)
-            Divider()
+            VStack(spacing: 0) {
+                PanelHeader(title: title, back: back)
+                Divider()
+            }
+            .background(GeometryReader { geometry in
+                Color.clear.preference(key: PanelChromeHeightKey.self, value: geometry.size.height)
+            })
             ScrollView {
                 content()
                     .frame(width: 348, alignment: .leading)
                     .padding(.vertical, 10)
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: PanelContentHeightKey.self, value: geometry.size.height)
+                    })
             }
-            Divider()
-            Text("v\(settingsVersion)")
-                .font(.system(size: 9))
-                .foregroundStyle(Color(nsColor: Palette.text(0.62)))
-                .padding(.vertical, 7)
+            .scrollDisabled(contentHeight + chromeHeight <= state.screenLimit)
+            VStack(spacing: 0) {
+                Divider()
+                Text("v\(settingsVersion)")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                    .padding(.vertical, 7)
+            }
+            .background(GeometryReader { geometry in
+                Color.clear.preference(key: PanelChromeHeightKey.self, value: geometry.size.height)
+            })
         }
+        .onPreferenceChange(PanelContentHeightKey.self) { contentHeight = $0 }
+        .onPreferenceChange(PanelChromeHeightKey.self) { chromeHeight = $0 }
     }
 }
 
@@ -110,7 +129,7 @@ struct SettingsRootView: View {
     @ObservedObject var store: SettingsStore
 
     var body: some View {
-        SettingsPageFrame(title: L.t("s.title"), back: { state.nav.pop() }) {
+        SettingsPageFrame(state: state, title: L.t("s.title"), back: { state.nav.pop() }) {
             VStack(spacing: 8) {
                 SettingsLinkRow(icon: "square.grid.2x2", title: L.t("s.services"),
                                 subtitle: SettingsSubtitle.services(store.cfg)) {
@@ -153,7 +172,7 @@ struct ServicesView: View {
     }
 
     var body: some View {
-        SettingsPageFrame(title: L.t("s.services"), back: { state.nav.pop() }) {
+        SettingsPageFrame(state: state, title: L.t("s.services"), back: { state.nav.pop() }) {
             VStack(spacing: 9) {
                 ForEach(store.cfg.loadWarnings, id: \.self) { warning in
                     Text(warning).font(.system(size: 10))
@@ -357,7 +376,7 @@ struct CatalogueView: View {
     private var kinds: [ProviderKind] { ProviderKind.all.filter { $0.id != "generic" } }
 
     var body: some View {
-        SettingsPageFrame(title: L.t("s.add.title"), back: { state.nav.pop() }) {
+        SettingsPageFrame(state: state, title: L.t("s.add.title"), back: { state.nav.pop() }) {
             VStack(alignment: .leading, spacing: 9) {
                 Text(L.t("s.builtin")).font(.system(size: 11, weight: .semibold))
                 ForEach(kinds) { kind in
@@ -455,7 +474,7 @@ struct CustomRecipeView: View {
     @State private var testing = false
 
     var body: some View {
-        SettingsPageFrame(title: L.t("rc.custom.title"), back: { state.nav.pop() }) {
+        SettingsPageFrame(state: state, title: L.t("rc.custom.title"), back: { state.nav.pop() }) {
             if let draft = binding {
                 VStack(alignment: .leading, spacing: 10) {
                     Group {
@@ -705,7 +724,7 @@ struct AddBuiltinView: View {
     private var kind: ProviderKind { ProviderKind.find(providerID) ?? ProviderKind.all[0] }
 
     var body: some View {
-        SettingsPageFrame(title: kind.title, back: { state.nav.pop() }) {
+        SettingsPageFrame(state: state, title: kind.title, back: { state.nav.pop() }) {
             if let draft = draftBinding {
                 VStack(alignment: .leading, spacing: 11) {
                     TextField(L.t("w.name"), text: draft.name, prompt: Text(L.t("w.nameph")))
@@ -848,7 +867,7 @@ struct MenuBarPageView: View {
     }
 
     var body: some View {
-        SettingsPageFrame(title: L.t("w.menubar"), back: { state.nav.pop() }) {
+        SettingsPageFrame(state: state, title: L.t("w.menubar"), back: { state.nav.pop() }) {
             VStack(alignment: .leading, spacing: 10) {
                 Picker(L.t("mb.primary"), selection: Binding(
                     get: { store.cfg.menuBar.primary },
@@ -911,7 +930,7 @@ struct GeneralPageView: View {
     @ObservedObject var store: SettingsStore
 
     var body: some View {
-        SettingsPageFrame(title: L.t("s.general"), back: { state.nav.pop() }) {
+        SettingsPageFrame(state: state, title: L.t("s.general"), back: { state.nav.pop() }) {
             VStack(alignment: .leading, spacing: 12) {
                 Picker(L.t("m.language"), selection: Binding(
                     get: { store.cfg.language },
@@ -952,7 +971,7 @@ struct HistoryPageView: View {
     @State private var exportProblem = ""
 
     var body: some View {
-        SettingsPageFrame(title: L.t("m.history"), back: { state.nav.pop() }) {
+        SettingsPageFrame(state: state, title: L.t("pn.history"), back: { state.nav.pop() }) {
             VStack(alignment: .leading, spacing: 12) {
                 Toggle(L.t("s.record"), isOn: Binding(
                     get: { store.cfg.history.enabled },
@@ -987,8 +1006,7 @@ struct HistoryPageView: View {
     }
 
     private var monthSummary: String {
-        let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM"
-        let stamp = formatter.string(from: Date())
+        let stamp = History.monthKey(for: Date())
         let path = Config.dir + "/history/" + stamp + ".jsonl"
         let lines = (try? String(contentsOfFile: path, encoding: .utf8))?
             .split(separator: "\n").count ?? 0

@@ -57,12 +57,16 @@ enum History {
         ISO8601DateFormatter().string(from: d)
     }
 
-    private static func monthPath(_ dir: String, _ now: Date) -> String {
+    static func monthKey(for date: Date) -> String {
         var cal = Calendar(identifier: .gregorian)
+        cal.locale = Locale(identifier: "en_US_POSIX")
         cal.timeZone = TimeZone(identifier: "UTC")!
-        let c = cal.dateComponents([.year, .month], from: now)
-        let stamp = String(format: "%04d-%02d", c.year ?? 1970, c.month ?? 1)
-        return dir + "/history/\(stamp).jsonl"
+        let c = cal.dateComponents([.year, .month], from: date)
+        return String(format: "%04d-%02d", c.year ?? 1970, c.month ?? 1)
+    }
+
+    private static func monthPath(_ dir: String, _ now: Date) -> String {
+        dir + "/history/\(monthKey(for: now)).jsonl"
     }
 
     /// Appends whole lines in one `write(2)` call each, to a file opened with

@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// The live view-model `PanelView` observes. AppDelegate rebuilds `model` and
-/// `sparkline` after every fetch (see `AppDelegate.refreshUI`); the `on...`
+/// card model after every fetch (see `AppDelegate.refreshUI`); the `on...`
 /// closures are wired once, in `AppDelegate.wirePanelActions`, so this type
 /// itself has no notion of how its actions are actually carried out.
 @MainActor
@@ -10,12 +10,12 @@ final class PanelState: ObservableObject {
     let nav = PanelNav()
     let store: SettingsStore
     @Published var model: PanelModel = .empty(primaryId: "claude")
-    @Published var sparkline: [(Date, Double)] = []
     @Published var lastRefresh: Date?
     @Published var refreshIntervalSeconds: Int = 60
     @Published var language: Lang = .system
     @Published var loginEnabled: Bool = false
     @Published var animate: Bool = true
+    @Published var screenLimit: CGFloat = 720
     @Published var draft: RecipeDraft?
     @Published var builtinDraft: AddDraft?
 
@@ -27,7 +27,6 @@ final class PanelState: ObservableObject {
 
     var onRefreshAll: () -> Void = {}
     var onRefreshProvider: (String) -> Void = { _ in }
-    var onOpenHistory: () -> Void = {}
     var onOpenSettings: () -> Void = {}
     var onQuit: () -> Void = {}
     var onPickLanguage: (Lang) -> Void = { _ in }
@@ -37,15 +36,9 @@ final class PanelState: ObservableObject {
     var onOpenAbout: () -> Void = {}
     var onCursorOpen: () -> Void = {}
     var onOpenReport: () -> Void = {}
+    var onToggleExpanded: (String) -> Void = { _ in }
     var onDismissalSuspended: (Bool) -> Void = { _ in }
     var onContentHeight: (CGFloat) -> Void = { _ in }
-}
-
-struct PanelHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
 }
 
 private var panelAppVersion: String {
@@ -58,7 +51,7 @@ private func intervalLabel(_ secs: Int) -> String {
 }
 
 /// The floating card panel's content, top to bottom: header, primary card
-/// (hero ring + chips + sparkline), the fixed-order secondary cards, footer.
+/// (hero ring + chips + sparkline) or compact rows, then the footer.
 /// Pure SwiftUI so the same view drives both the live panel (`PanelWindow`)
 /// and the offscreen `--panel` renderer in main.swift.
 struct PanelView: View {
@@ -72,6 +65,8 @@ struct PanelView: View {
     /// blend with, so it substitutes a plain opaque fill instead of the flat
     /// mid-grey a materialless capture would otherwise show.
     var opaqueBackground: Bool = false
+    @State private var measuredContentHeight: CGFloat = 0
+    @State private var measuredChromeHeight: CGFloat = 0
 
     init(state: PanelState, requestClose: @escaping () -> Void = {},
          opaqueBackground: Bool = false) {
@@ -91,35 +86,66 @@ struct PanelView: View {
             else { usagePage }
         }
         .frame(width: 372)
-        .frame(maxHeight: 720)
-        .background(GeometryReader { geometry in
-            Color.clear.preference(key: PanelHeightKey.self,
-                                   value: panelPreferredHeight(for: nav.stack.last)
-                                        ?? geometry.size.height)
-        })
         .background(opaqueBackground ? Color(nsColor: .windowBackgroundColor) : Color.clear)
         .background(shortcuts)
-        .onPreferenceChange(PanelHeightKey.self) { state.onContentHeight($0) }
+        .onPreferenceChange(PanelContentHeightKey.self) {
+            measuredContentHeight = $0
+            reportHeight()
+        }
+        .onPreferenceChange(PanelChromeHeightKey.self) {
+            measuredChromeHeight = $0
+            reportHeight()
+        }
+        .onChange(of: state.screenLimit) { _, _ in reportHeight() }
         .onExitCommand(perform: handleEscape)
+    }
+
+    private func reportHeight() {
+        guard measuredChromeHeight > 0 else { return }
+        state.onContentHeight(panelHeight(content: measuredContentHeight,
+                                          chrome: measuredChromeHeight,
+                                          screenLimit: state.screenLimit))
     }
 
     private var usagePage: some View {
         VStack(spacing: 0) {
             header
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: PanelChromeHeightKey.self, value: geometry.size.height)
+                })
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    PrimaryCardView(primary: state.model.primary, sparkline: state.sparkline,
-                                    animated: animated,
-                                    onCheck: { state.onRefreshProvider(state.model.primary.providerId) })
-                    ForEach(Array(state.model.secondaries.enumerated()), id: \.offset) { _, card in
-                        SecondaryCardView(card: card,
-                                          onCheck: { state.onRefreshProvider(card.id) },
-                                          onCursorOpen: state.onCursorOpen)
+                    ForEach(state.model.cards, id: \.id) { card in
+                        if card.expanded {
+                            ExpandedCardView(card: card, animated: animated,
+                                             onToggle: { toggle(card.id) },
+                                             onCheck: { state.onRefreshProvider(card.id) })
+                        } else {
+                            CompactCardView(card: card,
+                                            onToggle: { toggle(card.id) },
+                                            onCheck: { state.onRefreshProvider(card.id) },
+                                            onCursorOpen: state.onCursorOpen)
+                        }
                     }
                 }
                 .padding(12)
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: PanelContentHeightKey.self, value: geometry.size.height)
+                })
             }
+            .scrollDisabled(measuredContentHeight + measuredChromeHeight <= state.screenLimit)
             footer
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: PanelChromeHeightKey.self, value: geometry.size.height)
+                })
+        }
+    }
+
+    private func toggle(_ providerID: String) {
+        if animated {
+            withAnimation(.easeInOut(duration: 0.18)) { state.onToggleExpanded(providerID) }
+        } else {
+            state.onToggleExpanded(providerID)
         }
     }
 
@@ -182,7 +208,7 @@ struct PanelView: View {
             Divider()
             HStack(spacing: 2) {
                 FooterIconButton(systemName: "arrow.clockwise", help: L.t("m.refresh")) { state.onRefreshAll() }
-                FooterIconButton(systemName: "chart.xyaxis.line", help: L.t("m.history")) { state.onOpenHistory() }
+                FooterIconButton(systemName: "chart.xyaxis.line", help: L.t("m.report")) { state.onOpenReport() }
                 FooterIconButton(systemName: "gearshape", help: L.t("pn.settings")) { state.onOpenSettings() }
                 FooterIconButton(systemName: "power", help: L.t("m.quit")) { state.onQuit() }
                 Spacer()
@@ -252,12 +278,49 @@ private struct FooterIconButton: View {
     }
 }
 
-// MARK: - Primary card
+// MARK: - Expanded card
 
-private struct PrimaryCardView: View {
-    var primary: PanelModel.Primary
-    var sparkline: [(Date, Double)]
+private struct CardTitleRow: View {
+    var card: PanelModel.Card
+    var expandedStyle: Bool
+    var trailingText: String?
+    var onToggle: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(Color(nsColor: stateColour(card.state)))
+                .frame(width: expandedStyle ? 8 : 7, height: expandedStyle ? 8 : 7)
+            Text(card.title)
+                .font(.system(size: expandedStyle ? 13 : 12, weight: .semibold))
+            Spacer()
+            if let trailingText {
+                Text(trailingText)
+                    .font(.system(size: expandedStyle ? 11 : 10))
+                    .foregroundStyle(Color(nsColor: Palette.text(0.62)))
+            }
+            if !card.linkOnly {
+                Image(systemName: card.expanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color(nsColor: Palette.text(0.42)))
+            }
+        }
+        .contentShape(Rectangle())
+        .help(card.linkOnly ? card.title : L.t(card.expanded ? "c.collapse" : "c.expand"))
+        .onTapGesture {
+            guard !card.linkOnly else { return }
+            onToggle()
+        }
+        .onHover { inside in
+            guard !card.linkOnly else { return }
+            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
+        }
+    }
+}
+
+private struct ExpandedCardView: View {
+    var card: PanelModel.Card
     var animated: Bool
+    var onToggle: () -> Void
     var onCheck: () -> Void
 
     @State private var hovering = false
@@ -265,40 +328,51 @@ private struct PrimaryCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Circle().fill(Color(nsColor: stateColour(primary.state))).frame(width: 8, height: 8)
-                Text(primary.title).font(.system(size: 13, weight: .semibold))
-                Spacer()
-                if let ageText = primary.ageText {
-                    Text(ageText).font(.system(size: 11)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
-                }
-            }
+            CardTitleRow(card: card, expandedStyle: true,
+                         trailingText: card.ageText ?? card.badge, onToggle: onToggle)
 
-            if let msg = primary.failureMessage {
+            Group {
+            if let msg = card.failureMessage {
                 Text(msg).font(.system(size: 12))
                     .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
-            } else if !primary.hasData {
+            } else if !card.hasData {
                 Text(L.t("m.loading")).font(.system(size: 12)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
             } else {
-                HStack(alignment: .center, spacing: 14) {
-                    RingGauge(percent: primary.heroPercent, animated: animated)
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(alignment: .firstTextBaseline, spacing: 2) {
-                            Text(heroNumber)
-                                .font(.system(size: 34, weight: .bold)).monospacedDigit()
-                            if primary.heroPercent != nil {
-                                Text("%").font(.system(size: 14)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
-                            }
+                if let hero = card.hero {
+                    HStack(alignment: .center, spacing: 14) {
+                        if hero.percent != nil {
+                            RingGauge(percent: hero.percent, animated: animated)
                         }
-                        Text(windowLine).font(.system(size: 11)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                                Text(heroNumber(hero))
+                                    .font(.system(size: 34, weight: .bold)).monospacedDigit()
+                                if hero.percent != nil {
+                                    Text("%").font(.system(size: 14))
+                                        .foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                                }
+                            }
+                            Text(windowLine(hero)).font(.system(size: 11))
+                                .foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                        }
+                        Spacer(minLength: 0)
                     }
-                    Spacer(minLength: 0)
+                } else {
+                    ForEach(Array(card.compact.enumerated()), id: \.offset) { _, row in
+                        RowView(row: row)
+                    }
                 }
-                if !primary.chips.isEmpty {
-                    ChipsFlow(chips: primary.chips)
+                if !card.chips.isEmpty {
+                    ChipsFlow(chips: card.chips)
                 }
-                SparklineView(samples: sparkline, ink: Color(nsColor: Palette.colour(Palette.ink)))
+                if let samples = card.sparkline, samples.count >= 2 {
+                    SparklineView(samples: samples.map { ($0.date, $0.value) },
+                                  ink: Color(nsColor: Palette.colour(Palette.ink)))
+                }
             }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { check() }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -311,27 +385,27 @@ private struct PrimaryCardView: View {
         .shadow(color: .black.opacity(hovering ? 0.20 : 0), radius: hovering ? 6 : 0, y: hovering ? 2 : 0)
         .onHover { hovering = $0 }
         .help(tooltip)
-        .onTapGesture {
-            onCheck()
-            flashing = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { flashing = false }
-        }
         .animation(.easeOut(duration: 0.15), value: hovering)
         .animation(.easeOut(duration: 0.15), value: flashing)
     }
 
-    private var heroNumber: String {
-        guard let pct = primary.heroPercent else { return primary.hasData ? "—" : "—" }
-        return String(format: "%.0f", pct)
+    private func check() {
+        onCheck()
+        flashing = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { flashing = false }
     }
 
-    private var windowLine: String {
-        let parts: [String?] = [primary.windowLabel.isEmpty ? nil : primary.windowLabel, primary.resetText]
+    private func heroNumber(_ hero: PanelModel.Hero) -> String {
+        hero.percent.map { String(format: "%.0f", $0) } ?? hero.text
+    }
+
+    private func windowLine(_ hero: PanelModel.Hero) -> String {
+        let parts: [String?] = [hero.label.isEmpty ? nil : hero.label, hero.resetText]
         return parts.compactMap { $0 }.joined(separator: " · ")
     }
 
     private var tooltip: String {
-        guard let at = primary.resetsAt else { return primary.windowLabel }
+        guard let at = card.hero?.resetsAt else { return card.hero?.label ?? card.title }
         return exactDateTime(at)
     }
 }
@@ -483,10 +557,11 @@ private struct RingGauge: View {
     }
 }
 
-// MARK: - Secondary cards
+// MARK: - Compact cards
 
-private struct SecondaryCardView: View {
-    var card: PanelModel.SecondaryCard
+private struct CompactCardView: View {
+    var card: PanelModel.Card
+    var onToggle: () -> Void
     var onCheck: () -> Void
     var onCursorOpen: () -> Void
 
@@ -495,17 +570,13 @@ private struct SecondaryCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Circle().fill(Color(nsColor: stateColour(card.state))).frame(width: 7, height: 7)
-                Text(card.title).font(.system(size: 12, weight: .semibold))
-                Spacer()
-                if let badge = card.badge {
-                    Text(badge).font(.system(size: 10)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
-                }
-            }
+            CardTitleRow(card: card, expandedStyle: false, trailingText: card.badge,
+                         onToggle: onToggle)
             if let msg = card.failureMessage, card.state == .failure {
                 Text(msg).font(.system(size: 11))
                     .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
+                    .contentShape(Rectangle())
+                    .onTapGesture { check() }
             } else if card.linkOnly {
                 HStack {
                     Text(card.failureMessage ?? L.t("x.cursor.link"))
@@ -514,11 +585,14 @@ private struct SecondaryCardView: View {
                     Image(systemName: "arrow.up.right.square").font(.system(size: 11))
                         .foregroundStyle(Color(nsColor: Palette.text(0.62)))
                 }
+                .contentShape(Rectangle())
                 .onTapGesture { onCursorOpen() }
             } else {
-                ForEach(Array(card.rows.enumerated()), id: \.offset) { _, row in
+                ForEach(Array(card.compact.enumerated()), id: \.offset) { _, row in
                     RowView(row: row)
                 }
+                .contentShape(Rectangle())
+                .onTapGesture { check() }
             }
         }
         .padding(10)
@@ -530,15 +604,16 @@ private struct SecondaryCardView: View {
         .offset(y: hovering ? -1 : 0)
         .shadow(color: .black.opacity(hovering ? 0.16 : 0), radius: hovering ? 5 : 0, y: hovering ? 1 : 0)
         .onHover { hovering = $0 }
-        .help(card.rows.compactMap(\.resetsAt).first.map(exactDateTime) ?? card.title)
-        .onTapGesture {
-            guard !card.linkOnly else { return }
-            onCheck()
-            flashing = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { flashing = false }
-        }
+        .help(card.compact.compactMap(\.resetsAt).first.map(exactDateTime) ?? card.title)
         .animation(.easeOut(duration: 0.15), value: hovering)
         .animation(.easeOut(duration: 0.15), value: flashing)
+    }
+
+    private func check() {
+        guard !card.linkOnly else { return }
+        onCheck()
+        flashing = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { flashing = false }
     }
 }
 

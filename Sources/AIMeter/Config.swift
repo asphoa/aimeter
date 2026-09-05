@@ -89,6 +89,8 @@ struct MenuBarConfig: Codable {
     var style: String = "ring"
     /// Provider id whose windows the rings show.
     var primary: String = "claude"
+    /// Provider ids whose panel cards use the expanded hero presentation.
+    var expanded: [String] = ["claude"]
     /// A red dot when a non-primary provider is at 70%+ or in an alert state.
     var alertDot: Bool = true
     /// Sweep the rings from the previous reading on each refresh, and breathe
@@ -109,6 +111,7 @@ struct MenuBarConfig: Codable {
         colourScheme = (try? c.decode(BarColourScheme.self, forKey: .colourScheme)) ?? .provider
         style = (try? c.decode(String.self, forKey: .style)) ?? def.style
         primary = (try? c.decode(String.self, forKey: .primary)) ?? def.primary
+        expanded = (try? c.decode([String].self, forKey: .expanded)) ?? [primary]
         alertDot = (try? c.decode(Bool.self, forKey: .alertDot)) ?? def.alertDot
         animate = (try? c.decode(Bool.self, forKey: .animate)) ?? def.animate
         panel = (try? c.decode(String.self, forKey: .panel)) ?? def.panel
@@ -129,7 +132,7 @@ struct MenuBarConfig: Codable {
 
     enum CodingKeys: String, CodingKey {
         case lines, staleAfterMinutes, colourScheme, rows
-        case style, primary, alertDot, animate, panel
+        case style, primary, expanded, alertDot, animate, panel
     }
 
     func encode(to e: Encoder) throws {
@@ -139,6 +142,7 @@ struct MenuBarConfig: Codable {
         try c.encode(colourScheme, forKey: .colourScheme)
         try c.encode(style, forKey: .style)
         try c.encode(primary, forKey: .primary)
+        try c.encode(expanded, forKey: .expanded)
         try c.encode(alertDot, forKey: .alertDot)
         try c.encode(animate, forKey: .animate)
         try c.encode(panel, forKey: .panel)

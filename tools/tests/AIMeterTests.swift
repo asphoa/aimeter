@@ -1848,10 +1848,18 @@ func testStripDrawsNoBarForAWindowThatHasEnded() {
 func testNearLimitIsNotAFetchFailure() {
     let gauges = [Gauge(label: "quota", percent: 95, text: "95%", resetsAt: nil)]
     T.eq("90% is a near-limit state, not a fetch failure", worstState(gauges), .nearLimit)
-    T.eq("near-limit uses the warning dot", stateColour(.nearLimit).hexString,
-         NSColor(hex: "#E8B04A")!.hexString)
-    T.eq("a failed read alone uses the failure dot", stateColour(.failure).hexString,
-         NSColor(hex: "#F0705F")!.hexString)
+    let cases: [(NSAppearance.Name, String, String, String)] = [
+        (.aqua, "light", "#B87400", "#D94B3B"),
+        (.darkAqua, "dark", "#E8B04A", "#F0705F")
+    ]
+    for (appearanceName, label, warning, failure) in cases {
+        NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+            T.eq("\(label) near-limit uses the warning dot", stateColour(.nearLimit).hexString,
+                 NSColor(hex: warning)!.hexString)
+            T.eq("\(label) failed read alone uses the failure dot", stateColour(.failure).hexString,
+                 NSColor(hex: failure)!.hexString)
+        }
+    }
 }
 
 func testCodexQuotaWireStatusesNeverReachTheUI() {
@@ -2112,6 +2120,79 @@ func testResolveStripLineYieldsNoStripLineForAGaugelessCursorReading() {
 }
 
 // MARK: - PanelModel: the card panel's pure builder (v1.0.27)
+
+func testPanelHeightClampsToScreen() {
+    T.eq("panel height is clipped to screen", panelHeight(content: 900, chrome: 90, screenLimit: 800), 800)
+    T.eq("panel height follows content below screen", panelHeight(content: 300, chrome: 90, screenLimit: 800), 390)
+    T.eq("panel height keeps a 120pt minimum", panelHeight(content: 0, chrome: 0, screenLimit: 800), 120)
+}
+
+func testExpandedDefaultsToPrimary() {
+    let oldJSON = Data(#"{"menuBar":{"primary":"codex"}}"#.utf8)
+    let explicitJSON = Data(#"{"menuBar":{"primary":"codex","expanded":["claude","deepseek"]}}"#.utf8)
+    guard let old = try? JSONDecoder().decode(Config.self, from: oldJSON),
+          let explicit = try? JSONDecoder().decode(Config.self, from: explicitJSON) else {
+        T.check("expanded config shapes decode", false); return
+    }
+    T.eq("missing expanded defaults to primary", old.menuBar.expanded, ["codex"])
+    T.eq("present expanded is preserved", explicit.menuBar.expanded, ["claude", "deepseek"])
+}
+
+func testCardOrderPrimaryFirst() {
+    let ids = ["claude", "codex", "openrouter", "deepseek", "agy", "local", "cursor", "custom"]
+    var readings: [String: [Reading]] = [:]
+    for id in ids {
+        var reading = Reading(id: id, title: id)
+        reading.gauges = [Gauge(label: "usage", percent: 10, text: "10%", kind: .other)]
+        readings[id] = [reading]
+    }
+    var cfg = Config(); cfg.menuBar.primary = "deepseek"
+    let model = PanelModelBuilder.build(readings: readings, cfg: cfg)
+    T.eq("primary first then fixed and remaining order", model.cards.map(\.id),
+         ["deepseek", "codex", "openrouter", "agy", "local", "cursor", "claude", "custom"])
+}
+
+func testHeroPicksShortWindowFirst() {
+    var reading = Reading(id: "claude", title: "Claude")
+    reading.gauges = [
+        Gauge(label: "other", percent: 8, text: "8%", kind: .other),
+        Gauge(label: "long", percent: 40, text: "40%", kind: .longWindow),
+        Gauge(label: "short", percent: 12, text: "12%", kind: .shortWindow)
+    ]
+    let card = PanelModelBuilder.build(readings: ["claude": [reading]], cfg: Config()).cards[0]
+    T.eq("short window is the hero", card.hero?.label, "short")
+    T.eq("the other two gauges become chips", card.chips.count, 2)
+}
+
+func testHeroFallsBackToValueWhenNoPercent() {
+    var reading = Reading(id: "claude", title: "Claude")
+    reading.gauges = [Gauge(label: "Balance", percent: nil, text: "$12.40", kind: .other)]
+    let hero = PanelModelBuilder.build(readings: ["claude": [reading]], cfg: Config()).cards[0].hero
+    T.isNil("value-only hero has no percent", hero?.percent)
+    T.eq("value-only hero keeps gauge text", hero?.text, "$12.40")
+}
+
+func testMonthKeyIsGregorianPOSIX() {
+    let date = ISO8601DateFormatter().date(from: "2026-09-05T12:00:00Z")!
+    let localFormatter = DateFormatter()
+    localFormatter.locale = Locale(identifier: "th_TH")
+    localFormatter.calendar = Calendar(identifier: .buddhist)
+    localFormatter.timeZone = TimeZone(identifier: "UTC")
+    localFormatter.dateFormat = "yyyy-MM"
+    T.eq("Thai Buddhist formatting would select the wrong history file",
+         localFormatter.string(from: date), "2569-09")
+    T.eq("month key stays Gregorian POSIX", History.monthKey(for: date), "2026-09")
+}
+
+func testHistoryTitleNotMenuString() {
+    let old = L.current
+    defer { L.current = old }
+    for language in [Lang.en, .zhHant, .fr, .de] {
+        L.current = language
+        T.check("history page title differs from menu wording in \(language.rawValue)",
+                L.t("pn.history") != L.t("m.history"))
+    }
+}
 
 func testPanelModelBuilderLocalizesCursorAndLocalTitles() {
     let old = L.current
@@ -2428,6 +2509,13 @@ struct Runner {
         testHistoryReportExportProducesHTMLAndCSVWithNoSecrets()
         testCursorProviderHasNoGaugesAndTheLinkLine()
         testResolveStripLineYieldsNoStripLineForAGaugelessCursorReading()
+        testPanelHeightClampsToScreen()
+        testExpandedDefaultsToPrimary()
+        testCardOrderPrimaryFirst()
+        testHeroPicksShortWindowFirst()
+        testHeroFallsBackToValueWhenNoPercent()
+        testMonthKeyIsGregorianPOSIX()
+        testHistoryTitleNotMenuString()
         testPanelModelBuilderLocalizesCursorAndLocalTitles()
         testPanelModelPrimaryPicksConfiguredProvider()
         testPanelModelHeroUsesShortWindowGauge()

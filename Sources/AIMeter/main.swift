@@ -60,6 +60,13 @@ func diagnosticDemo(_ cfg: inout Config) -> [String: [Reading]]? {
     return nil
 }
 
+private func applyExpandedArgument(to cfg: inout Config) {
+    guard let index = CommandLine.arguments.firstIndex(of: "--expanded"),
+          CommandLine.arguments.count > index + 1 else { return }
+    cfg.menuBar.expanded = CommandLine.arguments[index + 1]
+        .split(separator: ",").map(String.init).filter { !$0.isEmpty }
+}
+
 /// Bridges the screen-capture worker back to AppKit's main queue without
 /// capturing NSMenu directly in a Sendable closure.
 private final class MenuCanceller: @unchecked Sendable {
@@ -243,20 +250,26 @@ func renderIcon(to path: String) async {
 /// open the panel and describe what they see.
 @MainActor
 private func renderPanelState(_ state: PanelState, to path: String) {
+    state.screenLimit = 4000
+    var measuredHeight: CGFloat?
+    state.onContentHeight = { measuredHeight = $0 }
     let hosting = NSHostingView(rootView: PanelView(state: state, opaqueBackground: true))
     hosting.translatesAutoresizingMaskIntoConstraints = false
-    let initialHeight = panelPreferredHeight(for: state.nav.stack.last) ?? 720
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 372, height: initialHeight),
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 372, height: 4000),
                           styleMask: [.borderless], backing: .buffered, defer: false)
     window.contentView = hosting
     hosting.layoutSubtreeIfNeeded()
     // One turn of the runloop so SwiftUI completes its first layout pass -
     // the same technique the --about renderer relies on.
-    RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+    let deadline = Date().addingTimeInterval(0.4)
+    while measuredHeight == nil, Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    }
     hosting.layoutSubtreeIfNeeded()
-    let fitted = hosting.fittingSize
-    let height = max(80, min(fitted.height, 720))
+    let height = measuredHeight ?? 120
     window.setContentSize(NSSize(width: 372, height: height))
+    hosting.layoutSubtreeIfNeeded()
+    RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
     hosting.layoutSubtreeIfNeeded()
 
     let base = (path as NSString).deletingPathExtension
@@ -279,6 +292,7 @@ private func renderPanelState(_ state: PanelState, to path: String) {
 @MainActor
 private func renderPanelDemo(to path: String, page: SettingsPage? = nil) {
     var cfg = Config.load()
+    applyExpandedArgument(to: &cfg)
     L.current = cfg.language
     Palette.overrides = cfg.colours
     guard let readings = diagnosticDemo(&cfg) else { return }
@@ -286,7 +300,6 @@ private func renderPanelDemo(to path: String, page: SettingsPage? = nil) {
     state.model = PanelModelBuilder.build(readings: readings, cfg: cfg)
     // Credential-free fixture: the trend stays empty rather than reading this
     // machine's real usage ledger, so the render is deterministic.
-    state.sparkline = []
     state.lastRefresh = Date()
     state.refreshIntervalSeconds = cfg.interval(cfg.menuBar.primary)
     state.language = cfg.language
@@ -298,6 +311,7 @@ private func renderPanelDemo(to path: String, page: SettingsPage? = nil) {
 @MainActor
 func renderPanel(to path: String, page: SettingsPage? = nil) async {
     var cfg = Config.load()
+    applyExpandedArgument(to: &cfg)
     L.current = cfg.language
     Palette.overrides = cfg.colours
     if page != nil {
@@ -315,11 +329,20 @@ func renderPanel(to path: String, page: SettingsPage? = nil) async {
     }
     let providers = buildProviders(cfg)
     var readings: [String: [Reading]] = [:]
-    for p in providers { readings[p.id] = await p.fetchAll() }
+    for provider in providers { readings[provider.id] = await provider.fetchAll() }
 
     let state = PanelState()
-    state.model = PanelModelBuilder.build(readings: readings, cfg: cfg)
-    state.sparkline = Sparkline.recentSamples(historyDir: Config.dir + "/history", provider: cfg.menuBar.primary)
+    var model = PanelModelBuilder.build(readings: readings, cfg: cfg)
+    for index in model.cards.indices where model.cards[index].expanded {
+        let samples = Sparkline.recentSamples(historyDir: Config.dir + "/history",
+                                              provider: model.cards[index].id)
+        if samples.count >= 2 {
+            model.cards[index].sparkline = samples.map {
+                PanelModel.SparkPoint(date: $0.0, value: $0.1)
+            }
+        }
+    }
+    state.model = model
     state.lastRefresh = Date()
     state.refreshIntervalSeconds = cfg.interval(cfg.menuBar.primary)
     state.language = cfg.language

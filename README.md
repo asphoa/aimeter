@@ -36,24 +36,27 @@ click outside, Esc, clicking the icon again, or the app losing focus.
 
 - **Header** — "AIMeter" on the left, "Updated *time* · every *interval*" (or
   "· manual" when the primary service is not polled) on the right.
-- **Primary card** — a lamp for its state, the service's name, and (for
-  Claude) "reads usage without spending quota" or (for a snapshot service)
+- **Cards start compact** with a lamp, the service name, and one row per
+  gauge. Click a card's title row to expand or collapse it; the choice is
+  remembered separately for every service, and the primary service starts
+  expanded by default. An expanded card keeps the existing hero layout: for
+  Claude, "reads usage without spending quota"; for a snapshot service,
   how old the snapshot is. A 64pt ring plus a big number is the 5-hour window;
   under it, a chip per remaining window — the weekly window first, then any
   per-model weekly window sorted by name, then anything else (overage, extra
   usage) — each with its own tiny ring, value, and reset time. Below the chips,
   a trend line: the last 24h of that 5-hour window, read straight from the
-  usage ledger on disk (see **Usage history** below) — with fewer than two
-  points recorded yet, it just says so rather than drawing a shape.
-- **Secondary cards**, in a fixed order — Codex, then OpenRouter (one row per
+  usage ledger on disk (see **Usage history** below); with fewer than two
+  points recorded, that section is omitted.
+- **Remaining cards**, in a fixed order — Codex, then OpenRouter (one row per
   key), then a compact two-column row of DeepSeek, Antigravity, Local AI, and
   Cursor — followed by anything else you've added. A failed reading shows its
   message in red instead of a meter.
-- **Click any card** to check that one service by hand — the same "Check now"
+- **Click below a card's title** to check that one service by hand — the same "Check now"
   the old dropdown had, now with a brief highlight flash instead of its own
   menu row. **Hover** lifts a card slightly and shows the exact reset time as
   a tooltip.
-- **Footer** — four icon buttons (refresh ⌘R, usage history, settings,
+- **Footer** — four icon buttons (refresh ⌘R, usage report, settings,
   quit ⌘Q) and a **…** menu for the remaining quick actions. The gear opens
   Settings at the same 372pt width; each page pushes over the current one.
   Esc goes back one page first, then closes the panel from the usage page.
@@ -551,6 +554,6 @@ python3 tools/gen_l10n.py
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). No third-party assets are bundled: no vendor
+MIT — © 2026 khan. See [LICENSE](LICENSE). No third-party assets are bundled: no vendor
 fonts, no mascot art, no icon sets. Everything drawn on screen is drawn by the
 code in this repository.

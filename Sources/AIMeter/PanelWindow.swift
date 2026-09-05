@@ -5,9 +5,13 @@ import SwiftUI
 final class CardPanelController: NSObject, NSWindowDelegate {
     let state = PanelState()
     private var panel: FloatingCardPanel?
+    private var hosting: NSHostingView<PanelView>?
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var anchorFrame: NSRect?
+    private weak var anchorButton: NSStatusBarButton?
+    private var waitingForFirstHeight = false
+    private var lastMeasuredStack: [SettingsPage]?
     var dismissalSuspended = false
 
     var isVisible: Bool { panel?.isVisible ?? false }
@@ -15,7 +19,7 @@ final class CardPanelController: NSObject, NSWindowDelegate {
     override init() {
         super.init()
         state.onContentHeight = { [weak self] height in
-            self?.setContentHeight(height, animated: self?.isVisible == true)
+            self?.receivedContentHeight(height)
         }
         state.onDismissalSuspended = { [weak self] suspended in
             self?.dismissalSuspended = suspended
@@ -28,11 +32,13 @@ final class CardPanelController: NSObject, NSWindowDelegate {
 
     func show(from button: NSStatusBarButton) {
         state.nav.reset()
+        lastMeasuredStack = nil
         let width: CGFloat = 372
         let hosting = NSHostingView(rootView: PanelView(state: state, requestClose: { [weak self] in
             self?.close()
         }))
         hosting.translatesAutoresizingMaskIntoConstraints = false
+        self.hosting = hosting
 
         let p = panel ?? makePanel()
         p.contentView?.subviews.forEach { $0.removeFromSuperview() }
@@ -46,39 +52,71 @@ final class CardPanelController: NSObject, NSWindowDelegate {
             ])
         }
         panel = p
+        anchorButton = button
         anchorFrame = button.window?.convertToScreen(button.convert(button.bounds, to: nil))
             ?? NSRect(x: 0, y: NSScreen.main?.frame.maxY ?? 800, width: 0, height: 0)
-        let fitted = hosting.fittingSize
-        let screenLimit = maxHeight(for: p)
-        let height = max(80, min(fitted.height, screenLimit))
-        position(width: width, height: height, display: true, animated: false)
-        p.makeKeyAndOrderFront(nil)
-        installMonitors(button: button)
+        state.screenLimit = maxHeight(for: p)
+        waitingForFirstHeight = true
+        position(width: width, height: 120, display: false, animated: false)
+        hosting.layoutSubtreeIfNeeded()
+        DispatchQueue.main.async { [weak self, weak button] in
+            guard let self, self.waitingForFirstHeight, let button else { return }
+            self.reveal(button: button)
+        }
     }
 
     func setContentHeight(_ height: CGFloat, animated: Bool) {
-        guard let p = panel, p.isVisible else { return }
-        let target = max(80, min(height, maxHeight(for: p)))
+        guard let p = panel, p.isVisible || waitingForFirstHeight else { return }
+        let target = max(120, min(height, maxHeight(for: p)))
         guard abs(p.frame.height - target) > 0.5 else { return }
         position(width: p.frame.width, height: target, display: true, animated: animated)
     }
 
+    private func receivedContentHeight(_ height: CGFloat) {
+        guard let p = panel else { return }
+        let stack = state.nav.stack
+        let samePage = lastMeasuredStack == stack
+        lastMeasuredStack = stack
+        let shouldAnimate = p.isVisible && samePage && state.animate
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        setContentHeight(height, animated: shouldAnimate)
+        if waitingForFirstHeight, let button = anchorButton {
+            reveal(button: button)
+        }
+    }
+
+    private func reveal(button: NSStatusBarButton) {
+        guard waitingForFirstHeight, let p = panel else { return }
+        waitingForFirstHeight = false
+        p.makeKeyAndOrderFront(nil)
+        installMonitors(button: button)
+    }
+
     func close() {
         panel?.orderOut(nil)
+        waitingForFirstHeight = false
         dismissalSuspended = false
         removeMonitors()
     }
 
     private func maxHeight(for panel: NSPanel) -> CGFloat {
         let screen = panel.screen ?? NSScreen.main
-        return min(720, (screen?.visibleFrame.height ?? 736) - 16)
+        return (screen?.visibleFrame.height ?? 736) - 16
     }
 
     private func position(width: CGFloat, height: CGFloat, display: Bool, animated: Bool) {
         guard let p = panel, let anchor = anchorFrame else { return }
         let frame = NSRect(x: anchor.maxX - width, y: anchor.minY - 8 - height,
                            width: width, height: height)
-        p.setFrame(frame, display: display, animate: animated)
+        hosting?.layoutSubtreeIfNeeded()
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                p.animator().setFrame(frame, display: display)
+            }
+        } else {
+            p.setFrame(frame, display: display)
+        }
     }
 
     private func makePanel() -> FloatingCardPanel {

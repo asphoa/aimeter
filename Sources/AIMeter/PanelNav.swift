@@ -26,16 +26,21 @@ func escapeAction(stackDepth: Int) -> PanelEscapeAction {
     stackDepth > 0 ? .pop : .close
 }
 
-func panelPreferredHeight(for page: SettingsPage?) -> CGFloat? {
-    switch page {
-    case .root: return 430
-    case .services: return 680
-    case .catalogue, .custom: return 590
-    case .add: return 620
-    case .menuBar: return 590
-    case .general: return 430
-    case .history: return 520
-    case nil: return nil
+func panelHeight(content: CGFloat, chrome: CGFloat, screenLimit: CGFloat) -> CGFloat {
+    max(120, min(content + chrome, screenLimit))
+}
+
+struct PanelContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+struct PanelChromeHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value += nextValue()
     }
 }
 

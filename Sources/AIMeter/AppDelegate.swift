@@ -163,7 +163,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func wirePanelActions(_ state: PanelState) {
         state.onRefreshAll = { [weak self] in self?.doRefresh() }
         state.onRefreshProvider = { [weak self] pid in self?.checkProviderByID(pid) }
-        state.onOpenHistory = { [weak state] in state?.nav.push(.history) }
         state.onOpenSettings = { [weak state] in state?.nav.push(.root) }
         state.onQuit = { [weak self] in self?.quit() }
         state.onPickLanguage = { [weak self] l in self?.setLanguage(l) }
@@ -173,6 +172,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.onOpenAbout = { [weak self] in self?.openAbout() }
         state.onCursorOpen = { [weak self] in self?.openCursorUsage() }
         state.onOpenReport = { [weak self] in self?.openHistory() }
+        state.onToggleExpanded = { [weak self, weak state] pid in
+            guard let self, let state else { return }
+            self.toggleCardExpanded(pid, state: state)
+        }
     }
 
     @objc private func statusItemClicked() {
@@ -254,22 +257,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// fallback, or the card panel's observable state for the default.
     private func refreshUI() {
         if let cardPanel {
-            cardPanel.state.model = PanelModelBuilder.build(readings: readings, cfg: cfg)
+            updatePanelModel(cardPanel.state)
             cardPanel.state.lastRefresh = lastRefresh
             cardPanel.state.refreshIntervalSeconds = cfg.interval(cfg.menuBar.primary)
             cardPanel.state.loginEnabled = SMAppService.mainApp.status == .enabled
             cardPanel.state.language = cfg.language
             cardPanel.state.animate = cfg.menuBar.animate
-            cardPanel.state.sparkline = loadSparklineSamples()
         } else {
             rebuildMenu()
         }
     }
 
-    /// The primary provider's short-window trend, refreshed once per fetch -
-    /// never on every redraw (see `Sparkline.samples`).
-    private func loadSparklineSamples() -> [(Date, Double)] {
-        Sparkline.recentSamples(historyDir: Config.dir + "/history", provider: cfg.menuBar.primary)
+    private func updatePanelModel(_ state: PanelState, config: Config? = nil) {
+        var model = PanelModelBuilder.build(readings: readings, cfg: config ?? cfg)
+        for index in model.cards.indices where model.cards[index].expanded {
+            let samples = Sparkline.recentSamples(historyDir: Config.dir + "/history",
+                                                  provider: model.cards[index].id)
+            if samples.count >= 2 {
+                model.cards[index].sparkline = samples.map { PanelModel.SparkPoint(date: $0.0, value: $0.1) }
+            }
+        }
+        state.model = model
+    }
+
+    private func toggleCardExpanded(_ providerID: String, state: PanelState) {
+        if let index = state.store.cfg.menuBar.expanded.firstIndex(of: providerID) {
+            state.store.cfg.menuBar.expanded.remove(at: index)
+        } else {
+            state.store.cfg.menuBar.expanded.append(providerID)
+        }
+        state.store.persist()
+        updatePanelModel(state, config: state.store.cfg)
     }
 
     /// Refresh on open, but never more than once every 15s - the Claude row
