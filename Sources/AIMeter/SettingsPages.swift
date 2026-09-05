@@ -251,14 +251,10 @@ struct ServiceCardView: View {
             .buttonStyle(.plain)
 
             if expanded {
-                Toggle(L.t("s.shown"), isOn: Binding(
-                    get: { store.cfg.isEnabled(providerID) },
-                    set: { store.cfg.enabled[providerID] = $0; store.persist() }))
+                Toggle(L.t("s.shown"), isOn: store.enabledBinding(providerID))
                     .toggleStyle(.switch)
 
-                Picker(L.t("w.checkevery"), selection: Binding(
-                    get: { store.cfg.interval(providerID) },
-                    set: { store.cfg.intervals[providerID] = $0; store.persist() })) {
+                Picker(L.t("w.checkevery"), selection: store.intervalBinding(providerID)) {
                         ForEach([30, 60, 300, 900, 3600, 0], id: \.self) {
                             Text(settingsIntervalLabel($0)).tag($0)
                         }
@@ -442,8 +438,7 @@ struct CatalogueView: View {
                 Text(L.t("s.added")).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
             } else {
                 Button(L.t("s.add")) {
-                    store.cfg.enabled[id] = true
-                    store.persist()
+                    store.mutate { $0.enabled[id] = true }
                 }
             }
         }
@@ -888,23 +883,17 @@ struct MenuBarPageView: View {
     var body: some View {
         SettingsPageFrame(state: state, title: L.t("w.menubar"), back: { state.nav.pop() }) {
             VStack(alignment: .leading, spacing: 10) {
-                Picker(L.t("mb.primary"), selection: Binding(
-                    get: { store.cfg.menuBar.primary },
-                    set: { store.cfg.menuBar.primary = $0; store.persist(cosmetic: true) })) {
+                Picker(L.t("mb.primary"), selection: store.configBinding(\.menuBar.primary, cosmetic: true)) {
                         ForEach(primaryOptions, id: \.0) { Text($0.1).tag($0.0) }
                     }
                 Picker(L.t("s.style"), selection: Binding(
                     get: { store.cfg.menuBar.style == "bars" ? "ring" : store.cfg.menuBar.style },
-                    set: { store.cfg.menuBar.style = $0; store.persist(cosmetic: true) })) {
+                    set: { style in store.mutate(cosmetic: true) { $0.menuBar.style = style } })) {
                         Text(L.t("mb.style.ring")).tag("ring")
                         Text(L.t("mb.style.numeral")).tag("ringNumeral")
                     }.pickerStyle(.segmented)
-                Toggle(L.t("mb.alertdot"), isOn: Binding(
-                    get: { store.cfg.menuBar.alertDot },
-                    set: { store.cfg.menuBar.alertDot = $0; store.persist(cosmetic: true) }))
-                Toggle(L.t("mb.animate"), isOn: Binding(
-                    get: { store.cfg.menuBar.animate },
-                    set: { store.cfg.menuBar.animate = $0; store.persist(cosmetic: true) }))
+                Toggle(L.t("mb.alertdot"), isOn: store.configBinding(\.menuBar.alertDot, cosmetic: true))
+                Toggle(L.t("mb.animate"), isOn: store.configBinding(\.menuBar.animate, cosmetic: true))
                 Text(L.t("s.animate.rm")).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                 previewGrid
                 Text(L.t("s.preview.hint")).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
@@ -953,17 +942,28 @@ struct GeneralPageView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Picker(L.t("m.language"), selection: Binding(
                     get: { store.cfg.language },
-                    set: { store.cfg.language = $0; state.onPickLanguage($0) })) {
+                    set: { state.onPickLanguage($0) })) {
                         ForEach(Lang.allCases, id: \.self) { Text($0.displayName).tag($0) }
                     }
                 Picker(L.t("m.interval"), selection: Binding(
                     get: { store.cfg.refreshSeconds },
-                    set: { store.cfg.refreshSeconds = $0; state.onPickInterval($0) })) {
+                    set: { state.onPickInterval($0) })) {
                         ForEach([30, 60, 300, 900, 0], id: \.self) {
                             Text(settingsIntervalLabel($0)).tag($0)
                         }
                     }
                 Text(L.t("s.interval.default")).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                if Config.needsAgyAutoPrompt(store.cfg) {
+                    Text(L.t("s.agy.autoask")).font(.system(size: 10))
+                        .foregroundStyle(Color(nsColor: Palette.colour(Palette.warn)))
+                    Button(L.t("s.hourly")) {
+                        store.mutate {
+                            $0.intervals["agy"] = 3600
+                            $0.migration.agyPromptShown = true
+                        }
+                    }
+                    .font(.system(size: 10))
+                }
                 Toggle(L.t("m.login"), isOn: Binding(
                     get: { state.loginEnabled }, set: { _ in state.onToggleLogin() }))
                 Divider()
@@ -992,14 +992,10 @@ struct HistoryPageView: View {
     var body: some View {
         SettingsPageFrame(state: state, title: L.t("pn.history"), back: { state.nav.pop() }) {
             VStack(alignment: .leading, spacing: 12) {
-                Toggle(L.t("s.record"), isOn: Binding(
-                    get: { store.cfg.history.enabled },
-                    set: { store.cfg.history.enabled = $0; store.persist() }))
+                Toggle(L.t("s.record"), isOn: store.configBinding(\.history.enabled))
                 Text(L.t("s.record.sub")).font(.system(size: 9)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                     .fixedSize(horizontal: false, vertical: true)
-                Picker(L.t("s.keep.for"), selection: Binding(
-                    get: { store.cfg.history.retentionMonths },
-                    set: { store.cfg.history.retentionMonths = $0; store.persist() })) {
+                Picker(L.t("s.keep.for"), selection: store.configBinding(\.history.retentionMonths)) {
                         ForEach([1, 3, 6, 12, 24], id: \.self) { Text(L.t("s.months", $0)).tag($0) }
                     }
                 Divider()

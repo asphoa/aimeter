@@ -336,57 +336,30 @@ enum ClaudeCLI {
     /// could not be started, or had to be killed.
     static func execute(binary path: String, arguments: [String], home: String,
                         timeout: TimeInterval, dumpTo file: String) -> Attempt {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        process.currentDirectoryURL = URL(fileURLWithPath: home)
-        process.environment = environment(home: home, user: NSUserName(),
-                                          lang: ProcessInfo.processInfo.environment["LANG"])
-        // No terminal, and a stdin that is already at end of file: anything
-        // that decided to ask a question gets an answer immediately instead of
-        // waiting for one that is never coming.
-        process.standardInput = FileHandle.nullDevice
-        let outPipe = Pipe(), errPipe = Pipe()
-        process.standardOutput = outPipe
-        // Kept apart rather than merged: stdout has to stay parseable JSON, and
-        // stderr is the only place a rejected argument is explained.
-        process.standardError = errPipe
-
-        do { try process.run() } catch { return .couldNotRun(brief(error.localizedDescription)) }
-
-        // Drained on other threads so a subprocess that fills either pipe cannot
-        // deadlock against a parent that is waiting for it to exit.
-        let out = Drain(), err = Drain()
-        let drained = DispatchGroup()
-        for (pipe, box) in [(outPipe, out), (errPipe, err)] {
-            drained.enter()
-            DispatchQueue.global(qos: .utility).async {
-                box.data = pipe.fileHandleForReading.readDataToEndOfFile()
-                drained.leave()
+        let sem = DispatchSemaphore(value: 0)
+        var attempt: Attempt = .couldNotRun("launch failed")
+        Task {
+            let out = await ProcessRunner.run(
+                binary: path, args: arguments,
+                env: environment(home: home, user: NSUserName(),
+                                 lang: ProcessInfo.processInfo.environment["LANG"]),
+                cwd: home, stdinClosed: true,
+                deadline: .seconds(max(1, timeout)))
+            let text = String(decoding: out.stdout, as: UTF8.self)
+            let err = String(decoding: out.stderr, as: UTF8.self)
+            if out.timedOut {
+                attempt = .couldNotRun(L.t("c.refresh.timeout"))
+            } else {
+                attempt = .ran(Completed(output: text, error: err, code: out.exitCode))
+            }
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + timeout + 5)
+        if case .ran(let run) = attempt {
+            if (try? writePrivate(Data(redact(run.output).utf8), to: Config.dir + "/" + file)) == nil {
+                Diagnostics.warn("claude CLI capture write failed: \(file)")
             }
         }
-
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning, Date() < deadline { usleep(50_000) }
-        if process.isRunning {
-            process.terminate()
-            _ = drained.wait(timeout: .now() + 2)
-            return .couldNotRun(L.t("c.refresh.timeout"))
-        }
-        process.waitUntilExit()
-        _ = drained.wait(timeout: .now() + 5)
-
-        let text = String(decoding: out.data, as: UTF8.self)
-        if (try? writePrivate(Data(redact(text).utf8), to: Config.dir + "/" + file)) == nil {
-            Diagnostics.warn("claude CLI capture write failed: \(file)")
-        }
-        return .ran(Completed(output: text,
-                              error: String(decoding: err.data, as: UTF8.self),
-                              code: process.terminationStatus))
+        return attempt
     }
-}
-
-/// Somewhere for the reading thread to put what it read.
-private final class Drain: @unchecked Sendable {
-    var data = Data()
 }

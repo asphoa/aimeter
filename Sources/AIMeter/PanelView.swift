@@ -20,7 +20,7 @@ final class PanelState: ObservableObject {
     @Published var builtinDraft: AddDraft?
 
     init(store: SettingsStore? = nil) {
-        self.store = store ?? SettingsStore()
+        self.store = store ?? SettingsStore(store: ConfigStore.shared)
         self.draft = nil
         self.builtinDraft = nil
     }
@@ -130,7 +130,7 @@ struct PanelView: View {
                                              onToggle: { toggle(card.id) },
                                              onCheck: { state.onRefreshProvider(card.id) })
                         } else {
-                            CompactCardView(card: card,
+                            CompactCardView(card: card, animated: animated,
                                             onToggle: { toggle(card.id) },
                                             onCheck: { state.onRefreshProvider(card.id) },
                                             onCursorOpen: state.onCursorOpen)
@@ -284,6 +284,7 @@ private struct FooterIconButton: View {
                 .frame(width: 30, height: 26)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(help)
         .help(help)
     }
 }
@@ -309,20 +310,16 @@ private struct CardTitleRow: View {
                     .foregroundStyle(Color(nsColor: Palette.text(0.62)))
             }
             if !card.linkOnly {
-                Image(systemName: card.expanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Color(nsColor: Palette.text(0.42)))
+                Button(action: onToggle) {
+                    Image(systemName: card.expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color(nsColor: Palette.text(0.42)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L.t(card.expanded ? "a11y.collapse" : "a11y.expand"))
+                .accessibilityHint(card.title)
+                .accessibilityValue(L.t(card.expanded ? "a11y.expanded" : "a11y.collapsed"))
             }
-        }
-        .contentShape(Rectangle())
-        .help(card.linkOnly ? card.title : L.t(card.expanded ? "c.collapse" : "c.expand"))
-        .onTapGesture {
-            guard !card.linkOnly else { return }
-            onToggle()
-        }
-        .onHover { inside in
-            guard !card.linkOnly else { return }
-            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
         }
     }
 }
@@ -341,7 +338,8 @@ private struct ExpandedCardView: View {
             CardTitleRow(card: card, expandedStyle: true,
                          trailingText: card.ageText ?? card.badge, onToggle: onToggle)
 
-            Group {
+            Button(action: check) {
+                Group {
             if let msg = card.failureMessage {
                 Text(msg).font(.system(size: 12))
                     .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
@@ -367,17 +365,19 @@ private struct ExpandedCardView: View {
                         }
                         Spacer(minLength: 0)
                     }
-                    if !card.notices.isEmpty {
-                        VStack(alignment: .leading, spacing: 3) {
-                            ForEach(Array(card.notices.enumerated()), id: \.offset) { _, notice in
-                                Text(notice).font(.system(size: 9))
-                                    .foregroundStyle(Color(nsColor: Palette.colour(Palette.warn)))
-                            }
-                        }
-                    }
                 } else {
                     ForEach(Array(card.compact.enumerated()), id: \.offset) { _, row in
                         RowView(row: row)
+                    }
+                }
+                // Notices belong to the card, not to the hero: a provider with
+                // no gauges at all (Local AI) has nothing else to show.
+                if !card.notices.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(card.notices.enumerated()), id: \.offset) { _, notice in
+                            Text(notice).font(.system(size: 9))
+                                .foregroundStyle(Color(nsColor: Palette.colour(Palette.warn)))
+                        }
                     }
                 }
                 if !card.chips.isEmpty {
@@ -389,8 +389,10 @@ private struct ExpandedCardView: View {
                 }
             }
             }
-            .contentShape(Rectangle())
-            .onTapGesture { check() }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(card.title)
+            .accessibilityHint(L.t("w.checknow"))
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -403,8 +405,8 @@ private struct ExpandedCardView: View {
         .shadow(color: .black.opacity(hovering ? 0.20 : 0), radius: hovering ? 6 : 0, y: hovering ? 2 : 0)
         .onHover { hovering = $0 }
         .help(tooltip)
-        .animation(.easeOut(duration: 0.15), value: hovering)
-        .animation(.easeOut(duration: 0.15), value: flashing)
+        .animation(animated ? .easeOut(duration: 0.15) : nil, value: hovering)
+        .animation(animated ? .easeOut(duration: 0.15) : nil, value: flashing)
     }
 
     private func check() {
@@ -579,6 +581,7 @@ private struct RingGauge: View {
 
 private struct CompactCardView: View {
     var card: PanelModel.Card
+    var animated: Bool
     var onToggle: () -> Void
     var onCheck: () -> Void
     var onCursorOpen: () -> Void
@@ -591,21 +594,29 @@ private struct CompactCardView: View {
             CardTitleRow(card: card, expandedStyle: false, trailingText: card.badge,
                          onToggle: onToggle)
             if let msg = card.failureMessage, card.state == .failure {
-                Text(msg).font(.system(size: 11))
-                    .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
-                    .contentShape(Rectangle())
-                    .onTapGesture { check() }
-            } else if card.linkOnly {
-                HStack {
-                    Text(card.failureMessage ?? L.t("x.cursor.link"))
-                        .font(.system(size: 11)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
-                    Spacer()
-                    Image(systemName: "arrow.up.right.square").font(.system(size: 11))
-                        .foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                Button(action: check) {
+                    Text(msg).font(.system(size: 11))
+                        .foregroundStyle(Color(nsColor: Palette.colour(Palette.alarm)))
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture { onCursorOpen() }
+                .buttonStyle(.plain)
+                .accessibilityLabel(card.title)
+                .accessibilityHint(L.t("w.checknow"))
+            } else if card.linkOnly {
+                Button(action: onCursorOpen) {
+                    HStack {
+                        Text(card.failureMessage ?? L.t("x.cursor.link"))
+                            .font(.system(size: 11)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                        Spacer()
+                        Image(systemName: "arrow.up.right.square").font(.system(size: 11))
+                            .foregroundStyle(Color(nsColor: Palette.text(0.62)))
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L.t("m.cursor.open"))
+                .accessibilityHint(L.t("x.cursor.link"))
             } else {
+                Button(action: check) {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(card.compact.enumerated()), id: \.offset) { _, row in
                         RowView(row: row)
@@ -619,8 +630,11 @@ private struct CompactCardView: View {
                         }
                     }
                 }
-                .contentShape(Rectangle())
-                .onTapGesture { check() }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(card.title)
+                .accessibilityHint(L.t("w.checknow"))
             }
         }
         .padding(10)
@@ -628,13 +642,13 @@ private struct CompactCardView: View {
         .opacity(card.opacity)
         .background(CardBackground(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10)
-            .fill(Color(nsColor: Palette.colour(Palette.ink)).opacity(flashing ? 0.08 : 0)))
-        .offset(y: hovering ? -1 : 0)
-        .shadow(color: .black.opacity(hovering ? 0.16 : 0), radius: hovering ? 5 : 0, y: hovering ? 1 : 0)
+            .fill(Color(nsColor: Palette.colour(Palette.ink)).opacity(flashing && animated ? 0.08 : 0)))
+        .offset(y: hovering && animated ? -1 : 0)
+        .shadow(color: .black.opacity(hovering && animated ? 0.16 : 0), radius: hovering ? 5 : 0, y: hovering ? 1 : 0)
         .onHover { hovering = $0 }
         .help(card.compact.compactMap(\.resetsAt).first.map(exactDateTime) ?? card.title)
-        .animation(.easeOut(duration: 0.15), value: hovering)
-        .animation(.easeOut(duration: 0.15), value: flashing)
+        .animation(animated ? .easeOut(duration: 0.15) : nil, value: hovering)
+        .animation(animated ? .easeOut(duration: 0.15) : nil, value: flashing)
     }
 
     private func check() {
@@ -658,9 +672,10 @@ private struct RowView: View {
                 Text(row.label).font(.system(size: 11)).foregroundStyle(Color(nsColor: Palette.text(0.62)))
                     .lineLimit(1).frame(maxWidth: 110, alignment: .leading)
                 if let pct = row.percent {
+                    let pctText = String(format: "%.0f%%", pct)
                     Meter(percent: pct)
-                    Text(String(format: "%.0f%%", pct)).font(.system(size: 11)).monospacedDigit()
-                    if !row.value.isEmpty {
+                    Text(pctText).font(.system(size: 11)).monospacedDigit()
+                    if !row.value.isEmpty, row.value != pctText {
                         Spacer(minLength: 4)
                         Text(row.value).font(.system(size: 10)).monospacedDigit()
                             .foregroundStyle(Color(nsColor: Palette.text(0.62)))

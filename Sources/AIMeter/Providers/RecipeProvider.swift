@@ -16,6 +16,7 @@ final class RecipeProvider: Provider, @unchecked Sendable {
     }
 
     func fetchAll(manual: Bool) async -> [Reading] {
+        guard manual || cfg.interval(id) > 0 else { return [] }
         if let recipe {
             let accounts = cfg.accounts(recipe.id, fallback: [])
             if accounts.isEmpty, recipe.fetch.method == "none" {

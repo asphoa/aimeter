@@ -54,6 +54,9 @@ final class AgyProvider: Provider, @unchecked Sendable {
     var title: String { L.t("p.agy") }
     private let cfg: Config
     private let files: AgyFileLocations
+    /// Pause/backoff state owned by RefreshCoordinator; tests may set directly.
+    var pauseState = AgyAccountPauseState()
+    var onPauseTransition: ((AgyPauseTransition) -> Void)?
 
     init(cfg: Config, files: AgyFileLocations = .default) {
         self.cfg = cfg
@@ -61,6 +64,9 @@ final class AgyProvider: Provider, @unchecked Sendable {
     }
 
     func fetchAll(manual: Bool) async -> [Reading] {
+        guard manual || cfg.interval(id) > 0 else {
+            return cachedOnly()
+        }
         let accounts = cfg.accounts(id, fallback: Discovery.agy())
         if accounts.isEmpty { return [.off(id, title, nil, L.t("a.nostate"))] }
         var out: [Reading] = []
@@ -71,28 +77,27 @@ final class AgyProvider: Provider, @unchecked Sendable {
     private func fetch(_ a: AccountSpec, manual: Bool) async -> Reading {
         let dir = expand(a.home ?? "~") + "/.gemini/antigravity-cli"
         let home = trustedHome(a.home ?? "~", marker: ".gemini/antigravity-cli")
-        let marker = files.pauseMarkerPath(a.name)
-        var paused = FileManager.default.fileExists(atPath: marker)
+        var paused = pauseState.paused
 
         let approvedBinary = AgyTUI.binary(cfg.agyBinary.isEmpty ? nil : cfg.agyBinary)
         let skipForConcurrency = !manual && approvedBinary.map(CommandRun.isRunning(binary:)) == true
-        let inBackoff = !manual && backoffActive(a.name)
+        let inBackoff = !manual && backoffActive()
 
         var livePrint: Reading?
         var unsavedNotice = false
         if cfg.agyQuotaViaPrint, manual || (!paused && !inBackoff), !skipForConcurrency,
            let bin = approvedBinary, let home {
             if let reading = await printQuota(binary: bin, home: home, account: a.name) {
-                clearPause(a.name)
-                clearBackoff(a.name)
+                clearPause()
+                clearBackoff()
                 paused = false
                 if manual { return reading }
                 livePrint = reading
             } else if let stderr = lastAttemptStderr(a.name), AgyProvider.refused(stderr) {
-                if !markPaused(a.name) { unsavedNotice = true }
+                if !markPaused() { unsavedNotice = true }
                 paused = true
             } else {
-                if !markBackoff(a.name) { unsavedNotice = true }
+                if !markBackoff() { unsavedNotice = true }
             }
         }
 
@@ -258,27 +263,19 @@ final class AgyProvider: Provider, @unchecked Sendable {
 
     private static func isGeminiGroup(_ name: String) -> Bool { name.uppercased().contains("GEMINI") }
 
-    // MARK: - pause state
-    //
-    // A small marker file rather than in-memory state: this provider is
-    // rebuilt from a fresh Config value on every launch and every settings
-    // change (see AppDelegate), so anything held only in memory would forget
-    // a pause the moment either happened. The file carries no data worth
-    // reading - its existence is the whole signal - so it is written empty.
+    // MARK: - pause state (owned by RefreshCoordinator; transitions reported upward)
 
     @discardableResult
-    private func markPaused(_ account: String) -> Bool {
-        do {
-            try writePrivate(Data(), to: files.pauseMarkerPath(account))
-            return true
-        } catch {
-            Diagnostics.warn("agy pause marker write failed: \(files.pauseMarkerPath(account)): \(error)")
-            return false
-        }
+    private func markPaused() -> Bool {
+        pauseState.paused = true
+        onPauseTransition?(.paused)
+        return onPauseTransition != nil
     }
 
-    private func clearPause(_ account: String) {
-        try? FileManager.default.removeItem(atPath: files.pauseMarkerPath(account))
+    private func clearPause() {
+        guard pauseState.paused else { return }
+        pauseState.paused = false
+        if pauseState.backoff == nil { onPauseTransition?(.clear) }
     }
 
     private func lastAttemptStderr(_ account: String) -> String? {
@@ -290,36 +287,28 @@ final class AgyProvider: Provider, @unchecked Sendable {
 
     private struct AgyAttemptDiag: Codable { var stderr: String }
 
-    private func backoffActive(_ account: String, now: Date = Date()) -> Bool {
-        let path = files.backoffPath(account)
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let state = try? JSONDecoder().decode(AgyBackoffState.self, from: data) else { return false }
-        return now < state.until
+    private func backoffActive(now: Date = Date()) -> Bool {
+        guard let until = pauseState.backoff?.until else { return false }
+        return now < until
     }
 
     @discardableResult
-    private func markBackoff(_ account: String, now: Date = Date()) -> Bool {
-        let path = files.backoffPath(account)
+    private func markBackoff(now: Date = Date()) -> Bool {
         var failures = 1
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-           let old = try? JSONDecoder().decode(AgyBackoffState.self, from: data),
-           old.until > now {
+        if let old = pauseState.backoff, old.until > now {
             failures = old.failures + 1
         }
         let minutes = min(60, 5 * Int(pow(2.0, Double(failures - 1))))
         let state = AgyBackoffState(failures: failures, until: now.addingTimeInterval(Double(minutes * 60)))
-        guard let data = try? JSONEncoder().encode(state) else { return false }
-        do {
-            try writePrivate(data, to: path)
-            return true
-        } catch {
-            Diagnostics.warn("agy backoff write failed: \(path): \(error)")
-            return false
-        }
+        pauseState.backoff = state
+        onPauseTransition?(.backoff(state))
+        return onPauseTransition != nil
     }
 
-    private func clearBackoff(_ account: String) {
-        try? FileManager.default.removeItem(atPath: files.backoffPath(account))
+    private func clearBackoff() {
+        guard pauseState.backoff != nil else { return }
+        pauseState.backoff = nil
+        if !pauseState.paused { onPauseTransition?(.clear) }
     }
 
     // MARK: - manual-only fallback: the pty screen-scrape
@@ -391,5 +380,19 @@ final class AgyProvider: Provider, @unchecked Sendable {
     private func firstPercent(_ line: String) -> Double? {
         guard let r = line.range(of: #"(\d{1,3}(\.\d+)?)\s*%"#, options: .regularExpression) else { return nil }
         return Double(line[r].replacingOccurrences(of: "%", with: "").trimmingCharacters(in: .whitespaces))
+    }
+
+    /// Local/cache-only path for manual-only scheduling (interval 0).
+    private func cachedOnly() -> [Reading] {
+        let accounts = cfg.accounts(id, fallback: Discovery.agy())
+        if accounts.isEmpty { return [.off(id, title, nil, L.t("a.nostate"))] }
+        return accounts.map { account in
+            let dir = expand(account.home ?? "~") + "/.gemini/antigravity-cli"
+            let home = trustedHome(account.home ?? "~", marker: ".gemini/antigravity-cli")
+            let cached = cachedPrintSnapshot(account: account.name, home: home ?? expand(account.home ?? "~"))
+            let log = fromLog(dir: dir, account: account.name)
+            return AgyProvider.mergePrintAndFallback(print: cached, fallback: log,
+                                                     printInterval: TimeInterval(cfg.interval(id)))
+        }
     }
 }

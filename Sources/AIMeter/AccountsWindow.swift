@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 enum AuthMode: String, CaseIterable, Identifiable {
     case keychain, paste, file, folder
@@ -50,20 +51,21 @@ final class SettingsStore: ObservableObject {
     static let changed = Notification.Name("AIMeterConfigChanged")
     static let restyled = Notification.Name("AIMeterRestyled")
 
-    @Published var cfg: Config
+    let configStore: ConfigStore
     @Published var results: [String: String] = [:]
     @Published var busy: Set<String> = []
     @Published var saveNotice: String?
 
-    /// The last configuration known to be on disk. A failed save reverts to
-    /// this in-memory copy rather than re-reading the file, because the very
-    /// failure that stopped the write (permissions, full disk) usually stops
-    /// the read too.
-    private var lastSaved: Config
-    init(config: Config? = nil) {
-        let c = config ?? Config.load()
-        cfg = c
-        lastSaved = c
+    var cfg: Config { configStore.cfg }
+
+    init(config: Config? = nil, store: ConfigStore? = nil) {
+        if let store {
+            configStore = store
+        } else if let config {
+            configStore = ConfigStore(initial: config)
+        } else {
+            configStore = ConfigStore.shared
+        }
     }
 
     static func key(_ provider: String, _ name: String) -> String {
@@ -74,18 +76,59 @@ final class SettingsStore: ObservableObject {
 
     @discardableResult
     func persist(cosmetic: Bool = false) -> Bool {
+        let snapshot = cfg
         do {
-            try cfg.save()
-            lastSaved = cfg
-            saveNotice = nil
-            if cosmetic { Palette.overrides = cfg.colours }
-            NotificationCenter.default.post(name: cosmetic ? Self.restyled : Self.changed, object: nil)
+            if cosmetic {
+                try configStore.mutateCosmetic { $0 = snapshot }
+            } else {
+                try configStore.mutate { $0 = snapshot }
+            }
+            saveNotice = configStore.rangeNotice ?? nil
             return true
         } catch {
-            cfg = lastSaved
             saveNotice = L.t("s.save.failed", saveFailureReason(error))
             return false
         }
+    }
+
+    /// Field-level mutation through the shared store.
+    @discardableResult
+    func mutate(cosmetic: Bool = false, _ change: (inout Config) -> Void) -> Bool {
+        do {
+            if cosmetic {
+                try configStore.mutateCosmetic(change)
+            } else {
+                try configStore.mutate(change)
+            }
+            saveNotice = configStore.rangeNotice ?? nil
+            return true
+        } catch {
+            saveNotice = L.t("s.save.failed", saveFailureReason(error))
+            return false
+        }
+    }
+
+    /// SwiftUI binding into a `Config` field via the shared store.
+    func configBinding<Value>(_ keyPath: WritableKeyPath<Config, Value>,
+                              cosmetic: Bool = false) -> Binding<Value> {
+        Binding(
+            get: { self.cfg[keyPath: keyPath] },
+            set: { newValue in self.mutate(cosmetic: cosmetic) { $0[keyPath: keyPath] = newValue } }
+        )
+    }
+
+    func enabledBinding(_ providerID: String) -> Binding<Bool> {
+        Binding(
+            get: { self.cfg.isEnabled(providerID) },
+            set: { on in self.mutate { $0.enabled[providerID] = on } }
+        )
+    }
+
+    func intervalBinding(_ providerID: String) -> Binding<Int> {
+        Binding(
+            get: { self.cfg.interval(providerID) },
+            set: { secs in self.mutate { $0.intervals[providerID] = secs } }
+        )
     }
 
     private func saveFailureReason(_ error: Error) -> String {
@@ -94,41 +137,45 @@ final class SettingsStore: ObservableObject {
     }
 
     func setEnabled(_ provider: String, _ index: Int, _ on: Bool) {
-        guard cfg.accounts[provider]?.indices.contains(index) == true else { return }
-        cfg.accounts[provider]?[index].enabled = on
-        persist()
+        mutate {
+            guard $0.accounts[provider]?.indices.contains(index) == true else { return }
+            $0.accounts[provider]?[index].enabled = on
+        }
     }
 
     func remove(_ provider: String, _ index: Int) {
-        guard var list = cfg.accounts[provider], list.indices.contains(index) else { return }
-        let spec = list[index]
-        if let svc = spec.keychainService, svc.hasPrefix("AIMeter · ") {
-            Credential.delete(service: svc)
+        mutate {
+            guard var list = $0.accounts[provider], list.indices.contains(index) else { return }
+            let spec = list[index]
+            if let svc = spec.keychainService, svc.hasPrefix("AIMeter · ") {
+                Credential.delete(service: svc)
+            }
+            list.remove(at: index)
+            $0.accounts[provider] = list
         }
-        list.remove(at: index)
-        cfg.accounts[provider] = list
-        persist()
     }
 
     func removeRecipe(_ id: String) {
-        for spec in cfg.accounts[id] ?? [] {
-            if let service = spec.keychainService, service.hasPrefix("AIMeter · ") {
-                Credential.delete(service: service)
+        mutate {
+            for spec in $0.accounts[id] ?? [] {
+                if let service = spec.keychainService, service.hasPrefix("AIMeter · ") {
+                    Credential.delete(service: service)
+                }
             }
+            RecipePin.delete(id)
+            $0.accounts[id] = nil
+            $0.recipes.removeAll { $0.id == id }
+            $0.enabled[id] = nil; $0.intervals[id] = nil
         }
-        RecipePin.delete(id)
-        cfg.accounts[id] = nil
-        cfg.recipes.removeAll { $0.id == id }
-        cfg.enabled[id] = nil; cfg.intervals[id] = nil
-        persist()
     }
 
     func addRecipe(_ recipe: Recipe, account: AccountSpec) {
-        cfg.recipes.append(recipe)
-        cfg.accounts[recipe.id] = [account]
-        cfg.enabled[recipe.id] = true
-        cfg.intervals[recipe.id] = recipe.interval
-        persist()
+        mutate {
+            $0.recipes.append(recipe)
+            $0.accounts[recipe.id] = [account]
+            $0.enabled[recipe.id] = true
+            $0.intervals[recipe.id] = recipe.interval
+        }
     }
 
     func convertLegacy(_ index: Int) -> Bool {
@@ -146,32 +193,34 @@ final class SettingsStore: ObservableObject {
         var recipe = Recipe.legacy(account)
         recipe.id = id; recipe.name = account.name; recipe.legacy = false; recipe.fetch.baseURL = base
         guard RecipePin.write(recipe) else { return false }
-        old.remove(at: index); cfg.accounts["generic"] = old
-        cfg.recipes.append(recipe); cfg.accounts[id] = [account]
-        persist()
-        return true
+        old.remove(at: index)
+        let ok = mutate {
+            $0.accounts["generic"] = old
+            $0.recipes.append(recipe); $0.accounts[id] = [account]
+        }
+        return ok
     }
 
     func rename(_ provider: String, _ index: Int, to newName: String) {
-        guard var list = cfg.accounts[provider], list.indices.contains(index) else { return }
-        let trimmed = newName.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, trimmed != list[index].name,
-              !exists(provider, trimmed) else { return }
-        if let old = list[index].keychainService, old.hasPrefix("AIMeter · ") {
-            let secret = try? Credential.read(list[index]).get()
-            let new = Credential.service(provider: provider, account: trimmed)
-            if let secret { Credential.store(secret, service: new) }
-            Credential.delete(service: old)
-            list[index].keychainService = new
+        mutate {
+            guard var list = $0.accounts[provider], list.indices.contains(index) else { return }
+            let trimmed = newName.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, trimmed != list[index].name,
+                  !exists(provider, trimmed) else { return }
+            if let old = list[index].keychainService, old.hasPrefix("AIMeter · ") {
+                let secret = try? Credential.read(list[index]).get()
+                let new = Credential.service(provider: provider, account: trimmed)
+                if let secret { Credential.store(secret, service: new) }
+                Credential.delete(service: old)
+                list[index].keychainService = new
+            }
+            list[index].name = trimmed
+            $0.accounts[provider] = list
         }
-        list[index].name = trimmed
-        cfg.accounts[provider] = list
-        persist()
     }
 
     func add(_ provider: String, _ spec: AccountSpec) {
-        cfg.accounts[provider, default: []].append(spec)
-        persist()
+        mutate { $0.accounts[provider, default: []].append(spec) }
     }
 
     func exists(_ provider: String, _ name: String) -> Bool {

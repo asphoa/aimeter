@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Reads Antigravity's quota by driving the vendor's own client through its
 /// interactive TUI.
@@ -68,18 +69,8 @@ enum AgyTUI {
 
     static func read(binary path: String, home: String, timeout: TimeInterval = 90) -> Result? {
         if let hook = readTestHook { return hook() }
-        var master: Int32 = 0, slave: Int32 = 0
-        // The panel is only drawn if the terminal claims a usable size.
-        var size = winsize(ws_row: 50, ws_col: 160, ws_xpixel: 0, ws_ypixel: 0)
-        guard openpty(&master, &slave, nil, nil, &size) == 0 else { return nil }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.currentDirectoryURL = URL(fileURLWithPath: home)
-        // Built from nothing rather than inherited: the parent environment can
-        // carry API keys exported in whatever shell launched the app, and a
-        // subprocess that only needs to draw a quota panel has no use for them.
-        process.environment = [
+        let env: [String: String] = [
             "HOME": home,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
             "TERM": "xterm-256color",
@@ -87,68 +78,43 @@ enum AgyTUI {
             "LINES": "50",
             "LANG": ProcessInfo.processInfo.environment["LANG"] ?? "en_US.UTF-8"
         ]
-        let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
-        process.standardInput = slaveHandle
-        process.standardOutput = slaveHandle
-        process.standardError = slaveHandle
 
-        do { try process.run() } catch { close(master); close(slave); return nil }
-        close(slave)
-
-        var raw = Data()
-        let deadline = Date().addingTimeInterval(timeout)
         var asked = false
-        var settledAt: Date?
-        var grace: Date?
+        var settledAt: ContinuousClock.Instant?
+        var grace: ContinuousClock.Instant?
+        var lastCheck: ContinuousClock.Instant?
 
-        var lastCheck = Date.distantPast
-        while Date() < deadline {
-            var set = fd_set()
-            fdZero(&set)
-            fdSet(master, &set)
-            var tv = timeval(tv_sec: 0, tv_usec: 50_000)
-            let ready = select(master + 1, &set, nil, nil, &tv)
-            if ready > 0 {
-                // Drain everything available before doing anything else. The
-                // pty buffer is a few kilobytes and the TUI redraws constantly;
-                // scanning the accumulated text on every pass was slow enough
-                // that the buffer overran and output was silently lost - which
-                // is what truncated the figures mid-character.
-                var buf = [UInt8](repeating: 0, count: 65536)
-                while true {
-                    let n = Darwin.read(master, &buf, buf.count)
-                    if n <= 0 { break }
-                    raw.append(contentsOf: buf[0..<n])
-                    if n < buf.count { break }
+        let sem = DispatchSemaphore(value: 0)
+        var output: ProcessRunner.Output?
+        Task {
+            output = await ProcessRunner.run(binary: path, args: [], env: env, cwd: home,
+                                             stdinClosed: false,
+                                             deadline: .seconds(max(1, timeout)),
+                                             pty: true) { master, raw, clock, deadline in
+                if settledAt == nil, raw.count > 500 { settledAt = clock.now }
+
+                if !asked, let settled = settledAt, clock.now - settled > .seconds(9) {
+                    let cmd = Array("/usage\r".utf8)
+                    _ = cmd.withUnsafeBufferPointer { Darwin.write(master, $0.baseAddress, $0.count) }
+                    asked = true
+                    return false
                 }
-                if settledAt == nil, raw.count > 500 { settledAt = Date() }
-            }
 
-            if !asked, let settled = settledAt, Date().timeIntervalSince(settled) > 9 {
-                let cmd = Array("/usage\r".utf8)
-                _ = cmd.withUnsafeBufferPointer { Darwin.write(master, $0.baseAddress, $0.count) }
-                asked = true
-                continue
+                guard asked else { return false }
+                if let prev = lastCheck, clock.now - prev <= .seconds(1) { return false }
+                lastCheck = clock.now
+                let text = strip(String(decoding: raw, as: UTF8.self))
+                if percentCount(text) >= 4, grace == nil { grace = clock.now }
+                if let g = grace, clock.now - g > .milliseconds(1200) { return true }
+                if clock.now >= deadline { return true }
+                return false
             }
-
-            // The expensive part, at most once a second.
-            guard asked, Date().timeIntervalSince(lastCheck) > 1 else { continue }
-            lastCheck = Date()
-            let text = strip(String(decoding: raw, as: UTF8.self))
-            if percentCount(text) >= 4, grace == nil { grace = Date() }
-            if let g = grace, Date().timeIntervalSince(g) > 1.2 { break }
+            sem.signal()
         }
+        _ = sem.wait(timeout: .now() + timeout + 10)
+        guard let output else { return nil }
 
-        _ = "\u{03}".utf8.withContiguousStorageIfAvailable { Darwin.write(master, $0.baseAddress, $0.count) }
-        process.terminate()
-        // Without this, a terminated child that has not yet been wait()'d on
-        // stays a zombie until something else reaps it - and nothing else
-        // ever does, since this app owns the process. Every "Check now" on
-        // the TUI fallback used to leak one.
-        process.waitUntilExit()
-        close(master)
-
-        let text = strip(String(decoding: raw, as: UTF8.self))
+        let text = strip(String(decoding: output.stdout, as: UTF8.self))
         // Kept so a parsing failure can be looked at rather than guessed at -
         // but this is a capture of the client's own screen, so the account
         // address comes out before it touches the disk. It is the file most
@@ -261,19 +227,5 @@ enum AgyTUI {
             found = true
         }
         return found ? Date().addingTimeInterval(seconds) : nil
-    }
-}
-
-// fd_set has no usable API from Swift; these are the two operations needed.
-private func fdZero(_ set: inout fd_set) {
-    _ = withUnsafeMutableBytes(of: &set) { $0.initializeMemory(as: UInt8.self, repeating: 0) }
-}
-
-private func fdSet(_ fd: Int32, _ set: inout fd_set) {
-    let index = Int(fd) / 32
-    let bit = Int32(1) << (Int32(fd) % 32)
-    withUnsafeMutableBytes(of: &set) { raw in
-        let words = raw.bindMemory(to: Int32.self)
-        words[index] |= bit
     }
 }

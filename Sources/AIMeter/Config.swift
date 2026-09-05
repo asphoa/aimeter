@@ -107,6 +107,9 @@ struct MenuBarConfig: Codable {
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         let def = MenuBarConfig()
+        // Decoded as written: clamping here would silence the range notice
+        // `Config.validated` exists to raise. Validation is the one place that
+        // both clamps and reports.
         staleAfterMinutes = (try? c.decode(Int.self, forKey: .staleAfterMinutes)) ?? def.staleAfterMinutes
         colourScheme = (try? c.decode(BarColourScheme.self, forKey: .colourScheme)) ?? .provider
         style = (try? c.decode(String.self, forKey: .style)) ?? def.style
@@ -161,8 +164,14 @@ struct HistoryConfig: Codable, Sendable {
         let c = try d.container(keyedBy: CodingKeys.self)
         let def = HistoryConfig()
         enabled = (try? c.decode(Bool.self, forKey: .enabled)) ?? def.enabled
-        retentionMonths = (try? c.decode(Int.self, forKey: .retentionMonths)) ?? def.retentionMonths
+        let raw = (try? c.decode(Int.self, forKey: .retentionMonths)) ?? def.retentionMonths
+        retentionMonths = raw   // clamped and reported by Config.validated
     }
+}
+
+/// One-shot migration prompts shown in Settings.
+struct MigrationFlags: Codable, Sendable {
+    var agyPromptShown: Bool = false
 }
 
 struct Config: Codable {
@@ -206,6 +215,9 @@ struct Config: Codable {
     /// manual-only again) is respected rather than silently reverted on the
     /// next launch.
     var agyIntervalMigrated: Bool = false
+    var migration: MigrationFlags = MigrationFlags()
+    /// Set during decode only: whether `intervals` contained an explicit `"agy"` key.
+    var agyIntervalKeyPresent: Bool = false
     var claudeProbeModel: String = "claude-haiku-4-5-20251001"
     /// A manual check on a Claude row whose access token has gone stale runs the
     /// real `claude` once - a local status check, then a minimal one-turn
@@ -246,8 +258,15 @@ struct Config: Codable {
         // settings file that still carries it is decoded tolerantly here by
         // simply never asking for that key, the same way every other
         // removed or renamed field in this file is handled.
-        intervals = (try? c.decode([String: Int].self, forKey: .intervals)) ?? def.intervals
+        if let decodedIntervals = try? c.decode([String: Int].self, forKey: .intervals) {
+            intervals = decodedIntervals
+            agyIntervalKeyPresent = decodedIntervals.keys.contains("agy")
+        } else {
+            intervals = def.intervals
+            agyIntervalKeyPresent = false
+        }
         agyIntervalMigrated = (try? c.decode(Bool.self, forKey: .agyIntervalMigrated)) ?? def.agyIntervalMigrated
+        migration = (try? c.decode(MigrationFlags.self, forKey: .migration)) ?? def.migration
         agyQuotaViaPrint = (try? c.decode(Bool.self, forKey: .agyQuotaViaPrint)) ?? def.agyQuotaViaPrint
         agyQuotaViaTUI = (try? c.decode(Bool.self, forKey: .agyQuotaViaTUI)) ?? def.agyQuotaViaTUI
         agyBinary = (try? c.decode(String.self, forKey: .agyBinary)) ?? def.agyBinary
@@ -280,7 +299,7 @@ struct Config: Codable {
     enum CodingKeys: String, CodingKey {
         case language, menuBar, history, refreshSeconds, enabled
         case agyQuotaViaPrint, agyQuotaViaTUI, agyBinary, colours, intervals
-        case agyIntervalMigrated, claudeProbeModel, claudeRefreshViaCLI, claudeBinary
+        case agyIntervalMigrated, migration, claudeProbeModel, claudeRefreshViaCLI, claudeBinary
         case accounts, recipes
     }
 
@@ -289,7 +308,7 @@ struct Config: Codable {
     static var pathOverride: String?
     static var path: String { pathOverride ?? dir + "/config.json" }
 
-    static func load() -> Config {
+    static func load() -> (config: Config, rangeNotice: String?) {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         var cfg: Config
         if let data = FileManager.default.contents(atPath: path),
@@ -299,9 +318,11 @@ struct Config: Codable {
             cfg = Config()
         }
         if !cfg.agyIntervalMigrated {
-            cfg = migratingAgyInterval(cfg)
+            cfg = migratingAgyInterval(cfg, agyKeyPresent: cfg.agyIntervalKeyPresent)
             do { try cfg.save() } catch { Diagnostics.warn("config save failed during agy migration: \(error)") }
         }
+        let (validated, notice) = validated(cfg)
+        cfg = validated
         if cfg.accounts.isEmpty {
             cfg.accounts = Discovery.all()
             do { try cfg.save() } catch { Diagnostics.warn("config save failed during discovery: \(error)") }
@@ -309,7 +330,8 @@ struct Config: Codable {
         // Applied here rather than at each call site: one of those call sites
         // was missed, and the only symptom was colours silently not applying.
         Palette.overrides = cfg.colours
-        return cfg
+        let rangeNotice = notice.map { L.t("s.range.clamped", $0) }
+        return (cfg, rangeNotice)
     }
 
     static func migratedColours(_ input: [String: String]) -> [String: String] {
@@ -326,17 +348,49 @@ struct Config: Codable {
         return output
     }
 
-    /// The one-time "agy" interval migration (2026-09-04): a settings file
-    /// still carrying the old default of 0 is moved to the new default of
-    /// 3600, once. Pulled out of `load()` as a pure function so it can be
-    /// tested without touching the real settings file - `load()`'s own job
-    /// is only to call this and persist the result.
-    static func migratingAgyInterval(_ cfg: Config) -> Config {
+    static func clamp(_ value: Int, min lo: Int, max hi: Int) -> Int {
+        max(lo, min(hi, value))
+    }
+
+    /// Validates integer ranges before load/save. Returns clamped config and an
+    /// optional human-readable notice naming what was adjusted.
+    static func validated(_ cfg: Config) -> (Config, String?) {
+        var out = cfg
+        var notices: [String] = []
+        out.refreshSeconds = clamp(out.refreshSeconds, min: 0, max: 86_400)
+        if out.refreshSeconds != cfg.refreshSeconds {
+            notices.append("refreshSeconds")
+        }
+        let stale = clamp(out.menuBar.staleAfterMinutes, min: 1, max: 10_080)
+        if stale != out.menuBar.staleAfterMinutes { notices.append("staleAfterMinutes") }
+        out.menuBar.staleAfterMinutes = stale
+        let retention = clamp(out.history.retentionMonths, min: 1, max: 120)
+        if retention != out.history.retentionMonths { notices.append("retentionMonths") }
+        out.history.retentionMonths = retention
+        for (key, value) in out.intervals {
+            let clamped = clamp(value, min: 0, max: 86_400)
+            if clamped != value { notices.append("intervals.\(key)") }
+            out.intervals[key] = clamped
+        }
+        let notice = notices.isEmpty ? nil : notices.joined(separator: ", ")
+        return (out, notice)
+    }
+
+    /// The one-time "agy" interval migration (2026-09-04, revised v1.0.34):
+    /// only when the `"agy"` key was **absent** from a pre-existing settings
+    /// file does the new hourly default apply. An explicit `0` (manual-only) is
+    /// preserved and may trigger a one-shot Settings prompt.
+    static func migratingAgyInterval(_ cfg: Config, agyKeyPresent: Bool) -> Config {
         guard !cfg.agyIntervalMigrated else { return cfg }
         var out = cfg
-        if out.intervals["agy"] == 0 { out.intervals["agy"] = 3600 }
+        if !agyKeyPresent { out.intervals["agy"] = 3600 }
         out.agyIntervalMigrated = true
         return out
+    }
+
+    /// Whether Settings should offer to enable automatic Antigravity checks.
+    static func needsAgyAutoPrompt(_ cfg: Config) -> Bool {
+        cfg.agyIntervalKeyPresent && cfg.intervals["agy"] == 0 && !cfg.migration.agyPromptShown
     }
 
     func save() throws {

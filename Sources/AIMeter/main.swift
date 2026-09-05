@@ -101,7 +101,7 @@ private final class MenuCanceller: @unchecked Sendable {
 /// actually reading without staring at the menu bar.
 func runOnce(manual: Bool = false, record: Bool = false) async {
     setbuf(stdout, nil)
-    let cfg = Config.load()
+    let cfg = Config.load().config
     L.current = cfg.language
     for p in buildProviders(cfg) {
         let readings = await p.fetchAll(manual: manual)
@@ -134,7 +134,7 @@ func runOnce(manual: Bool = false, record: Bool = false) async {
 
 func runRecipeTest(_ id: String) async {
     setbuf(stdout, nil)
-    let cfg = Config.load(); L.current = cfg.language
+    let cfg = Config.load().config; L.current = cfg.language
     guard let recipe = cfg.recipes.first(where: { $0.id == id }) else {
         print("ERR  \(L.t("rc.not.found", id))"); return
     }
@@ -194,7 +194,7 @@ private func writePNG(_ image: NSImage, scale: CGFloat, background: NSColor?,
 /// hopping to the main actor while the main thread waits on the semaphore
 /// below would deadlock.
 func renderIcon(to path: String) async {
-    var cfg = Config.load()
+    var cfg = Config.load().config
     L.current = cfg.language
     var readings: [String: [Reading]] = [:]
     if let demo = diagnosticDemo(&cfg) {
@@ -312,7 +312,7 @@ private func renderPanelState(_ state: PanelState, to path: String) {
 
 @MainActor
 private func renderPanelDemo(to path: String, page: SettingsPage? = nil) {
-    var cfg = Config.load()
+    var cfg = Config.load().config
     applyExpandedArgument(to: &cfg)
     L.current = cfg.language
     Palette.overrides = cfg.colours
@@ -331,7 +331,7 @@ private func renderPanelDemo(to path: String, page: SettingsPage? = nil) {
 
 @MainActor
 func renderPanel(to path: String, page: SettingsPage? = nil) async {
-    var cfg = Config.load()
+    var cfg = Config.load().config
     applyExpandedArgument(to: &cfg)
     L.current = cfg.language
     Palette.overrides = cfg.colours
@@ -416,7 +416,7 @@ private func setPanelPage(_ page: SettingsPage?, on state: PanelState) {
 /// part of any routine check.
 @MainActor
 func renderMenuShots(to path: String) async {
-    var cfg = Config.load()
+    var cfg = Config.load().config
     L.current = cfg.language
     Palette.overrides = cfg.colours
     // The default front-end (v1.0.27) is the floating card panel, which is

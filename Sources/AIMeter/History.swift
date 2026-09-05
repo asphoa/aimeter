@@ -12,7 +12,7 @@ enum History {
     /// not written — recording it would only ever produce empty lines with
     /// no percent, no error, and no informative gap either.
     static func record(_ readings: [Reading], at now: Date = Date(), dir: String = Config.dir) {
-        guard Config.load().history.enabled else { return }
+        guard Config.load().config.history.enabled else { return }
         var lines: [String] = []
         for r in readings {
             if r.gauges.isEmpty {

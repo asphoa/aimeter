@@ -25,6 +25,8 @@ enum RingIcon {
 
     enum Band: Equatable { case ink, warn, alarm }
 
+    enum VisualState: Equatable { case live, stale, failed, empty }
+
     /// The pure shape this icon draws: nothing here is an NSColor or NSImage,
     /// so it can be built and compared in a test with no display.
     struct RingModel: Equatable {
@@ -32,6 +34,7 @@ enum RingIcon {
         var inner: Double?
         var alertDot: Bool = false
         var numeral: String? = nil
+        var visual: VisualState = .live
     }
 
     /// 70/90, inclusive at the boundary per spec: 69.9 is ink, 70 is warn,
@@ -50,13 +53,20 @@ enum RingIcon {
         var out = RingModel()
         if let raw = readings[primary] {
             let rows = Reading.asOfNow(raw)
-            let gauges = rows.flatMap(\.gauges).filter { $0.percent != nil }
-            out.outer = gauges.filter { $0.kind == .shortWindow }.compactMap(\.percent).max()
-            // Unscoped long window only — a `.modelWindow` (a per-model weekly
-            // entry, e.g. Claude's "Fable" scoped line) is never picked up
-            // here, matching the strip's own `.longWindow`/`.modelWindow`
-            // distinction (see GaugeKind).
-            out.inner = gauges.filter { $0.kind == .longWindow }.compactMap(\.percent).max()
+            if rows.allSatisfy({ $0.state == .failure }) {
+                out.visual = .failed
+            } else {
+                let gauges = rows.flatMap(\.gauges).filter { $0.percent != nil }
+                if gauges.isEmpty {
+                    out.visual = rows.contains(where: { $0.snapshotAt != nil }) ? .stale : .empty
+                } else {
+                    out.outer = gauges.filter { $0.kind == .shortWindow }.compactMap(\.percent).max()
+                    out.inner = gauges.filter { $0.kind == .longWindow }.compactMap(\.percent).max()
+                    if rows.contains(where: { $0.snapshotAt != nil }) { out.visual = .stale }
+                }
+            }
+        } else {
+            out.visual = .empty
         }
         for (id, raw) in readings where id != primary {
             let rows = Reading.asOfNow(raw)
@@ -104,10 +114,22 @@ enum RingIcon {
             let outer = lerp(from?.outer, model.outer)
             let inner = lerp(from?.inner, model.inner)
 
-            drawTrack(radius: outerRadius, stroke: outerStroke)
-            drawTrack(radius: innerRadius, stroke: innerStroke)
+            drawTrack(radius: outerRadius, stroke: outerStroke,
+                      alpha: model.visual == .stale ? trackAlpha * 0.45 : trackAlpha)
+            drawTrack(radius: innerRadius, stroke: innerStroke,
+                      alpha: model.visual == .stale ? trackAlpha * 0.45 : trackAlpha)
 
-            if let outer {
+            if model.visual == .empty {
+                Palette.colour(Palette.ink).withAlphaComponent(0.35).setFill()
+                let r: CGFloat = 1.2
+                NSBezierPath(ovalIn: NSRect(x: centre.x - r, y: canvas - centre.y - r,
+                                          width: r * 2, height: r * 2)).fill()
+            } else if model.visual == .failed {
+                Palette.colour(Palette.alarm).setFill()
+                let r: CGFloat = 2.2
+                NSBezierPath(ovalIn: NSRect(x: centre.x - r, y: canvas - centre.y - r,
+                                          width: r * 2, height: r * 2)).fill()
+            } else if let outer {
                 var alpha: CGFloat = 1
                 if let m = model.outer, colourBand(m) == .alarm {
                     // Breathe 1.0 -> 0.55 -> 1.0 over the phase's period.
@@ -142,11 +164,11 @@ enum RingIcon {
         return img
     }
 
-    private static func drawTrack(radius: CGFloat, stroke: CGFloat) {
+    private static func drawTrack(radius: CGFloat, stroke: CGFloat, alpha: CGFloat = trackAlpha) {
         let path = NSBezierPath(ovalIn: NSRect(x: centre.x - radius, y: canvas - centre.y - radius,
                                                width: radius * 2, height: radius * 2))
         path.lineWidth = stroke
-        Palette.colour(Palette.ink).withAlphaComponent(trackAlpha).setStroke()
+        Palette.colour(Palette.ink).withAlphaComponent(alpha).setStroke()
         path.stroke()
     }
 
@@ -179,10 +201,28 @@ final class RingAnimator {
     private var current: RingIcon.RingModel = RingIcon.RingModel()
     private var previous: RingIcon.RingModel?
     private var sweepStart: Date?
+    private var motionAllowed = true
     private let onUpdate: (NSImage) -> Void
 
     init(onUpdate: @escaping (NSImage) -> Void) {
         self.onUpdate = onUpdate
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.applyMotionPolicy() }
+            }
+    }
+
+    var hasActiveTimer: Bool { timer != nil }
+
+    private func applyMotionPolicy() {
+        let allowed = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if !allowed {
+            timer?.invalidate()
+            timer = nil
+            onUpdate(RingIcon.image(for: current))
+        }
+        motionAllowed = allowed
     }
 
     /// Called on each successful refresh. Animates the sweep from the last
@@ -190,11 +230,13 @@ final class RingAnimator {
     /// Motion), in which case it redraws once with no transition.
     func show(_ model: RingIcon.RingModel, animated: Bool) {
         timer?.invalidate()
-        guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+        timer = nil
+        let effective = animated && motionAllowed
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard effective else {
             current = model
             previous = nil
             onUpdate(RingIcon.image(for: model))
-            startBreathingIfNeeded()
             return
         }
         previous = current
@@ -224,6 +266,7 @@ final class RingAnimator {
     /// ≥90%, restarted from `show` so a config change or a fresh reading
     /// never leaves two timers alive.
     private func startBreathingIfNeeded() {
+        guard motionAllowed, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
         guard let outer = current.outer, RingIcon.colourBand(outer) == .alarm else { return }
         let started = Date()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] t in

@@ -91,13 +91,15 @@ func resolveStripLine(_ line: MenuLine,
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
-    private var cfg = Config.load()
+    private let configStore = ConfigStore.shared
+    private var cfg: Config { configStore.cfg }
+    private let refreshCoordinator = RefreshCoordinator()
     private var providers: [Provider] = []
     private var readings: [String: [Reading]] = [:]
     private var lastRefresh: Date?
     private var lastFetched: [String: Date] = [:]
+    private var coordinatorNotices: [String: [String]] = [:]
     private var timer: Timer?
-    private var refreshing = false
     /// Owns the floating card panel when `menuBar.panel == "cards"` (the
     /// default, v1.0.27). Left nil for the "menu" fallback, which keeps using
     /// `statusItem.menu` exactly as before.
@@ -114,18 +116,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Palette.overrides = cfg.colours
         providers = buildProviders(cfg)
         History.applyRetention(months: cfg.history.retentionMonths)
+        Task { await refreshCoordinator.setGeneration(configStore.revision) }
         NotificationCenter.default.addObserver(
             forName: SettingsStore.changed, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.reload() }
             }
-        // Appearance changes redraw what is already known; they must not send
-        // the app back out to every provider.
         NotificationCenter.default.addObserver(
             forName: SettingsStore.restyled, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
                     guard let self else { return }
-                    self.cfg = Config.load()
-                    Palette.overrides = self.cfg.colours
                     self.refreshUI()
                     self.updateTitle()
                 }
@@ -135,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.title = "AI …"
         setUpStatusItemInteraction()
 
-        refresh()
+        refresh(.launch)
         restartTimer()
     }
 
@@ -188,11 +187,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// refetches so the panel/menu reflects the new set immediately.
     private func reload() {
         let oldPanelStyle = cfg.menuBar.panel
-        cfg = Config.load()
-        L.current = cfg.language
-        Palette.overrides = cfg.colours
+        configStore.reloadFromDisk()
         providers = buildProviders(cfg)
         readings = readings.filter { key, _ in providers.contains { $0.id == key } }
+        Task { await refreshCoordinator.setGeneration(configStore.revision) }
         if cfg.menuBar.panel != oldPanelStyle {
             cardPanel?.close()
             cardPanel = nil
@@ -200,7 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         restartTimer()
         lastRefresh = nil
-        refresh()
+        refresh(.reload)
     }
 
     /// One short tick drives every provider; each is fetched only when its own
@@ -226,38 +224,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return now.timeIntervalSince(last) >= Double(secs)
         }
         guard !due.isEmpty else { return }
-        refresh(due, manual: false)
+        refresh(.timer, due)
     }
 
     // MARK: - fetching
 
-    func refresh(_ list: [Provider]? = nil, manual: Bool = false) {
-        guard !refreshing else { return }
-        refreshing = true
+    private func refresh(_ reason: RefreshReason, _ list: [Provider]? = nil) {
         let list = list ?? providers
-        Task { @MainActor in
-            await withTaskGroup(of: (String, [Reading]).self) { group in
-                for p in list {
-                    group.addTask { (p.id, await p.fetchAll(manual: manual)) }
-                }
-                for await (pid, rs) in group {
-                    let merged = rs.map { new in
-                        let prev = self.readings[pid]?.first {
-                            $0.account == new.account
-                        }
-                        return Reading.merge(previous: prev, next: new)
-                    }
-                    self.readings[pid] = merged
-                    self.lastFetched[pid] = Date()
-                    History.record(merged)
+        let generation = configStore.revision
+        Task {
+            await refreshCoordinator.setGeneration(generation)
+            await refreshCoordinator.request(
+                reason: reason,
+                providerIDs: list.map(\.id),
+                providers: list,
+                cfg: cfg,
+                generation: generation,
+                publish: { [weak self] event in
+                    Task { @MainActor in self?.handlePublish(event) }
+                })
+        }
+    }
+
+    private func handlePublish(_ event: RefreshCoordinator.PublishEvent) {
+        if !event.notices.isEmpty {
+            coordinatorNotices[event.providerID] = event.notices
+        }
+        if event.dropped {
+            refreshUI()
+            return
+        }
+        guard event.generation == configStore.revision else { return }
+        if var existing = readings[event.providerID] {
+            for reading in event.readings {
+                if let index = existing.firstIndex(where: { $0.account == reading.account }) {
+                    existing[index] = reading
+                } else {
+                    existing.append(reading)
                 }
             }
-            ReadingsBox.shared.current = self.readings
-            self.lastRefresh = Date()
-            self.refreshing = false
-            self.refreshUI()
-            self.updateTitle()
+            readings[event.providerID] = existing
+        } else {
+            readings[event.providerID] = event.readings
         }
+        lastFetched[event.providerID] = Date()
+        History.record(event.readings)
+        ReadingsBox.shared.current = readings
+        lastRefresh = Date()
+        refreshUI()
+        updateTitle()
     }
 
     /// Rebuilds whichever front-end is live: the NSMenu for the "menu"
@@ -276,7 +291,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updatePanelModel(_ state: PanelState, config: Config? = nil) {
-        var model = PanelModelBuilder.build(readings: readings, cfg: config ?? cfg)
+        var model = PanelModelBuilder.build(readings: readings, cfg: config ?? cfg,
+                                            coordinatorNotices: coordinatorNotices)
         for index in model.cards.indices where model.cards[index].expanded {
             let samples = Sparkline.recentSamples(historyDir: Config.dir + "/history",
                                                   provider: model.cards[index].id)
@@ -288,13 +304,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func toggleCardExpanded(_ providerID: String, state: PanelState) {
-        if let index = state.store.cfg.menuBar.expanded.firstIndex(of: providerID) {
-            state.store.cfg.menuBar.expanded.remove(at: index)
-        } else {
-            state.store.cfg.menuBar.expanded.append(providerID)
+        _ = state.store.mutate {
+            if let index = $0.menuBar.expanded.firstIndex(of: providerID) {
+                $0.menuBar.expanded.remove(at: index)
+            } else {
+                $0.menuBar.expanded.append(providerID)
+            }
         }
-        state.store.persist()
-        updatePanelModel(state, config: state.store.cfg)
+        updatePanelModel(state)
     }
 
     /// Refresh on open, but never more than once every 15s - the Claude row
@@ -344,6 +361,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !cfg.menuBar.alertDot { described.alertDot = false }
         statusItem.length = model.numeral != nil ? 52 : 22
         ringAnimator.show(described, animated: cfg.menuBar.animate)
+        let outerText = described.outer.map { String(format: "%.0f%%", $0) } ?? "—"
+        let innerText = described.inner.map { String(format: "%.0f%%", $0) } ?? ""
+        let window = [outerText, innerText].filter { !$0.isEmpty }.joined(separator: "/")
+        button.setAccessibilityLabel(L.t("a11y.ring", cfg.menuBar.primary, outerText, window))
         button.toolTip = [described.outer, described.inner].compactMap { $0 }
             .map { String(format: "%.0f%%", $0) }.joined(separator: " / ")
     }
@@ -416,11 +437,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func doRefresh() {
         lastRefresh = nil
         lastFetched.removeAll()
-        // "Only when I ask" means this button too: a source set to manual has
-        // its own, and refreshing everything should not quietly launch a CLI
-        // and sit there for half a minute.
         let scheduled = providers.filter { cfg.interval($0.id) > 0 }
-        refresh(scheduled, manual: true)
+        refresh(.manual, scheduled)
     }
 
     @objc func toggleLogin() {
@@ -477,17 +495,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Also the panel's "…" language picker - `pickLanguage(_:)` is just the
     /// NSMenuItem-shaped entry point onto this.
     func setLanguage(_ lang: Lang) {
-        cfg.language = lang
         do {
-            try cfg.save()
-            cardPanel?.state.store.saveNotice = nil
+            try configStore.mutate { $0.language = lang }
+            cardPanel?.state.store.saveNotice = configStore.rangeNotice
         } catch {
-            cfg = Config.load()
             cardPanel?.state.store.saveNotice = L.t("s.save.failed", saveFailureReason(error))
         }
         L.current = lang
         lastRefresh = nil
-        refresh()          // provider text is localised at fetch time
+        refresh(.languageChange)
         refreshUI()
     }
 
@@ -498,14 +514,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Also the panel's "…" interval picker.
     func setInterval(_ secs: Int) {
-        // The menu sets the default; per-provider overrides live in the
-        // Accounts window and are left alone here.
-        cfg.refreshSeconds = secs
         do {
-            try cfg.save()
-            cardPanel?.state.store.saveNotice = nil
+            try configStore.mutate { $0.refreshSeconds = secs }
+            cardPanel?.state.store.saveNotice = configStore.rangeNotice
         } catch {
-            cfg = Config.load()
             cardPanel?.state.store.saveNotice = L.t("s.save.failed", saveFailureReason(error))
         }
         restartTimer()
@@ -516,7 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func checkProviderByID(_ pid: String) {
         guard let provider = providers.first(where: { $0.id == pid }) else { return }
         lastFetched[pid] = nil
-        refresh([provider], manual: true)
+        refresh(.manual, [provider])
     }
 
     /// Checking one source, on purpose. The other `manual: true` path - and the

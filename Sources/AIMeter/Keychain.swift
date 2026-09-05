@@ -110,58 +110,33 @@ enum Keychain {
     /// gets an immediate EOF instead of hanging. Never logs or prints the
     /// secret itself - only exit codes and the first stderr line reach a `Fail`.
     static func securityToolPassword(service: String) -> Result<String, Fail> {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", service, "-w"]
-        process.standardInput = FileHandle.nullDevice
-        let outPipe = Pipe(), errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-
-        do { try process.run() }
-        catch {
-            return .failure(Fail(message: L.t("k.error", "-1", error.localizedDescription)))
-        }
-
-        // Drained on background threads, same shape as ClaudeCLI.execute: a
-        // subprocess that fills a pipe must not be able to deadlock a parent
-        // waiting on it to exit.
-        let out = SecurityToolDrain(), err = SecurityToolDrain()
-        let drained = DispatchGroup()
-        for (pipe, box) in [(outPipe, out), (errPipe, err)] {
-            drained.enter()
-            DispatchQueue.global(qos: .utility).async {
-                box.data = pipe.fileHandleForReading.readDataToEndOfFile()
-                drained.leave()
+        let sem = DispatchSemaphore(value: 0)
+        var outcome: Result<String, Fail> = .failure(Fail(message: L.t("k.error", "-1", "timed out")))
+        Task {
+            let out = await ProcessRunner.run(
+                binary: "/usr/bin/security",
+                args: ["find-generic-password", "-s", service, "-w"],
+                stdinClosed: true,
+                deadline: .seconds(10))
+            let errText = String(decoding: out.stderr, as: UTF8.self)
+            let errFirstLine = errText.split(whereSeparator: \.isNewline).first
+                .map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
+            if out.timedOut {
+                outcome = .failure(Fail(message: L.t("k.error", "-2", "timed out")))
+            } else if out.exitCode == 44 || errText.contains("could not be found") {
+                outcome = .failure(Fail(message: L.t("k.missing", service)))
+            } else if out.exitCode != 0 {
+                outcome = .failure(Fail(message: L.t("k.error", "\(out.exitCode)", errFirstLine)))
+            } else if var text = String(data: out.stdout, encoding: .utf8) {
+                if text.hasSuffix("\n") { text.removeLast() }
+                outcome = .success(text)
+            } else {
+                outcome = .failure(Fail(message: L.t("k.nottext")))
             }
+            sem.signal()
         }
-
-        let deadline = Date().addingTimeInterval(10)
-        while process.isRunning, Date() < deadline { usleep(50_000) }
-        if process.isRunning {
-            process.terminate()
-            _ = drained.wait(timeout: .now() + 2)
-            return .failure(Fail(message: L.t("k.error", "-2", "timed out")))
-        }
-        process.waitUntilExit()
-        _ = drained.wait(timeout: .now() + 5)
-
-        let code = process.terminationStatus
-        let errText = String(decoding: err.data, as: UTF8.self)
-        let errFirstLine = errText.split(whereSeparator: \.isNewline).first
-            .map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
-
-        if code == 44 || errText.contains("could not be found") {
-            return .failure(Fail(message: L.t("k.missing", service)))
-        }
-        guard code == 0 else {
-            return .failure(Fail(message: L.t("k.error", "\(code)", errFirstLine)))
-        }
-        guard var text = String(data: out.data, encoding: .utf8) else {
-            return .failure(Fail(message: L.t("k.nottext")))
-        }
-        if text.hasSuffix("\n") { text.removeLast() }
-        return .success(text)
+        _ = sem.wait(timeout: .now() + 15)
+        return outcome
     }
 
     /// Dispatches a generic-password read to whichever route `service` needs -
@@ -270,14 +245,6 @@ func findNumber(in obj: Any, names: [String]) -> Double? {
     }
     return walk(obj)
 }
-
-/// Somewhere for `securityToolPassword`'s reading threads to put what they
-/// read. Named apart from `ClaudeCLI`'s own `Drain` only because the two live
-/// in different files with no shared import between them.
-private final class SecurityToolDrain: @unchecked Sendable {
-    var data = Data()
-}
-
 private func norm(_ k: String) -> String {
     k.lowercased().replacingOccurrences(of: "_", with: "")
 }

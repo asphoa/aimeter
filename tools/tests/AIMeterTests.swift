@@ -507,22 +507,21 @@ func testConfigDefaultAgyIntervalIsNowHourly() {
     T.check("fresh config starts unmigrated", !cfg.agyIntervalMigrated)
 }
 
-func testConfigMigratesTheOldZeroAgyIntervalOnce() {
+func testConfigMigratesAbsentAgyKeyOnce() {
     var old = Config()
-    old.intervals["agy"] = 0
+    old.intervals.removeValue(forKey: "agy")
+    old.agyIntervalKeyPresent = false
     old.agyIntervalMigrated = false
 
-    let migrated = Config.migratingAgyInterval(old)
-    T.eq("old default 0 migrates to hourly", migrated.intervals["agy"], 3600)
+    let migrated = Config.migratingAgyInterval(old, agyKeyPresent: false)
+    T.eq("absent agy key migrates to hourly", migrated.intervals["agy"], 3600)
     T.check("migration flag is set", migrated.agyIntervalMigrated)
 
-    // The whole point of the flag: once migration has run, a 0 set on
-    // purpose afterwards (going back to manual-only) must survive the next
-    // launch rather than being silently reverted to 3600 again.
-    var deliberate = migrated
-    deliberate.intervals["agy"] = 0
-    let untouched = Config.migratingAgyInterval(deliberate)
-    T.eq("a deliberate 0 after migration is respected", untouched.intervals["agy"], 0)
+    var explicit = migrated
+    explicit.intervals["agy"] = 0
+    explicit.agyIntervalKeyPresent = true
+    let untouched = Config.migratingAgyInterval(explicit, agyKeyPresent: true)
+    T.eq("explicit agy:0 preserved after migration", untouched.intervals["agy"], 0)
     T.check("already-migrated config is returned unchanged (guard short-circuits)",
            untouched.agyIntervalMigrated)
 }
@@ -543,7 +542,379 @@ func testConfigDecodingAnOldSettingsFileStillCarryingAgyDirectQuotaKeyIsTolerant
         cfg.intervals["agy"], 0)
 }
 
-// MARK: - RingIcon: pure model/colour/easing core
+func testConfigValidatedClampsExtremeStaleMinutes() {
+    var cfg = Config()
+    cfg.menuBar.staleAfterMinutes = 9_223_372_036_854_775_807
+    let (out, notice) = Config.validated(cfg)
+    T.eq("stale minutes clamped", out.menuBar.staleAfterMinutes, 10_080)
+    T.notNil("notice names field", notice)
+}
+
+func testConfigValidatedPreservesExplicitAgyZero() {
+    var cfg = Config()
+    cfg.intervals["agy"] = 0
+    cfg.agyIntervalKeyPresent = true
+    let (out, _) = Config.validated(cfg)
+    T.eq("explicit agy zero kept", out.intervals["agy"], 0)
+}
+
+func testConfigStoreRevisionMonotonicAndRollback() {
+    MainActor.assumeIsolated {
+        let tmp = NSTemporaryDirectory() + "aimeter-cfgstore-\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        let path = tmp + "/config.json"
+        defer {
+            Config.pathOverride = nil
+            try? FileManager.default.removeItem(atPath: tmp)
+        }
+        Config.pathOverride = path
+        let store = ConfigStore(initial: Config())
+        let r0 = store.revision
+        try? store.mutate { $0.refreshSeconds = 90 }
+        T.check("revision increments", store.revision == r0 + 1)
+        try? store.mutate { $0.refreshSeconds = 120 }
+        T.check("second mutate increments", store.revision == r0 + 2)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+        var threw = false
+        do { try store.mutate { $0.refreshSeconds = 999 } } catch { threw = true }
+        T.check("failed save throws", threw)
+        T.eq("cfg unchanged after failed save", store.cfg.refreshSeconds, 120)
+    }
+}
+
+func testProcessRunnerKillsSlowSleep() {
+    let start = Date()
+    let sem = DispatchSemaphore(value: 0)
+    var out: ProcessRunner.Output?
+    Task {
+        out = await ProcessRunner.run(binary: "/bin/sleep", args: ["30"],
+                                      deadline: .seconds(1))
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 4)
+    let elapsed = Date().timeIntervalSince(start)
+    guard let out else { T.check("process returned", false); return }
+    T.check("timed out", out.timedOut)
+    T.check("finished within budget", elapsed < 2.5, "elapsed \(elapsed)s")
+}
+
+func testProcessRunnerDoesNotKillCallerOnChildTimeout() {
+    let callerPid = getpid()
+    let start = Date()
+    let sem = DispatchSemaphore(value: 0)
+    var out: ProcessRunner.Output?
+    Task {
+        out = await ProcessRunner.run(binary: "/bin/sh",
+                                      args: ["-c", "trap '' TERM; sleep 30"],
+                                      deadline: .seconds(1))
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 4)
+    T.eq("test process pid unchanged", getpid(), callerPid)
+    T.check("follow-up after child kill", out?.timedOut == true)
+    // 1s deadline, then the 2s graceful window before SIGKILL: ~3s is the
+    // floor for a child that ignores SIGTERM, so this ceiling is 4s.
+    T.check("returned within deadline plus grace", Date().timeIntervalSince(start) < 4.0)
+}
+
+func testProcessRunnerKillsChildProcessGroup() {
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        _ = await ProcessRunner.run(
+            binary: "/bin/sh",
+            args: ["-c", "yes | head -c 100000000 > /dev/null; sleep 30"],
+            deadline: .seconds(1))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let probe = await ProcessRunner.run(binary: "/usr/bin/pgrep", args: ["-x", "yes"],
+                                            deadline: .seconds(2))
+        T.check("no yes process after group kill", probe.exitCode != 0)
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 6)
+}
+
+func testProcessRunnerTruncatesLargeOutput() {
+    let sem = DispatchSemaphore(value: 0)
+    var out: ProcessRunner.Output?
+    Task {
+        out = await ProcessRunner.run(binary: "/usr/bin/yes", args: [],
+                                      deadline: .seconds(2))
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 4)
+    guard let out else { T.check("process returned", false); return }
+    T.check("output truncated", out.outputTruncated)
+    T.check("stdout capped", out.stdout.count <= ProcessRunner.outputLimit)
+}
+
+func testRingAnimatorStopsTimerWhenMotionOff() {
+    MainActor.assumeIsolated {
+        let animator = RingAnimator { _ in }
+        animator.show(RingIcon.RingModel(outer: 95, inner: 10), animated: true)
+        animator.show(RingIcon.RingModel(outer: 95, inner: 10), animated: false)
+        T.check("timer nil when animate false", !animator.hasActiveTimer)
+    }
+}
+
+func testPanelModelMultiAccountRowsCarryAccountNames() {
+    let a = Reading(id: "openrouter", title: "OpenRouter", account: "work",
+                    gauges: [Gauge(label: "weekly", percent: 40, text: "40%")])
+    let b = Reading(id: "openrouter", title: "OpenRouter", account: "personal",
+                    gauges: [Gauge(label: "weekly", percent: 10, text: "10%")])
+    let model = PanelModelBuilder.build(readings: ["openrouter": [a, b]], cfg: Config())
+    let card = model.cards.first { $0.id == "openrouter" }
+    T.check("row mentions account", card?.compact.contains(where: { $0.label.contains("work") }) == true)
+}
+
+func testPanelModelOneAccountFailureKeepsOtherGauges() {
+    let ok = Reading(id: "openrouter", title: "OpenRouter", account: "good",
+                     gauges: [Gauge(label: "weekly", percent: 5, text: "5%")])
+    let bad = Reading.failed("openrouter", "OpenRouter", "bad", "nope")
+    let model = PanelModelBuilder.build(readings: ["openrouter": [ok, bad]], cfg: Config())
+    let card = model.cards.first { $0.id == "openrouter" }
+    T.check("healthy gauge survives", card?.compact.contains(where: { $0.percent == 5 }) == true)
+    T.isNil("not whole-card failure", card?.failureMessage)
+}
+
+func testRefreshCoordinatorSkipsManualOnlyOnLaunch() {
+    final class Fake: Provider, @unchecked Sendable {
+        let id: String
+        var title: String { id }
+        var calls = 0
+        init(id: String) { self.id = id }
+        func fetchAll(manual: Bool) async -> [Reading] {
+            calls += 1
+            return [Reading(id: id, title: id)]
+        }
+    }
+    let fake = Fake(id: "recipe-x")
+    var cfg = Config()
+    cfg.intervals["recipe-x"] = 0
+    cfg.accounts["recipe-x"] = [AccountSpec(name: "a")]
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        let coord = RefreshCoordinator()
+        await coord.request(reason: .launch, providerIDs: ["recipe-x"], providers: [fake], cfg: cfg,
+                            generation: 1, publish: { _ in })
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        T.eq("launch skips manual-only", fake.calls, 0)
+        await coord.request(reason: .manual, providerIDs: ["recipe-x"], providers: [fake], cfg: cfg,
+                            generation: 1, publish: { _ in })
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        T.check("manual calls provider", fake.calls > 0)
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 2)
+}
+
+func testRefreshCoordinatorManualCoalescesDuringInFlight() {
+    final class SlowFake: Provider, @unchecked Sendable {
+        let id = "slow"
+        var title: String { id }
+        var calls = 0
+        func fetchAll(manual: Bool) async -> [Reading] {
+            calls += 1
+            if calls == 1 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            return [Reading(id: id, title: id, account: "a")]
+        }
+    }
+    let fake = SlowFake()
+    var cfg = Config()
+    cfg.accounts["slow"] = [AccountSpec(name: "a")]
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        let coord = RefreshCoordinator()
+        await coord.request(reason: .manual, providerIDs: ["slow"], providers: [fake], cfg: cfg,
+                            generation: 1, publish: { _ in })
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        await coord.request(reason: .manual, providerIDs: ["slow"], providers: [fake], cfg: cfg,
+                            generation: 1, publish: { _ in })
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        T.eq("manual coalesces to exactly two runs", fake.calls, 2)
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 4)
+}
+
+func testRefreshCoordinatorDropsStaleGeneration() {
+    final class Fake: Provider, @unchecked Sendable {
+        let id = "gen"
+        var title: String { id }
+        var hold: CheckedContinuation<Void, Never>?
+        func fetchAll(manual: Bool) async -> [Reading] {
+            await withCheckedContinuation { hold = $0 }
+            return [Reading(id: id, title: id, account: "a", lines: ["stale"])]
+        }
+        func release() { hold?.resume(); hold = nil }
+    }
+    let fake = Fake()
+    var cfg = Config()
+    cfg.accounts["gen"] = [AccountSpec(name: "a")]
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        let coord = RefreshCoordinator()
+        var published: [Reading] = []
+        await coord.request(reason: .manual, providerIDs: ["gen"], providers: [fake], cfg: cfg,
+                            generation: 1, publish: { event in
+            if !event.dropped { published.append(contentsOf: event.readings) }
+        })
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        await coord.setGeneration(2)
+        fake.release()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let snap = await coord.readingsSnapshot()
+        T.check("stale result not in readings box", snap["gen"]?.isEmpty != false)
+        T.check("stale never published", published.isEmpty)
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 3)
+}
+
+func testRefreshCoordinatorSlowProviderBudget() {
+    final class HangFake: Provider, @unchecked Sendable {
+        let id: String
+        let delay: TimeInterval
+        init(id: String, delay: TimeInterval) { self.id = id; self.delay = delay }
+        var title: String { id }
+        func fetchAll(manual: Bool) async -> [Reading] {
+            if delay > 0 {
+                await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                    DispatchQueue.global().asyncAfter(deadline: .now() + delay) { done.resume() }
+                }
+            }
+            return [Reading(id: id, title: id)]
+        }
+    }
+    let slow = HangFake(id: "slow", delay: 10)
+    let fast = HangFake(id: "fast", delay: 0)
+    var cfg = Config()
+    cfg.intervals["slow"] = 60
+    cfg.intervals["fast"] = 60
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        let coord = RefreshCoordinator()
+        await coord.setGeneration(1)
+        await coord.setTestBudget(1)
+        var events: [RefreshCoordinator.PublishEvent] = []
+        let start = Date()
+        await coord.request(reason: .timer, providerIDs: nil, providers: [slow, fast], cfg: cfg, generation: 1,
+                            publish: { events.append($0) })
+        while events.filter({ $0.providerID == "fast" && !$0.dropped }).isEmpty,
+              Date().timeIntervalSince(start) < 2 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let fastEvent = events.first { $0.providerID == "fast" && !$0.dropped }
+        T.notNil("fast provider published within budget", fastEvent)
+        while events.first(where: {
+            $0.providerID == "slow" && $0.readings.first?.lines.first == L.t("m.timeout")
+        }) == nil, Date().timeIntervalSince(start) < 3 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let slowTimeout = events.first {
+            $0.providerID == "slow" && $0.readings.first?.lines.first == L.t("m.timeout")
+        }
+        T.notNil("slow provider got timeout reading", slowTimeout)
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 6)
+}
+
+func testRefreshCoordinatorRateLimitManualBypassesTimer() {
+    final class Fake: Provider, @unchecked Sendable {
+        let id = "claude"
+        var title: String { id }
+        var calls = 0
+        func fetchAll(manual: Bool) async -> [Reading] {
+            calls += 1
+            return [Reading(id: id, title: id)]
+        }
+    }
+    RateLimit.resetForTests()
+    RateLimit.mark(host: "api.anthropic.com", account: "*",
+                   until: Date().addingTimeInterval(120))
+    let fake = Fake()
+    var cfg = Config()
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        let coord = RefreshCoordinator()
+        await coord.request(reason: .timer, providerIDs: ["claude"], providers: [fake], cfg: cfg,
+                            generation: 1, publish: { _ in })
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        T.eq("timer skipped under rate limit", fake.calls, 0)
+        await coord.request(reason: .manual, providerIDs: ["claude"], providers: [fake], cfg: cfg,
+                            generation: 1, publish: { _ in })
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        T.eq("manual runs under rate limit", fake.calls, 1)
+        RateLimit.resetForTests()
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 2)
+}
+
+func testConfigStoreLanguagePersistsAfterToggleCardExpanded() {
+    MainActor.assumeIsolated {
+        let tmp = NSTemporaryDirectory() + "aimeter-a3-\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        let path = tmp + "/config.json"
+        defer {
+            Config.pathOverride = nil
+            try? FileManager.default.removeItem(atPath: tmp)
+        }
+        Config.pathOverride = path
+        let store = ConfigStore(initial: Config())
+        try? store.mutate { $0.language = .zhHant }
+        try? store.mutate {
+            if !$0.menuBar.expanded.contains("codex") {
+                $0.menuBar.expanded.append("codex")
+            }
+        }
+        T.eq("language unchanged after expand toggle", store.cfg.language, .zhHant)
+    }
+}
+
+func testConfigLoadNegativeRetentionClampedAndHistoryPreserves() {
+    let json = Data(#"{"history":{"retentionMonths":-5}}"#.utf8)
+    guard let decoded = try? JSONDecoder().decode(Config.self, from: json) else {
+        T.check("negative retention decodes", false); return
+    }
+    // The decoder keeps what the file says so that validation can report it;
+    // clamping and the notice both belong to `Config.validated`.
+    T.eq("decode keeps the written value", decoded.history.retentionMonths, -5)
+    let (validated, notice) = Config.validated(decoded)
+    T.eq("validated retention is 1", validated.history.retentionMonths, 1)
+    T.notNil("clamping is reported", notice)
+
+    let dir = NSTemporaryDirectory() + "aimeter-e3-\(UUID().uuidString)"
+    let historyDir = dir + "/history"
+    try? FileManager.default.createDirectory(atPath: historyDir, withIntermediateDirectories: true)
+    let month = History.monthKey(for: Date())
+    let path = historyDir + "/\(month).jsonl"
+    try? Data("{\"t\":\"x\"}\n".utf8).write(to: URL(fileURLWithPath: path))
+    defer { try? FileManager.default.removeItem(atPath: dir) }
+    History.applyRetention(dir: dir, months: validated.history.retentionMonths)
+    T.check("current month history kept", FileManager.default.fileExists(atPath: path))
+}
+
+func testConfigStoreLoadSurfacesClampNotice() {
+    MainActor.assumeIsolated {
+        let tmp = NSTemporaryDirectory() + "aimeter-clamp-\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        let path = tmp + "/config.json"
+        defer {
+            Config.pathOverride = nil
+            try? FileManager.default.removeItem(atPath: tmp)
+        }
+        var cfg = Config()
+        cfg.menuBar.staleAfterMinutes = 99_999
+        Config.pathOverride = path
+        try? cfg.save()
+        let store = ConfigStore()
+        T.notNil("range notice from load", store.rangeNotice)
+    }
+}
+
 
 func testColourBandThresholds() {
     T.eq("69.9 -> ink", RingIcon.colourBand(69.9), .ink)
@@ -2193,7 +2564,7 @@ func testRateLimitRetryAfter() {
     T.near("integer seconds", RateLimit.retryAfter(header: "120", now: now), 120, tol: 0.001)
     T.near("missing header defaults to 300", RateLimit.retryAfter(header: nil, now: now), 300, tol: 0.001)
     T.near("empty header defaults to 300", RateLimit.retryAfter(header: "  ", now: now), 300, tol: 0.001)
-    T.eq("oversized value capped at 3600", RateLimit.retryAfter(header: "99999", now: now), 3600)
+    T.eq("oversized value capped at 24h", RateLimit.retryAfter(header: "99999", now: now), 86_400)
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -2299,8 +2670,9 @@ func testAgyFetchPausedWithFreshSnapshotShowsGauges() {
     let now = Date()
     agyWriteSnapshot(at: dirs.config + "/agy-print-test.json", account: "test", home: dirs.home,
                      observedAt: now.addingTimeInterval(-300))
-    try? writePrivate(Data(), to: dirs.config + "/agy-print-paused-test.marker")
-    let reading = agyFetchAwait(agyFetchProvider(config: dirs.config, home: dirs.home), manual: false)
+    let provider = agyFetchProvider(config: dirs.config, home: dirs.home)
+    provider.pauseState.paused = true
+    let reading = agyFetchAwait(provider, manual: false)
     guard let r = reading else { T.check("paused+fresh snapshot yields a reading", false); return }
     T.eq("paused+fresh snapshot keeps four gauges", r.gauges.count, 4)
     T.check("paused+fresh snapshot is not failure", r.state != .failure)
@@ -2311,8 +2683,9 @@ func testAgyFetchPausedWithFreshSnapshotShowsGauges() {
 func testAgyFetchPausedWithoutSnapshotFails() {
     let dirs = agyFetchFixtureDirs()
     defer { try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent) }
-    try? writePrivate(Data(), to: dirs.config + "/agy-print-paused-test.marker")
-    let reading = agyFetchAwait(agyFetchProvider(config: dirs.config, home: dirs.home), manual: false)
+    let provider = agyFetchProvider(config: dirs.config, home: dirs.home)
+    provider.pauseState.paused = true
+    let reading = agyFetchAwait(provider, manual: false)
     guard let r = reading else { T.check("paused+no snapshot yields a reading", false); return }
     T.eq("paused+no snapshot is failure", r.state, .failure)
     T.eq("paused+no snapshot message", r.lines.first, L.t("a.print.paused"))
@@ -2800,10 +3173,10 @@ func testAgyTransientFailureUsesBackoffNotPause() {
     defer { CommandRun.testHook = nil }
     let provider = AgyProvider(cfg: cfg, files: files)
     _ = agyFetchAwait(provider, manual: false)
-    T.check("transient failure does not write pause marker",
-            !FileManager.default.fileExists(atPath: files.pauseMarkerPath("test")))
-    T.check("transient failure writes backoff state",
-            FileManager.default.fileExists(atPath: files.backoffPath("test")))
+    T.check("transient failure does not set paused",
+            !provider.pauseState.paused)
+    T.check("transient failure records backoff state",
+            provider.pauseState.backoff != nil)
 }
 
 func testRecipePinBodyHashIgnoresDictionaryInsertionOrder() {
@@ -2839,9 +3212,8 @@ func testConfigSaveFailureShowsNoticeAndRevertsCfg() {
         Config.pathOverride = path
         do { try baseline.save() } catch { T.check("baseline save", false); return }
         let store = SettingsStore(config: baseline)
-        store.cfg.refreshSeconds = 999
         try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
-        let ok = store.persist()
+        let ok = store.mutate { $0.refreshSeconds = 999 }
         T.check("persist reports failure", !ok)
         T.notNil("save notice set", store.saveNotice)
         T.eq("cfg reverted to disk", store.cfg.refreshSeconds, 120)
@@ -2961,7 +3333,25 @@ struct Runner {
         testFmtGB()
         testConfigDecodesMinimalJSON()
         testConfigDefaultAgyIntervalIsNowHourly()
-        testConfigMigratesTheOldZeroAgyIntervalOnce()
+        testConfigMigratesAbsentAgyKeyOnce()
+        testConfigValidatedClampsExtremeStaleMinutes()
+        testConfigValidatedPreservesExplicitAgyZero()
+        MainActor.assumeIsolated { testConfigStoreRevisionMonotonicAndRollback() }
+        testProcessRunnerKillsSlowSleep()
+        testProcessRunnerDoesNotKillCallerOnChildTimeout()
+        testProcessRunnerKillsChildProcessGroup()
+        testProcessRunnerTruncatesLargeOutput()
+        MainActor.assumeIsolated { testRingAnimatorStopsTimerWhenMotionOff() }
+        testPanelModelMultiAccountRowsCarryAccountNames()
+        testPanelModelOneAccountFailureKeepsOtherGauges()
+        testRefreshCoordinatorSkipsManualOnlyOnLaunch()
+        testRefreshCoordinatorManualCoalescesDuringInFlight()
+        testRefreshCoordinatorDropsStaleGeneration()
+        testRefreshCoordinatorSlowProviderBudget()
+        testRefreshCoordinatorRateLimitManualBypassesTimer()
+        MainActor.assumeIsolated { testConfigStoreLanguagePersistsAfterToggleCardExpanded() }
+        testConfigLoadNegativeRetentionClampedAndHistoryPreserves()
+        MainActor.assumeIsolated { testConfigStoreLoadSurfacesClampNotice() }
         testConfigDecodingAnOldSettingsFileStillCarryingAgyDirectQuotaKeyIsTolerant()
         testColourBandThresholds()
         testRingModelPicksPrimarysShortAndUnscopedLongWindow()

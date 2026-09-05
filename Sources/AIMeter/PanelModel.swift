@@ -32,6 +32,7 @@ struct PanelModel: Equatable {
     }
 
     struct Row: Equatable {
+        var account: String?
         var label: String
         var percent: Double?
         var value: String
@@ -41,6 +42,7 @@ struct PanelModel: Equatable {
     }
 
     struct Hero: Equatable {
+        var account: String?
         var kind: GaugeKind
         var percent: Double?
         var text: String
@@ -144,16 +146,21 @@ enum PanelModelBuilder {
 
     static let fixedSecondaryOrder = ["codex", "openrouter", "deepseek", "agy", "local", "cursor"]
 
-    static func build(readings: [String: [Reading]], cfg: Config, now: Date = Date()) -> PanelModel {
+    static func build(readings: [String: [Reading]], cfg: Config,
+                      coordinatorNotices: [String: [String]] = [:],
+                      now: Date = Date()) -> PanelModel {
         let primaryId = cfg.menuBar.primary
         let expanded = Set(cfg.menuBar.expanded)
         let ids = orderedIDs(readings: readings, primaryId: primaryId)
         let cards = ids.compactMap { id -> PanelModel.Card? in
+            let extra = coordinatorNotices[id] ?? []
             if id == primaryId {
-                return buildCard(id: id, raw: readings[id] ?? [], expanded: expanded.contains(id), now: now)
+                return buildCard(id: id, raw: readings[id] ?? [], expanded: expanded.contains(id),
+                                 coordinatorNotices: extra, now: now, cfg: cfg)
             }
             guard let raw = readings[id], !raw.isEmpty else { return nil }
-            return buildCard(id: id, raw: raw, expanded: expanded.contains(id), now: now)
+            return buildCard(id: id, raw: raw, expanded: expanded.contains(id),
+                             coordinatorNotices: extra, now: now, cfg: cfg)
         }
         return PanelModel(cards: cards)
     }
@@ -171,7 +178,8 @@ enum PanelModelBuilder {
     }
 
     private static func buildCard(id: String, raw: [Reading], expanded: Bool,
-                                  now: Date) -> PanelModel.Card {
+                                  coordinatorNotices: [String],
+                                  now: Date, cfg: Config) -> PanelModel.Card {
         let fallbackTitle = title(for: id)
         guard !raw.isEmpty else {
             return PanelModel.Card(id: id, title: fallbackTitle, state: .off, ageText: nil,
@@ -180,25 +188,33 @@ enum PanelModelBuilder {
                                    chips: [], sparkline: nil, hasData: false)
         }
 
-        let readings = Reading.asOfNow(raw)
+        let readings = raw.map { $0.asOf(now) }
+        let multiAccount = Set(readings.compactMap(\.account)).count > 1
         let title = readings.first?.title ?? fallbackTitle
         let state = readings.map(\.state).max() ?? .off
-        let gauges = readings.flatMap(\.gauges)
-        let observed = gauges.compactMap(\.observedAt).min()
+        let gauges = readings.flatMap { reading in
+            reading.gauges.map { (reading.account, $0) }
+        }
+        let heroAccount = primaryAccount(in: readings, cfg: cfg)
+        let heroGauge = heroGaugeEntry(in: gauges, account: heroAccount)
+        let heroFlatIndex = heroGauge.flatMap { chosen in gauges.firstIndex(where: { $0.0 == chosen.0 && $0.1.label == chosen.1.label }) }
+        let observed = heroGauge?.1.observedAt
+            ?? gauges.compactMap(\.1.observedAt).min()
             ?? readings.compactMap(\.snapshotAt).min()
         let badge = observed.map { L.t("m.snapshot", Fmt.relative($0)) }
         let ageText = id == "claude" ? L.t("pn.free") : badge
         let opacity: Double = (id == "local" && state == .off) ? 0.6 : 1.0
-        let notices = readings.flatMap(\.lines)
-
-        if let failed = readings.first(where: { $0.state == .failure }) {
-            return PanelModel.Card(id: id, title: title, state: .failure, ageText: ageText,
-                                   badge: badge,
-                                   failureMessage: failed.lines.first ?? L.t("e.connplain"),
-                                   notices: notices, linkOnly: false, expanded: expanded,
-                                   compact: [], hero: nil, chips: [], sparkline: nil,
-                                   hasData: true, opacity: opacity)
+        var notices: [String] = []
+        for reading in readings {
+            for line in reading.lines {
+                if let account = reading.account, multiAccount {
+                    notices.append("\(account): \(line)")
+                } else {
+                    notices.append(line)
+                }
+            }
         }
+        notices.append(contentsOf: coordinatorNotices)
 
         if id == "cursor" {
             return PanelModel.Card(id: id, title: title, state: state, ageText: nil, badge: nil,
@@ -207,23 +223,44 @@ enum PanelModelBuilder {
                                    chips: [], sparkline: nil, hasData: true, opacity: opacity)
         }
 
-        let heroIndex = heroGaugeIndex(in: gauges)
-        let hero: PanelModel.Hero? = heroIndex.map { index in
-            let gauge = gauges[index]
-            return PanelModel.Hero(kind: gauge.kind, percent: gauge.percent, text: gauge.text,
-                                   label: gauge.label,
-                                   resetText: PanelFormat.resetText(gauge.resetsAt, now: now),
-                                   resetsAt: gauge.resetsAt)
+        let compact = gauges.map { account, gauge in
+            toRow(gauge, account: multiAccount ? account : nil, now: now)
         }
-        let remaining = gauges.enumerated().compactMap { index, gauge in
-            index == heroIndex ? nil : gauge
+        let failures = readings.filter { $0.state == .failure }
+        let failureMessage = failures.count == readings.count
+            ? (failures.first?.lines.first ?? L.t("e.connplain"))
+            : nil
+
+        let hero: PanelModel.Hero? = heroGauge.map { account, gauge in
+            PanelModel.Hero(account: multiAccount ? account : nil,
+                            kind: gauge.kind, percent: gauge.percent, text: gauge.text,
+                            label: gauge.label,
+                            resetText: PanelFormat.resetText(gauge.resetsAt, now: now),
+                            resetsAt: gauge.resetsAt)
         }
-        let compact = gauges.map { toRow($0, now: now) }
+        let remaining = gauges.enumerated().compactMap { index, pair in
+            index == heroFlatIndex ? nil : pair.1
+        }
         return PanelModel.Card(id: id, title: title, state: state, ageText: ageText, badge: badge,
-                               failureMessage: nil, notices: notices, linkOnly: false,
+                               failureMessage: failureMessage, notices: notices, linkOnly: false,
                                expanded: expanded, compact: compact, hero: hero,
-                               chips: buildChips(remaining, now: now), sparkline: nil,
-                               hasData: true, opacity: opacity)
+                               chips: buildChips(remaining, multiAccount: multiAccount, now: now),
+                               sparkline: nil, hasData: !gauges.isEmpty || !notices.isEmpty,
+                               opacity: opacity)
+    }
+
+    private static func primaryAccount(in readings: [Reading], cfg: Config) -> String? {
+        readings.first(where: { $0.account != nil && $0.state != .failure })?.account
+            ?? readings.first?.account
+    }
+
+    private static func heroGaugeEntry(in gauges: [(String?, Gauge)],
+                                       account: String?) -> (String?, Gauge)? {
+        guard !gauges.isEmpty else { return nil }
+        let pool = account.map { wanted in gauges.filter { $0.0 == wanted } } ?? gauges
+        let index = heroGaugeIndex(in: pool.map(\.1))
+        guard let index else { return pool.first }
+        return pool[index]
     }
 
     private static func heroGaugeIndex(in gauges: [Gauge]) -> Int? {
@@ -235,7 +272,7 @@ enum PanelModelBuilder {
         return gauges.isEmpty ? nil : 0
     }
 
-    private static func buildChips(_ gauges: [Gauge], now: Date) -> [PanelModel.Chip] {
+    private static func buildChips(_ gauges: [Gauge], multiAccount: Bool, now: Date) -> [PanelModel.Chip] {
         let short = gauges.filter { $0.kind == .shortWindow }
         let long = gauges.filter { $0.kind == .longWindow }
         let models = gauges.filter { $0.kind == .modelWindow }.sorted { $0.label < $1.label }
@@ -248,8 +285,9 @@ enum PanelModelBuilder {
         }
     }
 
-    private static func toRow(_ gauge: Gauge, now: Date) -> PanelModel.Row {
-        PanelModel.Row(label: gauge.label, percent: gauge.percent, value: gauge.text,
+    private static func toRow(_ gauge: Gauge, account: String?, now: Date) -> PanelModel.Row {
+        let label = [account, gauge.label].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · ")
+        return PanelModel.Row(account: account, label: label, percent: gauge.percent, value: gauge.text,
                        resetText: PanelFormat.resetText(gauge.resetsAt, now: now),
                        resetsAt: gauge.resetsAt, expired: gauge.expired)
     }

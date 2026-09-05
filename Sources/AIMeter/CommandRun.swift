@@ -4,7 +4,7 @@ import Foundation
 /// arguments are inert array elements and the child receives a fresh, narrow
 /// environment and an EOF on stdin.
 enum CommandRun {
-    static let outputLimit = 1_048_576
+    static let outputLimit = ProcessRunner.outputLimit
     static let fixedPath = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
 
     /// Injected by tests to count process launches without running real binaries.
@@ -57,15 +57,16 @@ enum CommandRun {
     static func isRunning(binary: String) -> Bool {
         let name = (binary as NSString).lastPathComponent
         guard !name.isEmpty else { return false }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        p.arguments = ["-x", name]
-        p.standardInput = FileHandle.nullDevice
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return false }
-        p.waitUntilExit()
-        return p.terminationStatus == 0
+        let sem = DispatchSemaphore(value: 0)
+        var running = false
+        Task {
+            let out = await ProcessRunner.run(binary: "/usr/bin/pgrep", args: ["-x", name],
+                                              stdinClosed: true, deadline: .seconds(5))
+            running = out.exitCode == 0
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + 6)
+        return running
     }
 
     static func attempt(binary: String, args: [String], home: String,
@@ -95,58 +96,19 @@ enum CommandRun {
             env[key] = value
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = args
-        process.currentDirectoryURL = URL(fileURLWithPath: home)
-        process.environment = env
-        process.standardInput = FileHandle.nullDevice
-        let outPipe = Pipe(), errPipe = Pipe()
-        process.standardOutput = outPipe; process.standardError = errPipe
-
-        do { try process.run() } catch {
-            return Attempt(exitCode: nil, stdout: Data(), stderr: error.localizedDescription)
+        let sem = DispatchSemaphore(value: 0)
+        var result = Attempt(exitCode: nil, stdout: Data(), stderr: "launch failed")
+        Task {
+            let out = await ProcessRunner.run(binary: binary, args: args, env: env, cwd: home,
+                                              stdinClosed: true,
+                                              deadline: .seconds(max(0.1, min(timeout, 30))))
+            let stderr = String(decoding: out.stderr, as: UTF8.self)
+            result = Attempt(exitCode: out.timedOut ? nil : out.exitCode,
+                           stdout: out.stdout, stderr: stderr,
+                           timedOut: out.timedOut, outputTruncated: out.outputTruncated)
+            sem.signal()
         }
-
-        let out = CommandDrain(), err = CommandDrain()
-        let drained = DispatchGroup()
-        for (pipe, box) in [(outPipe, out), (errPipe, err)] {
-            drained.enter()
-            DispatchQueue.global(qos: .utility).async {
-                let handle = pipe.fileHandleForReading
-                while true {
-                    let chunk = handle.readData(ofLength: 65_536)
-                    if chunk.isEmpty { break }
-                    box.append(chunk, limit: outputLimit)
-                }
-                drained.leave()
-            }
-        }
-
-        let deadline = Date().addingTimeInterval(min(max(timeout, 0.1), 30))
-        while process.isRunning, Date() < deadline { usleep(50_000) }
-        let timedOut = process.isRunning
-        if timedOut { process.terminate() }
-        process.waitUntilExit()
-        _ = drained.wait(timeout: .now() + 5)
-        let stderr = String(decoding: err.data, as: UTF8.self)
-        return Attempt(exitCode: timedOut ? nil : process.terminationStatus,
-                       stdout: out.data, stderr: stderr, timedOut: timedOut,
-                       outputTruncated: out.truncated || err.truncated)
-    }
-}
-
-private final class CommandDrain: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage = Data()
-    private(set) var truncated = false
-
-    var data: Data { lock.lock(); defer { lock.unlock() }; return storage }
-
-    func append(_ chunk: Data, limit: Int) {
-        lock.lock(); defer { lock.unlock() }
-        let room = max(0, limit - storage.count)
-        if room > 0 { storage.append(chunk.prefix(room)) }
-        if chunk.count > room { truncated = true }
+        _ = sem.wait(timeout: .now() + timeout + 5)
+        return result
     }
 }

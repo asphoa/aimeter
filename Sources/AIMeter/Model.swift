@@ -89,36 +89,32 @@ extension Provider {
     func fetchAll() async -> [Reading] { await fetchAll(manual: false) }
 }
 
-/// Races an async read against a deadline so one stuck endpoint (or a keychain
-/// dialog nobody clicks) cannot freeze the whole refresh.
-func withTimeout(_ seconds: Double,
-                 _ operation: @escaping @Sendable () async -> Reading,
-                 onTimeout: @escaping @Sendable () -> Reading) async -> Reading {
-    // Do not use a task group for this race.  Cancelling a child task does not
-    // make a structured task group return: its scope still waits for every
-    // child to finish.  A keychain prompt, or a transport which ignores
-    // cancellation, would therefore turn a supposed timeout into an infinite
-    // wait.  The detached operation may finish later, but the one-shot gate
-    // makes it unable to alter the already returned reading.
-    final class Gate: @unchecked Sendable {
-        private let lock = NSLock()
-        private var won = false
-        func claim() -> Bool {
-            lock.lock(); defer { lock.unlock() }
-            guard !won else { return false }
-            won = true
-            return true
-        }
+/// Races an async operation against a deadline. On timeout the inner task is
+/// cancelled; the caller returns immediately without waiting for the slow work.
+private final class TimeoutGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var won = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !won else { return false }
+        won = true
+        return true
     }
-    let gate = Gate()
-    return await withCheckedContinuation { continuation in
-        let work = Task.detached(priority: .utility) {
+}
+
+func withTimeout<T: Sendable>(_ seconds: Double,
+                            _ operation: @escaping @Sendable () async -> T,
+                            onTimeout: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { continuation in
+        let gate = TimeoutGate()
+        let work = Task {
             let result = await operation()
-            if gate.claim() { continuation.resume(returning: result) }
-        }
-        Task.detached(priority: .utility) {
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             guard !Task.isCancelled, gate.claim() else { return }
+            continuation.resume(returning: result)
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            guard gate.claim() else { return }
             work.cancel()
             continuation.resume(returning: onTimeout())
         }
@@ -262,27 +258,51 @@ enum RateLimit {
     private static var until: [String: Date] = [:]
     private static let lock = NSLock()
 
-    /// Records that automatic refreshes for `id` should pause until `until`.
-    static func mark(id: String, until: Date) {
-        lock.lock(); defer { lock.unlock() }
-        RateLimit.until[id] = until
+    static func key(host: String, account: String) -> String {
+        host.lowercased() + "\u{1}" + account
     }
 
-    /// True when an automatic refresh should skip this provider.
-    static func shouldSkip(id: String, now: Date = Date()) -> Bool {
+    /// Records that refreshes for this endpoint/account should pause until `until`.
+    static func mark(host: String, account: String, until: Date) {
         lock.lock(); defer { lock.unlock() }
-        guard let until = RateLimit.until[id] else { return false }
+        let k = key(host: host, account: account)
+        if let existing = RateLimit.until[k] {
+            RateLimit.until[k] = max(existing, until)
+        } else {
+            RateLimit.until[k] = until
+        }
+    }
+
+    /// Legacy provider-id keyed mark (Claude 429 path).
+    static func mark(id: String, until: Date) {
+        mark(host: id, account: "*", until: until)
+    }
+
+    /// True when an automatic refresh should skip this endpoint/account.
+    static func shouldSkip(host: String, account: String,
+                           reason: RefreshReason = .timer,
+                           now: Date = Date()) -> Bool {
+        if reason == .manual { return false }
+        lock.lock(); defer { lock.unlock() }
+        let k = key(host: host, account: account)
+        guard let until = RateLimit.until[k] else { return false }
         if now >= until {
-            RateLimit.until[id] = nil
+            RateLimit.until[k] = nil
             return false
         }
         return true
     }
 
-    /// Parses a `Retry-After` header value (seconds or HTTP-date). Default 300 s, cap 3600 s.
+    /// True when an automatic refresh should skip this provider (any account).
+    static func shouldSkip(id: String, now: Date = Date()) -> Bool {
+        shouldSkip(host: id, account: "*", reason: .timer, now: now)
+    }
+
+    /// Parses a `Retry-After` header value (seconds or HTTP-date). Default 300 s,
+    /// cap 24 h.
     static func retryAfter(header: String?, now: Date = Date()) -> TimeInterval {
         let defaultSeconds: TimeInterval = 300
-        let cap: TimeInterval = 3600
+        let cap: TimeInterval = 86_400
         guard let header = header?.trimmingCharacters(in: .whitespacesAndNewlines), !header.isEmpty else {
             return defaultSeconds
         }
@@ -297,6 +317,11 @@ enum RateLimit {
             return min(max(date.timeIntervalSince(now), 0), cap)
         }
         return defaultSeconds
+    }
+
+    static func resetForTests() {
+        lock.lock(); defer { lock.unlock() }
+        until = [:]
     }
 }
 

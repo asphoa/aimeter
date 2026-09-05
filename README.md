@@ -1,5 +1,10 @@
 # AIMeter
 
+v1.0.34 centralises configuration in `ConfigStore`, routes refreshes through
+`RefreshCoordinator` (per-account slots, manual coalescing, generation checks),
+and runs subprocesses via `ProcessRunner` (monotonic deadlines, SIGTERM→SIGKILL,
+output caps). See `VERSION`.
+
 A macOS menu bar app that shows how much of each AI service you have left —
 Claude Code, Codex, Antigravity, OpenRouter, DeepSeek, and whatever is loaded
 into local inference right now — as a two-ring icon you can read without
