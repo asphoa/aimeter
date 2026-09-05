@@ -2127,6 +2127,199 @@ func testPanelHeightClampsToScreen() {
     T.eq("panel height keeps a 120pt minimum", panelHeight(content: 0, chrome: 0, screenLimit: 800), 120)
 }
 
+func testPanelHeightNewPageNotInflatedByPreviousPageMax() {
+    // After a page change, measured content must reflect the new page (400), not
+    // the old page's max (900). panelHeight with the reset values must not clip
+    // to screenLimit when content+chrome fits.
+    T.eq("new page 400+chrome stays below 880 limit",
+         panelHeight(content: 400, chrome: 90, screenLimit: 880), 490)
+    T.check("old page 900 would wrongly hit the 880 cap",
+            panelHeight(content: 900, chrome: 90, screenLimit: 880) == 880)
+}
+
+// MARK: - Reading.merge: rate-limit warn keeps previous gauges (v1.0.32)
+
+func testReadingMergeUsesNextWhenNextHasGauges() {
+    let previous = Reading(id: "claude", title: "Claude",
+                           gauges: [Gauge(label: "5h", percent: 10, text: "10%")])
+    var next = Reading(id: "claude", title: "Claude",
+                       gauges: [Gauge(label: "5h", percent: 80, text: "80%")])
+    next.state = .ok
+    let merged = Reading.merge(previous: previous, next: next)
+    T.eq("next with gauges replaces wholesale", merged.gauges.first?.percent, 80)
+}
+
+func testReadingMergeKeepsGaugesOnWarnWithoutGauges() {
+    let previous = Reading(id: "claude", title: "Claude",
+                           gauges: [Gauge(label: "5h", percent: 10, text: "10%")])
+    let next = Reading(id: "claude", title: "Claude",
+                       lines: [L.t("c.ratelimited", "5 m")], state: .warn)
+    let merged = Reading.merge(previous: previous, next: next)
+    T.eq("warn without gauges keeps previous percent", merged.gauges.first?.percent, 10)
+    T.eq("warn without gauges takes next state", merged.state, .warn)
+    T.eq("warn without gauges takes next lines", merged.lines.first, L.t("c.ratelimited", "5 m"))
+}
+
+func testReadingMergeUsesNextOnFailure() {
+    let previous = Reading(id: "claude", title: "Claude",
+                           gauges: [Gauge(label: "5h", percent: 10, text: "10%")])
+    let next = Reading.failed("claude", "Claude", nil, "HTTP 500")
+    let merged = Reading.merge(previous: previous, next: next)
+    T.check("failure replaces even when previous had gauges", merged.gauges.isEmpty)
+    T.eq("failure state is visible", merged.state, .failure)
+}
+
+// MARK: - RateLimit: 429 backoff (v1.0.32)
+
+func testRateLimitShouldSkip() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    RateLimit.mark(id: "test-skip", until: now.addingTimeInterval(120))
+    T.check("skip while before until", RateLimit.shouldSkip(id: "test-skip", now: now))
+    T.check("no skip once until passed",
+            !RateLimit.shouldSkip(id: "test-skip", now: now.addingTimeInterval(121)))
+}
+
+func testRateLimitRetryAfter() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    T.near("integer seconds", RateLimit.retryAfter(header: "120", now: now), 120, tol: 0.001)
+    T.near("missing header defaults to 300", RateLimit.retryAfter(header: nil, now: now), 300, tol: 0.001)
+    T.near("empty header defaults to 300", RateLimit.retryAfter(header: "  ", now: now), 300, tol: 0.001)
+    T.eq("oversized value capped at 3600", RateLimit.retryAfter(header: "99999", now: now), 3600)
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+    let httpDate = formatter.string(from: now.addingTimeInterval(120))
+    T.near("HTTP-date header", RateLimit.retryAfter(header: httpDate, now: now), 120, tol: 1)
+}
+
+// MARK: - AgyProvider.mergePrintAndFallback (v1.0.32)
+
+private func agyPrintReading(snapshotAt: Date) -> Reading {
+    var r = Reading(id: "agy", title: "Antigravity", account: "test")
+    r.gauges = [
+        Gauge(label: "Gemini 5h", percent: 3, text: "3%", kind: .shortWindow),
+        Gauge(label: "Gemini week", percent: 7, text: "7%", kind: .longWindow),
+        Gauge(label: "Claude 5h", percent: 0, text: "0%", kind: .other),
+        Gauge(label: "Claude week", percent: 0, text: "0%", kind: .other)
+    ]
+    r.snapshotAt = snapshotAt
+    r.source = "print"
+    return r
+}
+
+private func agySilentLogReading() -> Reading {
+    var r = Reading(id: "agy", title: "Antigravity", account: "test",
+                    lines: [L.t("a.silent"), L.t("a.silent2")])
+    r.source = "log"
+    return r
+}
+
+func testAgyMergePrintFreshBeatsSilentLog() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let print = agyPrintReading(snapshotAt: now.addingTimeInterval(-300))
+    let log = agySilentLogReading()
+    let merged = AgyProvider.mergePrintAndFallback(print: print, fallback: log,
+                                                   printInterval: 3600, now: now)
+    T.eq("fresh print keeps four gauges", merged.gauges.count, 4)
+    T.eq("fresh print wins over silent log", merged.source, "print")
+}
+
+func testAgyMergeStalePrintYieldsLogWithNote() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let print = agyPrintReading(snapshotAt: now.addingTimeInterval(-3 * 3600))
+    var log = Reading(id: "agy", title: "Antigravity", account: "test")
+    log.gauges = [Gauge(label: L.t("g.quota"), percent: 42, text: "42%")]
+    log.source = "log"
+    let merged = AgyProvider.mergePrintAndFallback(print: print, fallback: log,
+                                                   printInterval: 3600, now: now)
+    T.eq("stale print yields log gauge", merged.gauges.first?.percent, 42)
+    T.eq("stale print adds from-log line", merged.lines.first,
+         L.t("a.fromlog", Fmt.relative(print.snapshotAt!)))
+}
+
+func testAgyMergeBothEmptyIsSilent() {
+    let log = agySilentLogReading()
+    let merged = AgyProvider.mergePrintAndFallback(print: nil, fallback: log,
+                                                   printInterval: 3600)
+    T.check("no gauges -> silent message", merged.gauges.isEmpty)
+    T.eq("silent line preserved", merged.lines.first, L.t("a.silent"))
+}
+
+// MARK: - AgyProvider.fetch end-to-end (v1.0.32)
+
+private func agyFetchFixtureDirs() -> (config: String, home: String) {
+    let base = NSTemporaryDirectory() + "aimeter-agy-fetch-\(UUID().uuidString)"
+    let config = base + "/config"
+    let home = base + "/home"
+    let cliDir = home + "/.gemini/antigravity-cli"
+    try? FileManager.default.createDirectory(atPath: cliDir, withIntermediateDirectories: true)
+    try? FileManager.default.createDirectory(atPath: config, withIntermediateDirectories: true)
+    return (config, home)
+}
+
+private func agyFetchProvider(config: String, home: String) -> AgyProvider {
+    var cfg = Config()
+    cfg.accounts = ["agy": [AccountSpec(name: "test", home: home)]]
+    cfg.agyQuotaViaPrint = false
+    cfg.agyQuotaViaTUI = false
+    cfg.intervals = ["agy": 3600]
+    return AgyProvider(cfg: cfg, files: AgyFileLocations(configDir: config))
+}
+
+private func agyFetchAwait(_ provider: AgyProvider, manual: Bool) -> Reading? {
+    var readings: [Reading] = []
+    let sem = DispatchSemaphore(value: 0)
+    Task { readings = await provider.fetchAll(manual: manual); sem.signal() }
+    sem.wait()
+    return readings.first
+}
+
+private func agyWriteSnapshot(at path: String, mtime: Date) {
+    try? Data(agyUsageFixture.utf8).write(to: URL(fileURLWithPath: path))
+    try? FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: path)
+}
+
+func testAgyFetchPausedWithFreshSnapshotShowsGauges() {
+    let dirs = agyFetchFixtureDirs()
+    defer { try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent) }
+    let now = Date()
+    agyWriteSnapshot(at: dirs.config + "/agy-print-last.json", mtime: now.addingTimeInterval(-300))
+    writePrivate(Data(), to: dirs.config + "/agy-print-paused-test.marker")
+    let reading = agyFetchAwait(agyFetchProvider(config: dirs.config, home: dirs.home), manual: false)
+    guard let r = reading else { T.check("paused+fresh snapshot yields a reading", false); return }
+    T.eq("paused+fresh snapshot keeps four gauges", r.gauges.count, 4)
+    T.check("paused+fresh snapshot is not failure", r.state != .failure)
+    T.eq("paused+fresh snapshot notes pause", r.lines.first,
+         L.t("a.paused.cached", Fmt.relative(r.snapshotAt!)))
+}
+
+func testAgyFetchPausedWithoutSnapshotFails() {
+    let dirs = agyFetchFixtureDirs()
+    defer { try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent) }
+    writePrivate(Data(), to: dirs.config + "/agy-print-paused-test.marker")
+    let reading = agyFetchAwait(agyFetchProvider(config: dirs.config, home: dirs.home), manual: false)
+    guard let r = reading else { T.check("paused+no snapshot yields a reading", false); return }
+    T.eq("paused+no snapshot is failure", r.state, .failure)
+    T.eq("paused+no snapshot message", r.lines.first, L.t("a.print.paused"))
+}
+
+func testAgyFetchStaleSnapshotFallsBackToLog() {
+    let dirs = agyFetchFixtureDirs()
+    defer { try? FileManager.default.removeItem(atPath: (dirs.config as NSString).deletingLastPathComponent) }
+    let now = Date()
+    agyWriteSnapshot(at: dirs.config + "/agy-print-last.json", mtime: now.addingTimeInterval(-3 * 3600))
+    let logPath = dirs.home + "/.gemini/antigravity-cli/cli.log"
+    let logLine = "INFO retrieveUserQuotaSummary ok quota 42% left\n"
+    try? Data(logLine.utf8).write(to: URL(fileURLWithPath: logPath))
+    try? FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: logPath)
+    let reading = agyFetchAwait(agyFetchProvider(config: dirs.config, home: dirs.home), manual: false)
+    guard let r = reading else { T.check("stale snapshot+log yields a reading", false); return }
+    T.eq("stale snapshot+log uses log percent", r.gauges.first?.percent, 42)
+    T.eq("stale snapshot+log notes from-log", r.lines.first,
+         L.t("a.fromlog", Fmt.relative(now.addingTimeInterval(-3 * 3600))))
+}
+
 func testExpandedDefaultsToPrimary() {
     let oldJSON = Data(#"{"menuBar":{"primary":"codex"}}"#.utf8)
     let explicitJSON = Data(#"{"menuBar":{"primary":"codex","expanded":["claude","deepseek"]}}"#.utf8)
@@ -2510,6 +2703,18 @@ struct Runner {
         testCursorProviderHasNoGaugesAndTheLinkLine()
         testResolveStripLineYieldsNoStripLineForAGaugelessCursorReading()
         testPanelHeightClampsToScreen()
+        testPanelHeightNewPageNotInflatedByPreviousPageMax()
+        testReadingMergeUsesNextWhenNextHasGauges()
+        testReadingMergeKeepsGaugesOnWarnWithoutGauges()
+        testReadingMergeUsesNextOnFailure()
+        testRateLimitShouldSkip()
+        testRateLimitRetryAfter()
+        testAgyMergePrintFreshBeatsSilentLog()
+        testAgyMergeStalePrintYieldsLogWithNote()
+        testAgyMergeBothEmptyIsSilent()
+        testAgyFetchPausedWithFreshSnapshotShowsGauges()
+        testAgyFetchPausedWithoutSnapshotFails()
+        testAgyFetchStaleSnapshotFallsBackToLog()
         testExpandedDefaultsToPrimary()
         testCardOrderPrimaryFirst()
         testHeroPicksShortWindowFirst()

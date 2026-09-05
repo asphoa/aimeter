@@ -108,7 +108,10 @@ final class CardPanelController: NSObject, NSWindowDelegate {
         guard let p = panel, let anchor = anchorFrame else { return }
         let frame = NSRect(x: anchor.maxX - width, y: anchor.minY - 8 - height,
                            width: width, height: height)
-        hosting?.layoutSubtreeIfNeeded()
+        if let hosting {
+            hosting.needsLayout = true
+            hosting.layoutSubtreeIfNeeded()
+        }
         if animated {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.18

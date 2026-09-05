@@ -81,6 +81,7 @@ private struct SettingsPageFrame<Content: View>: View {
                         Color.clear.preference(key: PanelContentHeightKey.self, value: geometry.size.height)
                     })
             }
+            .id(state.nav.stack.last.map { String(describing: $0) } ?? "settings")
             .scrollDisabled(contentHeight + chromeHeight <= state.screenLimit)
             VStack(spacing: 0) {
                 Divider()

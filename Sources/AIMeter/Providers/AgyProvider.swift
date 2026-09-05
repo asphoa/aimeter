@@ -13,12 +13,34 @@ import Foundation
 /// antigravity-oauth-token`, the file it read, does not exist - credentials
 /// live in the keychain) that was never reachable with its config flag at
 /// its default of off.
+
+/// On-disk paths for print-mode pause markers and the last snapshot. Injectable
+/// so tests can use a temp directory instead of `~/.config/aimeter/`.
+struct AgyFileLocations: Sendable {
+    let configDir: String
+
+    var snapshotPath: String { configDir + "/agy-print-last.json" }
+
+    func pauseMarkerPath(_ account: String) -> String {
+        let slug = String(account.unicodeScalars.map {
+            CharacterSet.alphanumerics.contains($0) ? Character($0) : "_"
+        })
+        return configDir + "/agy-print-paused-" + slug + ".marker"
+    }
+
+    static let `default` = AgyFileLocations(configDir: Config.dir)
+}
+
 final class AgyProvider: Provider, @unchecked Sendable {
     let id = "agy"
     var title: String { L.t("p.agy") }
     private let cfg: Config
+    private let files: AgyFileLocations
 
-    init(cfg: Config) { self.cfg = cfg }
+    init(cfg: Config, files: AgyFileLocations = .default) {
+        self.cfg = cfg
+        self.files = files
+    }
 
     func fetchAll(manual: Bool) async -> [Reading] {
         let accounts = cfg.accounts(id, fallback: Discovery.agy())
@@ -30,7 +52,7 @@ final class AgyProvider: Provider, @unchecked Sendable {
 
     private func fetch(_ a: AccountSpec, manual: Bool) async -> Reading {
         let dir = expand(a.home ?? "~") + "/.gemini/antigravity-cli"
-        let marker = AgyProvider.pauseMarkerPath(a.name)
+        let marker = files.pauseMarkerPath(a.name)
         var paused = FileManager.default.fileExists(atPath: marker)
 
         // print-mode is attempted on a timer as well as by hand - the whole
@@ -40,32 +62,53 @@ final class AgyProvider: Provider, @unchecked Sendable {
         // exactly the escape hatch a pause exists to wait for.
         let approvedBinary = AgyTUI.binary(cfg.agyBinary.isEmpty ? nil : cfg.agyBinary)
         let skipForConcurrency = !manual && approvedBinary.map(CommandRun.isRunning(binary:)) == true
+        var livePrint: Reading?
         if cfg.agyQuotaViaPrint, manual || !paused, !skipForConcurrency,
            let bin = approvedBinary,
            let home = trustedHome(a.home ?? "~", marker: ".gemini/antigravity-cli") {
             if let reading = await printQuota(binary: bin, home: home, account: a.name) {
-                AgyProvider.clearPause(a.name)
-                return reading
+                clearPause(a.name)
+                livePrint = reading
+            } else {
+                // Any of rc≠0, status != "SUCCESS", or a 403/PERMISSION_DENIED
+                // in this run's own stderr counts as a refusal or a failure,
+                // and either way this project's rule is that a failure must be
+                // visible rather than quietly retried forever - so future
+                // scheduled checks stop asking until a person presses "Check
+                // now" again. See `refused` for why this checks only stderr,
+                // not the CLI's log file.
+                markPaused(a.name)
+                paused = true
             }
-            // Any of rc≠0, status != "SUCCESS", or a 403/PERMISSION_DENIED
-            // in this run's own stderr counts as a refusal or a failure,
-            // and either way this project's rule is that a failure must be
-            // visible rather than quietly retried forever - so future
-            // scheduled checks stop asking until a person presses "Check
-            // now" again. See `refused` for why this checks only stderr,
-            // not the CLI's log file.
-            AgyProvider.markPaused(a.name)
-            paused = true
         }
 
-        if paused, !manual { return .failed(id, title, a.name, L.t("a.print.paused")) }
-
+        var tuiReading: Reading?
         if manual, cfg.agyQuotaViaTUI,
            let home = trustedHome(a.home ?? "~", marker: ".gemini/antigravity-cli"),
            let panel = await tuiQuota(home: home, account: a.name) {
-            return panel
+            tuiReading = panel
         }
-        return fromLog(dir: dir, account: a.name)
+
+        let logReading = fromLog(dir: dir, account: a.name)
+        let cachedPrint = cachedPrintSnapshot(account: a.name)
+        let printCandidate = livePrint ?? cachedPrint
+        let fallback = tuiReading ?? logReading
+        let printInterval = TimeInterval(cfg.interval(id))
+
+        if paused, !manual {
+            if let print = printCandidate,
+               AgyProvider.printSnapshotIsFresh(print, printInterval: printInterval) {
+                var out = print
+                if let snap = print.snapshotAt {
+                    out.lines.insert(L.t("a.paused.cached", Fmt.relative(snap)), at: 0)
+                }
+                return out
+            }
+            return .failed(id, title, a.name, L.t("a.print.paused"))
+        }
+
+        return AgyProvider.mergePrintAndFallback(print: printCandidate, fallback: fallback,
+                                                 printInterval: printInterval)
     }
 
     /// Drives `agy -p "/usage" --output-format json` and turns a successful
@@ -83,7 +126,21 @@ final class AgyProvider: Provider, @unchecked Sendable {
         guard !AgyProvider.refused(attempt.stderr) else { return nil }
         guard let result = AgyPrint.parse(attempt.stdout) else { return nil }
 
-        var r = Reading(id: id, title: title, account: result.account ?? account)
+        var r = reading(from: result, account: result.account ?? account)
+        guard !r.gauges.isEmpty else { return nil }
+        // Fetched fresh this refresh, but not re-checked until the next one
+        // - the same reasoning as tuiQuota's snapshotAt, so a window that
+        // rolls over between two hourly checks is withdrawn by Reading.asOf
+        // rather than shown stale.
+        r.snapshotAt = Date()
+        r.source = "print"
+        r.state = worstState(r.gauges)
+        return r
+    }
+
+    /// Builds a reading from parsed print-mode groups.
+    private func reading(from result: AgyTUI.Result, account: String) -> Reading {
+        var r = Reading(id: id, title: title, account: account)
         for group in result.groups {
             let isGemini = AgyProvider.isGeminiGroup(group.name)
             let key = isGemini ? "g.gemini" : "g.claudegpt"
@@ -100,14 +157,51 @@ final class AgyProvider: Provider, @unchecked Sendable {
                                       kind: isGemini ? .longWindow : .other))
             }
         }
+        return r
+    }
+
+    /// Reads the last on-disk print-mode snapshot written by `AgyPrint.attempt`.
+    func cachedPrintSnapshot(account: String) -> Reading? {
+        let path = files.snapshotPath
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let result = AgyPrint.parse(data), !result.groups.isEmpty else { return nil }
+        var r = reading(from: result, account: result.account ?? account)
         guard !r.gauges.isEmpty else { return nil }
-        // Fetched fresh this refresh, but not re-checked until the next one
-        // - the same reasoning as tuiQuota's snapshotAt, so a window that
-        // rolls over between two hourly checks is withdrawn by Reading.asOf
-        // rather than shown stale.
-        r.snapshotAt = Date()
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        r.snapshotAt = mtime ?? Date()
+        r.source = "print"
         r.state = worstState(r.gauges)
         return r
+    }
+
+    /// Whether a print snapshot still counts as authoritative for display.
+    static func printSnapshotIsFresh(_ print: Reading?, printInterval: TimeInterval,
+                                     grace: TimeInterval = 600, now: Date = Date()) -> Bool {
+        guard let print, !print.gauges.isEmpty, let snap = print.snapshotAt else { return false }
+        return now.timeIntervalSince(snap) <= printInterval + grace
+    }
+
+    /// Picks print-mode gauges over log/TUI fallbacks when the print snapshot is
+    /// still within `printInterval` plus a ten-minute grace. Log/TUI readings
+    /// never replace a fresher print snapshot.
+    static func mergePrintAndFallback(print: Reading?, fallback: Reading,
+                                      printInterval: TimeInterval,
+                                      grace: TimeInterval = 600,
+                                      now: Date = Date()) -> Reading {
+        if let print, printSnapshotIsFresh(print, printInterval: printInterval,
+                                           grace: grace, now: now) {
+            return print
+        }
+        if let print, !print.gauges.isEmpty, let snap = print.snapshotAt {
+            if !fallback.gauges.isEmpty {
+                var out = fallback
+                out.lines.insert(L.t("a.fromlog", Fmt.relative(snap)), at: 0)
+                return out
+            }
+            return print
+        }
+        if !fallback.gauges.isEmpty { return fallback }
+        return fallback
     }
 
     /// A permission refusal shows up in the run's own stderr as
@@ -145,19 +239,12 @@ final class AgyProvider: Provider, @unchecked Sendable {
     // a pause the moment either happened. The file carries no data worth
     // reading - its existence is the whole signal - so it is written empty.
 
-    private static func pauseMarkerPath(_ account: String) -> String {
-        let slug = String(account.unicodeScalars.map {
-            CharacterSet.alphanumerics.contains($0) ? Character($0) : "_"
-        })
-        return Config.dir + "/agy-print-paused-" + slug + ".marker"
+    private func markPaused(_ account: String) {
+        writePrivate(Data(), to: files.pauseMarkerPath(account))
     }
 
-    private static func markPaused(_ account: String) {
-        writePrivate(Data(), to: pauseMarkerPath(account))
-    }
-
-    private static func clearPause(_ account: String) {
-        try? FileManager.default.removeItem(atPath: pauseMarkerPath(account))
+    private func clearPause(_ account: String) {
+        try? FileManager.default.removeItem(atPath: files.pauseMarkerPath(account))
     }
 
     // MARK: - manual-only fallback: the pty screen-scrape
@@ -176,26 +263,12 @@ final class AgyProvider: Provider, @unchecked Sendable {
             return .failed(id, title, account, L.t("a.tui.fail"))
         }
 
-        var r = Reading(id: id, title: title, account: result.account ?? account)
-        for group in result.groups {
-            let isGemini = AgyProvider.isGeminiGroup(group.name)
-            let key = isGemini ? "g.gemini" : "g.claudegpt"
-            if let used = group.fiveHourUsed {
-                r.gauges.append(Gauge(label: L.t(key, L.t("g.5h.short")), percent: used,
-                                      text: String(format: "%.0f%%", used), resetsAt: nil,
-                                      kind: isGemini ? .shortWindow : .other))
-            }
-            if let used = group.weeklyUsed {
-                r.gauges.append(Gauge(label: L.t(key, L.t("g.week.short")), percent: used,
-                                      text: String(format: "%.0f%%", used),
-                                      resetsAt: group.weeklyResets,
-                                      kind: isGemini ? .longWindow : .other))
-            }
-        }
+        var r = reading(from: result, account: result.account ?? account)
         guard !r.gauges.isEmpty else { return .failed(id, title, account, L.t("a.tui.fail")) }
         // Nothing refreshes this on its own, so it must carry its age: an hour
         // later it is still the last thing anyone measured, not the current one.
         r.snapshotAt = Date()
+        r.source = "tui"
         r.state = worstState(r.gauges)
         return r
     }
@@ -213,6 +286,7 @@ final class AgyProvider: Provider, @unchecked Sendable {
 
         var r = Reading(id: id, title: title, account: account)
         r.snapshotAt = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date ?? Date()
+        r.source = "log"
 
         if line.contains("PERMISSION_DENIED") || line.contains("403") {
             r.state = .failure

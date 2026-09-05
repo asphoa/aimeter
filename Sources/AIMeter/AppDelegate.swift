@@ -221,6 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let due = providers.filter { p in
             let secs = cfg.interval(p.id)
             guard secs > 0 else { return false }
+            if RateLimit.shouldSkip(id: p.id) { return false }
             guard let last = lastFetched[p.id] else { return true }
             return now.timeIntervalSince(last) >= Double(secs)
         }
@@ -240,9 +241,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     group.addTask { (p.id, await p.fetchAll(manual: manual)) }
                 }
                 for await (pid, rs) in group {
-                    self.readings[pid] = rs
+                    let merged = rs.map { new in
+                        let prev = self.readings[pid]?.first {
+                            $0.account == new.account
+                        }
+                        return Reading.merge(previous: prev, next: new)
+                    }
+                    self.readings[pid] = merged
                     self.lastFetched[pid] = Date()
-                    History.record(rs)
+                    History.record(merged)
                 }
             }
             ReadingsBox.shared.current = self.readings

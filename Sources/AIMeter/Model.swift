@@ -31,6 +31,23 @@ struct Reading: Sendable {
     var state: ReadingState = .ok
     var snapshotAt: Date?     // set when the number is a cached snapshot, not live
     var fetchedAt: Date = Date()
+    /// Where the gauges came from: `"print"`, `"log"`, `"tui"`, or nil for live API reads.
+    var source: String? = nil
+
+    /// Merges a fresh fetch with the previous reading for the same account.
+    /// A `.warn` reading without gauges keeps the previous gauges (rate-limit path);
+    /// a `.failure` or a reading that already has gauges replaces wholesale.
+    static func merge(previous: Reading?, next: Reading) -> Reading {
+        guard let previous, previous.id == next.id, previous.account == next.account else {
+            return next
+        }
+        if next.state == .failure { return next }
+        if !next.gauges.isEmpty { return next }
+        guard next.state == .warn, !previous.gauges.isEmpty else { return next }
+        var merged = next
+        merged.gauges = previous.gauges
+        return merged
+    }
 }
 
 protocol Provider: AnyObject, Sendable {
@@ -170,8 +187,6 @@ extension Reading {
     }
 }
 
-// MARK: - small shared helpers
-
 enum Fmt {
     /// Just the magnitude ("4h 51m"), no "in"/"ago" direction word - for a
     /// caller that supplies its own directional template (the panel's
@@ -215,6 +230,50 @@ enum Fmt {
 
     static func gb(_ bytes: Double) -> String {
         String(format: "%.1f GB", bytes / 1_073_741_824)
+    }
+}
+
+// MARK: - HTTP 429 backoff
+
+enum RateLimit {
+    private static var until: [String: Date] = [:]
+    private static let lock = NSLock()
+
+    /// Records that automatic refreshes for `id` should pause until `until`.
+    static func mark(id: String, until: Date) {
+        lock.lock(); defer { lock.unlock() }
+        RateLimit.until[id] = until
+    }
+
+    /// True when an automatic refresh should skip this provider.
+    static func shouldSkip(id: String, now: Date = Date()) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let until = RateLimit.until[id] else { return false }
+        if now >= until {
+            RateLimit.until[id] = nil
+            return false
+        }
+        return true
+    }
+
+    /// Parses a `Retry-After` header value (seconds or HTTP-date). Default 300 s, cap 3600 s.
+    static func retryAfter(header: String?, now: Date = Date()) -> TimeInterval {
+        let defaultSeconds: TimeInterval = 300
+        let cap: TimeInterval = 3600
+        guard let header = header?.trimmingCharacters(in: .whitespacesAndNewlines), !header.isEmpty else {
+            return defaultSeconds
+        }
+        if let seconds = Double(header), seconds.isFinite, seconds >= 0 {
+            return min(seconds, cap)
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        if let date = formatter.date(from: header) {
+            return min(max(date.timeIntervalSince(now), 0), cap)
+        }
+        return defaultSeconds
     }
 }
 

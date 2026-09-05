@@ -96,6 +96,10 @@ struct PanelView: View {
             measuredChromeHeight = $0
             reportHeight()
         }
+        .onChange(of: nav.stack) { _, _ in
+            measuredContentHeight = 0
+            measuredChromeHeight = 0
+        }
         .onChange(of: state.screenLimit) { _, _ in reportHeight() }
         .onExitCommand(perform: handleEscape)
     }
@@ -133,6 +137,7 @@ struct PanelView: View {
                     Color.clear.preference(key: PanelContentHeightKey.self, value: geometry.size.height)
                 })
             }
+            .id(nav.stack.last.map { String(describing: $0) } ?? "usage")
             .scrollDisabled(measuredContentHeight + measuredChromeHeight <= state.screenLimit)
             footer
                 .background(GeometryReader { geometry in

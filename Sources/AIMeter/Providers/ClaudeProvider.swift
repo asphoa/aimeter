@@ -137,6 +137,15 @@ final class ClaudeProvider: Provider, @unchecked Sendable {
             }
             return refused(account, Credential.expiry(account))
         }
+        if http.statusCode == 429 {
+            let seconds = RateLimit.retryAfter(header: http.value(forHTTPHeaderField: "Retry-After"))
+            let until = Date().addingTimeInterval(seconds)
+            RateLimit.mark(id: id, until: until)
+            var r = Reading(id: id, title: title, account: account.name,
+                            lines: [L.t("c.ratelimited", Fmt.relative(until))], state: .warn)
+            r.snapshotAt = Date()
+            return r
+        }
         if http.statusCode != 200 {
             let msg = findString(in: obj, names: ["message"]) ?? L.t("c.noheaders")
             return .failed(id, title, account.name, L.t("e.http2", "\(http.statusCode)", msg))
